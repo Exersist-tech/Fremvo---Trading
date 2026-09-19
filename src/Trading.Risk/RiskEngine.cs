@@ -160,7 +160,9 @@ public sealed class RiskEngine
         TradingModeFlags? tradingMode = null,
         HaltSwitch? haltSwitch = null,
         StalenessPolicy? stalenessPolicy = null,
-        RiskLimitHierarchy? riskLimitHierarchy = null)
+        RiskLimitHierarchy? riskLimitHierarchy = null,
+        DateTimeOffset? lastDataUpdateUtc = null,
+        DateTimeOffset? nowUtc = null)
     {
         var active = new List<RiskLimit>();
 
@@ -180,7 +182,13 @@ public sealed class RiskEngine
             return new RiskEvaluationResult(false, "Trading is currently halted.", active);
         }
 
-        if (dataIsStale || (stalenessPolicy != null && stalenessPolicy.RequiresFreshData))
+        // Evaluate the policy against the actual data age. A missing timestamp is treated as
+        // stale by StalenessPolicy, so the fail-safe is to block rather than to trade blind.
+        var effectiveDataIsStale = dataIsStale
+            || (stalenessPolicy is not null
+                && stalenessPolicy.IsStale(lastDataUpdateUtc, nowUtc ?? DateTimeOffset.UtcNow));
+
+        if (effectiveDataIsStale)
         {
             active.Add(new RiskLimit(RiskLimitType.MaxExposure, 0m, "Relevant market or account data is stale."));
             return new RiskEvaluationResult(false, "Market or account data is stale.", active);

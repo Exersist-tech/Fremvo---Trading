@@ -460,7 +460,8 @@
         "dependencies": {
           "Trading.Domain": "1.0.0",
           "Trading.Exchanges.Abstractions": "1.0.0",
-          "Trading.Infrastructure.Secrets": "1.0.0"
+          "Trading.Infrastructure.Secrets": "1.0.0",
+          "Trading.Risk": "1.0.0"
         },
         "runtime": {
           "Trading.Application.dll": {
@@ -515,6 +516,14 @@
         },
         "runtime": {
           "Trading.Optimization.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "Trading.Risk/1.0.0": {
+        "runtime": {
+          "Trading.Risk.dll": {
             "assemblyVersion": "1.0.0.0",
             "fileVersion": "1.0.0.0"
           }
@@ -803,6 +812,11 @@
       "sha512": ""
     },
     "Trading.Optimization/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Trading.Risk/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

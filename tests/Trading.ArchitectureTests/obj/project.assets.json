@@ -2688,7 +2688,8 @@
         "dependencies": {
           "Trading.Domain": "1.0.0",
           "Trading.Exchanges.Abstractions": "1.0.0",
-          "Trading.Infrastructure.Secrets": "1.0.0"
+          "Trading.Infrastructure.Secrets": "1.0.0",
+          "Trading.Risk": "1.0.0"
         },
         "compile": {
           "bin/placeholder/Trading.Application.dll": {}

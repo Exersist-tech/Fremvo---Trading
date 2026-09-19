@@ -1579,7 +1579,8 @@
         "dependencies": {
           "Trading.Domain": "1.0.0",
           "Trading.Exchanges.Abstractions": "1.0.0",
-          "Trading.Infrastructure.Secrets": "1.0.0"
+          "Trading.Infrastructure.Secrets": "1.0.0",
+          "Trading.Risk": "1.0.0"
         },
         "compile": {
           "bin/placeholder/Trading.Application.dll": {}
@@ -1616,6 +1617,16 @@
         },
         "runtime": {
           "bin/placeholder/Trading.Infrastructure.Secrets.dll": {}
+        }
+      },
+      "Trading.Risk/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "compile": {
+          "bin/placeholder/Trading.Risk.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Trading.Risk.dll": {}
         }
       }
     }
@@ -4296,6 +4307,11 @@
       "type": "project",
       "path": "../Trading.Infrastructure.Secrets/Trading.Infrastructure.Secrets.csproj",
       "msbuildProject": "../Trading.Infrastructure.Secrets/Trading.Infrastructure.Secrets.csproj"
+    },
+    "Trading.Risk/1.0.0": {
+      "type": "project",
+      "path": "../Trading.Risk/Trading.Risk.csproj",
+      "msbuildProject": "../Trading.Risk/Trading.Risk.csproj"
     }
   },
   "projectFileDependencyGroups": {
