@@ -64,6 +64,47 @@ source candles.
 - `ScanRequest` (universe of symbols, criteria set, schedule).
 - `ScanResult` (ranked candidates, evaluated-at UTC, criteria matched).
 
+The scanner may only consider instruments currently holding the
+`ResearchEligible` grant or above (see §5A).
+
+## 5A. Market universe & instrument eligibility
+
+Full detail: `docs/market-universe.md`.
+
+- `Instrument` — exchange-neutral instrument keyed on the exchange's own
+  symbol identifier plus base/quote asset codes, never a display name.
+- `AssetClass` (enum: `Cryptocurrency`, `Stablecoin`, `TokenizedEquity`,
+  `Fiat`, `LeveragedToken`, `Unknown`). Only `Cryptocurrency` may exceed
+  `Tracked`.
+- `InstrumentState` (enum: `Tracked`, `ResearchEligible`,
+  `BacktestEligible`, `PaperEligible`, `SpotTestEligible`,
+  `SpotLiveEligible`, `FuturesTestEligible`, `FuturesLiveEligible`,
+  `Suspended`, `Removed`). Every instrument begins as `Tracked` only.
+- `InstrumentEligibilityGrant` — eligibility is a function of
+  (instrument, purpose, timeframe, product type, trading mode), never a
+  single global boolean. Grants are strictly additive: a higher grant
+  cannot hold unless every lower grant currently holds.
+- `InstrumentMetrics` — rolling and **median** quote volume, minimum
+  volume, average and worst spread, estimated slippage per reference
+  order size, depth when available, trade frequency, data-gap count and
+  duration, stale-event count, listing age, current exchange status and
+  filter set, each with the UTC observation window. All `decimal`.
+- `EligibilityGate` (enum covering the twelve gates) and
+  `EligibilityEvaluation` — an explainable record of each gate's measured
+  value, threshold, and pass/fail result.
+- `IInstrumentCatalogueSource` — port returning the current neutral
+  instrument catalogue; the Binance implementation maps
+  exchange-information responses and keeps Binance DTOs in the connector.
+- `IInstrumentEligibilityEvaluator` — deterministic; identical inputs
+  produce an identical result and an identical explanation.
+
+Rules encoded in the domain: a single 24-hour volume reading can never
+grant eligibility; evidence older than the configured maximum age expires
+back to `Tracked`; degradation blocks new entries and exposure increases
+while preserving records and permitting validated reduction; recovery
+requires reconciliation; live grants require an explicit audited human
+approval.
+
 ## 6. Strategies
 
 - `StrategyTemplateId` — identifier of an approved, platform-authored
@@ -79,6 +120,33 @@ source candles.
   access, fully replayable.
 - `StrategyState` — strategy-owned, serializable state (e.g. indicator
   accumulators, position bias) scoped per experiment worker.
+
+### 6A. Strategy research families and approval
+
+Full detail: `docs/strategy-research-plan.md`.
+
+- Ten approved research families are defined. They are **falsifiable
+  research templates, not strategies expected to be profitable.**
+- `StrategyApprovalState` (enum: `Draft`, `BacktestApproved`,
+  `PaperApproved`, `SpotTestApproved`, `SpotLiveApproved`,
+  `FuturesTestApproved`, `FuturesLiveApproved`, `Suspended`,
+  `Deprecated`). **All strategies begin as `Draft`**; no transition is
+  automatic and each requires an audited human approver.
+- `StrategyApproval` — immutable, versioned; must specify supported pair
+  or instrument class, minimum history, minimum liquidity, maximum
+  spread, maximum estimated slippage, supported timeframes, product type,
+  and approved trading modes.
+- Timeframes are separated into **regime**, **signal**, and **execution**
+  intervals; decisions are produced only from closed candles.
+- `SessionProfile` — versioned, IANA time-zone based, storing the
+  time-zone database version. No hard-coded UTC hour for a named session.
+  A session filter modifies an existing strategy and never creates a
+  trade by itself; it is always compared against a no-session baseline.
+- `RegimeState` / `IRegimeClassifier` — simple, versioned, deterministic,
+  and restricted to information available at the event timestamp.
+- `IRejectionGate` — the rejection criteria that stop an overfit
+  configuration progressing. Selection by highest historical return is
+  forbidden by design.
 
 ## 7. Trading pipeline entities
 

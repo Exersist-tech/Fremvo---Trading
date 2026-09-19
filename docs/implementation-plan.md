@@ -176,6 +176,66 @@ Tasks:
 
 ---
 
+## Phase 3B — Market universe and instrument eligibility
+
+Full detail: `docs/market-universe.md`.
+
+1. **Purpose**: Decide which instruments may be used, for what purpose,
+   and in which trading mode — the gate in front of research, backtesting,
+   paper trading, and later execution.
+2. **Features**: Binance exchange-information catalogue sync; the 50-pair
+   USDT research seed (all `Tracked` only); asset classification and
+   permanent exclusions; instrument state model with ten states; per
+   purpose/timeframe/product/mode eligibility gates; rolling liquidity,
+   spread, slippage and data-health metrics; scheduled recalculation;
+   newly-listed restricted state; degradation behaviour.
+3. **Projects affected**: `Trading.Domain` (states, gates, metrics),
+   `Trading.MarketData`, `Trading.Exchanges.Binance` (catalogue mapping
+   only), `Trading.Infrastructure`, `Trading.Workers.MarketData`,
+   `Trading.Web`.
+4. **Main entities and interfaces**: `Instrument`, `InstrumentState`,
+   `InstrumentEligibilityGrant`, `AssetClass`, `InstrumentMetrics`,
+   `EligibilityGate`, `EligibilityEvaluation`,
+   `IInstrumentCatalogueSource`, `IInstrumentEligibilityEvaluator`,
+   `IInstrumentMetricsRepository`.
+5. **Database changes**: `Instruments`, `InstrumentSeed`,
+   `InstrumentMetrics`, `InstrumentEligibilityEvaluations`,
+   `InstrumentStateTransitions` (see `docs/database-plan.md` §4A).
+6. **Security considerations**: Catalogue sync is read-only public market
+   data and must use no API secret. Binance DTOs must not reach
+   `Trading.Domain`. Eligibility changes are audited. Only an
+   administrator may edit the seed or thresholds, and configured
+   thresholds may only be stricter than the platform floors.
+7. **Trading and financial risks**: An over-permissive gate is the most
+   likely route to trading an illiquid instrument. Single-reading volume
+   selection, stale evidence trusted as current, and silent dropping of a
+   missing symbol are the specific failure modes to prevent. Degradation
+   must block new entries and increases while still permitting validated
+   reduction, and must require reconciliation before recovery.
+8. **Required tests**: The 29 tests listed in `docs/market-universe.md`
+   §10.
+9. **Acceptance criteria**: `docs/market-universe.md` §11.
+10. **Dependencies on earlier phases**: Phase 3 (symbols, candles, data
+    quality). Phase 2 supplies the connector, but catalogue sync needs no
+    user credentials.
+11. **Explicitly excluded work**: Any order placement; Futures contract
+    eligibility beyond state definitions; automatic promotion to a live
+    grant; withdrawals (permanently excluded).
+
+Tasks:
+- 3B.1 `Instrument`, `InstrumentState`, `AssetClass` domain + exclusions.
+- 3B.2 Eligibility grant model (per purpose/timeframe/product/mode).
+- 3B.3 `EligibilityGate` evaluation engine + explainable evaluation record.
+- 3B.4 `InstrumentMetrics` rolling/median measurement model + repository.
+- 3B.5 Binance exchange-information catalogue source + neutral mapping.
+- 3B.6 50-pair seed as versioned configuration (all `Tracked` only).
+- 3B.7 Newly-listed restricted state + evidence-age expiry.
+- 3B.8 Degradation rules (block entries/increases, allow reduction).
+- 3B.9 Recalculation worker (scheduled + event-triggered).
+- 3B.10 Administrator instrument/eligibility UI with gate explanations.
+
+---
+
 ## Phase 4 — Automatic market scanner
 
 1. **Purpose**: Continuously screen a symbol universe against configured
@@ -252,6 +312,68 @@ Tasks:
 - 5.5 Backtest engine core loop (event-driven, closed-candle only).
 - 5.6 Fee model, slippage model, exchange filter application.
 - 5.7 Backtest result reporting + Blazor UI.
+
+---
+
+## Phase 5B — Ten approved research strategy families
+
+Full detail: `docs/strategy-research-plan.md`.
+
+1. **Purpose**: Define and implement the ten falsifiable research
+   templates, their approval lifecycle, and the rejection gates that stop
+   an overfit configuration from progressing.
+2. **Features**: Regime/signal/execution timeframe separation; versioned
+   `SessionProfile` using IANA identifiers; deterministic regime
+   classifier; strategy approval state machine; rejection gates;
+   instrument-and-timeframe approval requirements; ten-worker experiment
+   groups A/B/C.
+3. **Projects affected**: `Trading.Strategies`, `Trading.Indicators`,
+   `Trading.Backtesting`, `Trading.Application`, `Trading.Web`.
+4. **Main entities and interfaces**: `StrategyApproval`,
+   `StrategyApprovalState`, `StrategyVersion`, `SessionProfile`,
+   `RegimeState`, `IRegimeClassifier`, `IRejectionGate`,
+   `ExperimentGroup`.
+5. **Database changes**: `StrategyApprovals`, `StrategyVersions`,
+   `SessionProfiles`, `RegimeEvaluations`, `RejectionGateResults` (see
+   `docs/database-plan.md` §5A).
+6. **Security considerations**: Templates remain platform-authored; no
+   user code upload. Approval transitions require an audited human
+   approver and cannot be performed by an automated process.
+7. **Trading and financial risks**: The dominant risk is
+   optimization-selection bias — picking the highest-return worker.
+   Selection by total profit must be impossible by design. Mean reversion
+   must not permit unrestricted averaging down. Ensemble agreement must
+   not raise exposure above the platform maximum. No profit claims.
+8. **Required tests**: The 16 tests listed in
+   `docs/strategy-research-plan.md` §9.
+9. **Acceptance criteria**: `docs/strategy-research-plan.md` §10.
+10. **Dependencies on earlier phases**: Phase 3 (candles, indicators),
+    Phase 3B (instrument eligibility), Phase 5 (strategy contract,
+    backtest engine, cost models).
+11. **Explicitly excluded work**: Live or testnet order placement;
+    automatic approval promotion; withdrawals.
+
+Tasks:
+- 5B.1 Strategy approval state machine + versioned, immutable approvals.
+- 5B.2 Strategy approval requirements (instrument class, history,
+  liquidity, spread, slippage, timeframes, product type, modes).
+- 5B.3 Regime/signal/execution timeframe separation in the strategy
+  contract.
+- 5B.4 Rejection-gate engine (§2.3) with a recorded result per gate.
+- 5B.5 Family 1 — multi-timeframe EMA trend continuation.
+- 5B.6 Family 2 — Donchian breakout ensemble.
+- 5B.7 Family 3 — Bollinger mean reversion with ranging-regime filter.
+- 5B.8 Family 4 — RSI pullback within a higher-timeframe trend.
+- 5B.9 Family 5 — MACD and volume-confirmed trend acceleration.
+- 5B.10 Family 6 — volatility-compression breakout.
+- 5B.11 Family 7 — cross-sectional momentum rotation (survivorship-aware).
+- 5B.12 Family 8 — relative-strength pullback rotation.
+- 5B.13 `SessionProfile` + IANA/DST-safe session engine.
+- 5B.14 Family 9 — session-conditioned breakout vs no-session baseline.
+- 5B.15 Deterministic, versioned regime classifier.
+- 5B.16 Family 10 — regime-switching ensemble.
+- 5B.17 Derived 4-day candle interval (documented UTC boundary), optional.
+- 5B.18 Experiment groups A/B/C wiring for the ten workers.
 
 ---
 

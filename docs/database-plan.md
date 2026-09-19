@@ -46,6 +46,37 @@ mutable tables also have `RowVersion` (concurrency token).
 - `ScanResults` (Id, ScanRequestId FK, EvaluatedAtUtc, SymbolId FK, Rank,
   MatchedCriteriaJson)
 
+## 4A. Market universe & instrument eligibility (Phase 3B)
+
+See `docs/market-universe.md`.
+
+- `Instruments` (Id, Exchange, ExchangeSymbol [unique per exchange],
+  BaseAsset, QuoteAsset, AssetClass int, LifecycleState int,
+  ExchangeStatus nvarchar, PermissionsJson, FiltersLoadedAtUtc,
+  FirstObservedCandleUtc, ExchangeOnboardUtc null, IsConfiguredSeed bit,
+  IsPresentOnExchange bit, LastCatalogueSyncUtc)
+- `InstrumentEligibilityGrants` (Id, InstrumentId FK, Purpose int,
+  Interval int, ProductType int, TradingMode int, IsGranted bit,
+  GrantedAtUtc, EvidenceAsOfUtc, ApprovedByUserId null) — unique index on
+  (InstrumentId, Purpose, Interval, ProductType, TradingMode). Live grants
+  require a non-null `ApprovedByUserId`.
+- `InstrumentMetrics` (Id, InstrumentId FK, WindowStartUtc, WindowEndUtc,
+  RollingQuoteVolume decimal(28,10), MedianQuoteVolume decimal(28,10),
+  MinQuoteVolume decimal(28,10), AverageSpread decimal(28,10),
+  WorstSpread decimal(28,10), EstimatedSlippageJson, DepthJson null,
+  TradeFrequency decimal(28,10), DataGapCount int, DataGapSeconds bigint,
+  StaleEventCount int, ListingAgeDays int, ComputedAtUtc)
+- `InstrumentEligibilityEvaluations` (Id, InstrumentId FK, EvaluatedAtUtc,
+  Purpose int, Interval int, ProductType int, TradingMode int, Passed bit,
+  GateResultsJson [gate, measured value, threshold, pass/fail])
+- `InstrumentStateTransitions` (Id, InstrumentId FK, FromState int,
+  ToState int, TriggeringGate int null, Reason nvarchar, OccurredAtUtc,
+  ActorUserId null) — append-only.
+
+Seed data (the 50 USDT research pairs) is versioned configuration, not a
+migration constant, and inserts every pair as `Tracked` with **no**
+eligibility grant rows.
+
 ## 5. Strategies (Phase 5)
 
 - `StrategyTemplates` (Id, Code [unique], Name, Description, IsApproved,
@@ -54,6 +85,34 @@ mutable tables also have `RowVersion` (concurrency token).
   MinValue, MaxValue, DefaultValue, Step)
 - `StrategyParameterSets` (Id, StrategyTemplateId FK, ValuesJson,
   ValidatedAgainstDefinitionsVersion)
+
+## 5A. Strategy research approvals (Phase 5B)
+
+See `docs/strategy-research-plan.md`.
+
+- `StrategyVersions` (Id, StrategyTemplateId FK, VersionNumber,
+  ParameterDefinitionsJson, RegimeInterval int, SignalInterval int,
+  ExecutionInterval int null, WarmUpCandles int, CreatedAtUtc) — immutable.
+- `StrategyApprovals` (Id, StrategyVersionId FK, ApprovalState int,
+  SupportedInstrumentClassJson, MinimumHistoryCandles int,
+  MinimumLiquidity decimal(28,10), MaximumSpread decimal(28,10),
+  MaximumEstimatedSlippage decimal(28,10), SupportedIntervalsJson,
+  ProductType int, ApprovedTradingModesJson, ApprovedByUserId null,
+  ApprovedAtUtc null) — immutable; a change creates a new row. All
+  strategies start in `Draft` with no approver.
+- `SessionProfiles` (Id, Name, IanaTimeZone, LocalStartTime, LocalEndTime,
+  AllowedWeekdays int [bitmask], DaylightSavingPolicy int,
+  MinimumLiquidity decimal(28,10), MaximumSpread decimal(28,10),
+  StrategyMode int, TimeZoneDatabaseVersion nvarchar, VersionNumber)
+- `RegimeEvaluations` (Id, InstrumentId FK, ClassifierVersion,
+  EvaluatedAtUtc, RegimeState int, InputsJson) — inputs are recorded so
+  the decision is reproducible and provably timestamp-bounded.
+- `RejectionGateResults` (Id, BacktestRunId FK, Gate int, Passed bit,
+  MeasuredValue decimal(28,10) null, Threshold decimal(28,10) null,
+  Detail nvarchar)
+- `HoldoutEvaluations` (Id, StrategyVersionId FK, DatasetId FK,
+  EvaluatedAtUtc, ResultJson) — unique on (StrategyVersionId, DatasetId)
+  so untouched holdout data can be evaluated exactly once.
 
 ## 6. Backtesting & optimization (Phases 5–6)
 

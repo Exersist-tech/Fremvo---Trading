@@ -88,9 +88,25 @@ allowance (if enabled later). No public self-service sign-up initially.
 17. **Observability & operations** — structured logging, metrics, alerting,
     runbooks, disaster recovery for market data and trading state.
 
-## 5. Non-functional requirements
+## 4A. Market universe and strategy research
 
-- **Correctness over speed**: all financial math in `decimal`; no floating
+The set of instruments the platform may use, and the strategies it may
+run against them, are governed by two dedicated planning documents:
+
+- **`docs/market-universe.md`** — the initial 50-pair USDT Spot research
+  seed, the ten instrument states, the twelve eligibility gates, rolling
+  liquidity/spread/slippage measurement, newly-listed restrictions, and
+  degradation behaviour. All seed pairs begin as `Tracked` only; none is
+  automatically live-tradable, and the live exchange catalogue — not the
+  seed list — is the source of truth.
+- **`docs/strategy-research-plan.md`** — the ten approved research
+  families, the `Draft → … → Deprecated` approval lifecycle, rejection
+  gates, session/regime handling, and the ten-worker experiment groups.
+  These are falsifiable research templates; the platform never claims a
+  strategy is or will be profitable, and never promotes the
+  highest-return backtest to live trading.
+
+## 5. Non-functional requirements- **Correctness over speed**: all financial math in `decimal`; no floating
   point in the money/quantity path.
 - **Determinism**: backtests must be exactly reproducible given the same
   inputs, parameters, and random seed.

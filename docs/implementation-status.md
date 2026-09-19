@@ -45,6 +45,21 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 | 3.6 Core indicator library | Not started | |
 | 3.7 Blazor charting UI | Not started | |
 
+## Phase 3B — Market universe and instrument eligibility
+See `docs/market-universe.md`. All 50 seed pairs are `Tracked` only; none is live-tradable.
+| Task | Status | Notes |
+|---|---|---|
+| 3B.1 Instrument/InstrumentState/AssetClass domain + exclusions | Not started | |
+| 3B.2 Eligibility grant model (purpose/timeframe/product/mode) | Not started | |
+| 3B.3 EligibilityGate evaluation engine + explainable record | Not started | |
+| 3B.4 InstrumentMetrics rolling/median model + repository | Not started | |
+| 3B.5 Binance exchange-information catalogue source + neutral mapping | Not started | |
+| 3B.6 50-pair seed as versioned configuration (Tracked only) | Not started | |
+| 3B.7 Newly-listed restricted state + evidence-age expiry | Not started | |
+| 3B.8 Degradation rules (block entries/increases, allow reduction) | Not started | |
+| 3B.9 Recalculation worker (scheduled + event-triggered) | Not started | |
+| 3B.10 Administrator instrument/eligibility UI with gate explanations | Not started | |
+
 ## Phase 4 — Automatic market scanner
 | Task | Status | Notes |
 |---|---|---|
@@ -63,6 +78,29 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 | 5.5 Backtest engine core loop | In progress | 2026-09-19 — `BacktestConfiguration` and `BacktestResult` models added for deterministic configuration and result capture; no strategy execution is implemented yet. |
 | 5.6 Fee/slippage/filter models | Not started | |
 | 5.7 Backtest result reporting UI | Not started | |
+
+## Phase 5B — Ten approved research strategy families
+See `docs/strategy-research-plan.md`. These are falsifiable research templates, not strategies expected to be profitable. All start as `Draft`.
+| Task | Status | Notes |
+|---|---|---|
+| 5B.1 Strategy approval state machine + immutable versioned approvals | Not started | |
+| 5B.2 Strategy approval requirements (instrument/history/liquidity/spread/slippage/timeframes/product/modes) | Not started | |
+| 5B.3 Regime/signal/execution timeframe separation | Not started | |
+| 5B.4 Rejection-gate engine with recorded per-gate results | Not started | |
+| 5B.5 Family 1 — multi-timeframe EMA trend continuation | Not started | |
+| 5B.6 Family 2 — Donchian breakout ensemble | Not started | |
+| 5B.7 Family 3 — Bollinger mean reversion (ranging-regime filter) | Not started | |
+| 5B.8 Family 4 — RSI pullback within a higher-timeframe trend | Not started | |
+| 5B.9 Family 5 — MACD and volume-confirmed trend acceleration | Not started | |
+| 5B.10 Family 6 — volatility-compression breakout | Not started | |
+| 5B.11 Family 7 — cross-sectional momentum rotation (survivorship-aware) | Not started | |
+| 5B.12 Family 8 — relative-strength pullback rotation | Not started | |
+| 5B.13 SessionProfile + IANA/DST-safe session engine | Not started | |
+| 5B.14 Family 9 — session-conditioned breakout vs no-session baseline | Not started | |
+| 5B.15 Deterministic, versioned regime classifier | Not started | |
+| 5B.16 Family 10 — regime-switching ensemble | Not started | |
+| 5B.17 Derived 4-day candle interval (documented UTC boundary), optional | Not started | |
+| 5B.18 Experiment groups A/B/C wiring for the ten workers | Not started | |
 
 ## Phase 6 — Optimization (train/validation/holdout/walk-forward)
 | Task | Status | Notes |
