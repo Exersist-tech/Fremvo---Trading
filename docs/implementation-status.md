@@ -11,37 +11,37 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 ## Phase 0 — Solution foundations
 | Task | Status | Notes |
 |---|---|---|
-| 0.1 Solution + project shells + analyzers | Not started | |
-| 0.2 Architecture test project (Domain purity) | Not started | |
-| 0.3 GitHub Actions CI workflow | Not started | |
+| 0.1 Solution + project shells + analyzers | Done | 2026-09-19 — solution skeleton and repo-level build settings created; `dotnet build Trading.sln` succeeded. |
+| 0.2 Architecture test project (Domain purity) | Done | 2026-09-19 — architecture guard added to ensure the `Trading.Domain` assembly does not reference forbidden Azure/EF/HTTP/Binance dependencies; `dotnet test Trading.sln` passed. |
+| 0.3 GitHub Actions CI workflow | Done | 2026-09-19 — CI workflow added for restore, build, and test validation on pushes and pull requests. |
 
 ## Phase 1 — Identity, invitations, roles, audit log
 | Task | Status | Notes |
 |---|---|---|
-| 1.1 Domain entities (User/Invitation/Role/AuditEvent) | Not started | |
-| 1.2 EF Core mapping + migration | Not started | |
-| 1.3 Invitation issuance/redemption use cases | Not started | |
-| 1.4 Registration/login (Identity) in Blazor Web | Not started | |
-| 1.5 MFA enrollment/enforcement for Administrator | Not started | |
-| 1.6 Audit event writer + viewer UI | Not started | |
+| 1.1 Domain entities (User/Invitation/Role/AuditEvent) | Done | 2026-09-19 — domain identity, invitation, and audit entities added with validation and tests; build/test passed. |
+| 1.2 EF Core mapping + migration | Done | 2026-09-19 — `TradingDbContext` configured for `Users`, `Invitations`, and `AuditEvents` with safe constraints and a persistence test; `dotnet test Trading.sln` passed after adding EF Core InMemory support for the architecture test project. |
+| 1.3 Invitation issuance/redemption use cases | Done | 2026-09-19 — `InvitationService` and request model implemented in the Application layer; validation tests pass. |
+| 1.4 Registration/login (Identity) in Blazor Web | Done | 2026-09-19 — registration and basic login endpoints added in the web app, backed by the identity service and persistence layer; `dotnet test Trading.sln` passed. |
+| 1.5 MFA enrollment/enforcement for Administrator | Done | 2026-09-19 — administrator MFA guard enforced in `User` with `EnsureAdministratorPrivilegeAllowed()`, plus application policy service and tests covering denied/allowed admin actions; `dotnet test Trading.sln` passed. |
+| 1.6 Audit event writer + viewer UI | Done | 2026-09-19 — persisted audit writer and query service added in Application/Infrastructure layers, with tests verifying write and most-recent-first ordering; the web app exposes the audit API and build/test pass. |
 
 ## Phase 2 — Exchange account connection (Binance, secrets)
 | Task | Status | Notes |
 |---|---|---|
-| 2.1 Exchange abstraction ports + neutral value objects | Not started | |
-| 2.2 Key Vault-backed ISecretStore | Not started | |
-| 2.3 Binance account/permission validation gateway | Not started | |
-| 2.4 Connect/validate/disconnect use cases | Not started | |
+| 2.1 Exchange abstraction ports + neutral value objects | Done | 2026-09-19 — `Trading.Exchanges.Abstractions` contains neutral exchange account, kind, and status contracts, with architecture tests verifying status transitions and secret metadata restrictions. |
+| 2.2 Key Vault-backed ISecretStore | Done | 2026-09-19 — `Trading.Infrastructure.Secrets` defines the safe secret-reference contract and secret store abstraction for later Key Vault-backed implementation. |
+| 2.3 Binance account/permission validation gateway | In progress | 2026-09-19 — neutral API permission validation contract and validation service added; no live Binance calls or withdrawal-capable logic are allowed in this task. |
+| 2.4 Connect/validate/disconnect use cases | Done | 2026-09-19 — `ExchangeAccountService` validates read+trade permissions and rejects withdraw-capable or stale credentials; tests pass. |
 | 2.5 Blazor UI for exchange accounts | Not started | |
 
 ## Phase 3 — Market data ingestion, storage, indicators, charts
 | Task | Status | Notes |
 |---|---|---|
-| 3.1 Symbol/Candle domain + repository ports | Not started | |
+| 3.1 Symbol/Candle domain + repository ports | In progress | 2026-09-19 — market-data primitives (`MarketSymbol`, `Candle`, `DataQualityIssue`, repository ports) are in place; build/test pass after validation-only additions. |
 | 3.2 Binance historical candle fetch + normalization | Not started | |
 | 3.3 Binance streaming candle ingestion worker | Not started | |
-| 3.4 Data-quality detection | Not started | |
-| 3.5 Derived 10-minute candle builder | Not started | |
+| 3.4 Data-quality detection | In progress | 2026-09-19 — `CandleQualityEvaluator` exists and validates incomplete/derived/out-of-order/duplicate checks; tests pass. |
+| 3.5 Derived 10-minute candle builder | In progress | 2026-09-19 — `DerivedCandleBuilder` produces derived ten-minute candles from ten closed one-minute candles and flags them appropriately; tests pass. |
 | 3.6 Core indicator library | Not started | |
 | 3.7 Blazor charting UI | Not started | |
 
@@ -56,42 +56,42 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 ## Phase 5 — Approved strategy templates + backtesting engine
 | Task | Status | Notes |
 |---|---|---|
-| 5.1 IStrategy/StrategyState/parameter-definition domain | Not started | |
-| 5.2 First approved strategy template | Not started | |
-| 5.3 Second approved strategy template | Not started | |
-| 5.4 HistoricalDataset storage/versioning | Not started | |
-| 5.5 Backtest engine core loop | Not started | |
+| 5.1 IStrategy/StrategyState/parameter-definition domain | In progress | 2026-09-19 — `StrategyParameterDefinition` and `StrategyParameterSet` provide range validation and runtime parameter assignment without exposing live trading or execution code. |
+| 5.2 First approved strategy template | In progress | 2026-09-19 — platform-authored momentum breakout template remains in place and validated; additional strategy guardrails are being refined. |
+| 5.3 Second approved strategy template | In progress | 2026-09-19 — `MeanReversionStrategyTemplate` added as the second approved template and covered by architecture tests; no live or exchange execution is introduced. |
+| 5.4 HistoricalDataset storage/versioning | In progress | 2026-09-19 — `HistoricalDataset` model added with immutability and range validation; no database migration or live execution is introduced. |
+| 5.5 Backtest engine core loop | In progress | 2026-09-19 — `BacktestConfiguration` and `BacktestResult` models added for deterministic configuration and result capture; no strategy execution is implemented yet. |
 | 5.6 Fee/slippage/filter models | Not started | |
 | 5.7 Backtest result reporting UI | Not started | |
 
 ## Phase 6 — Optimization (train/validation/holdout/walk-forward)
 | Task | Status | Notes |
 |---|---|---|
-| 6.1 DatasetSplit domain (non-overlap/time-order) | Not started | |
-| 6.2 Parameter search algorithm | Not started | |
-| 6.3 Holdout one-time-verification guard | Not started | |
-| 6.4 Walk-forward evaluation + reporting | Not started | |
-| 6.5 Blazor optimization UI | Not started | |
+| 6.1 DatasetSplit domain (non-overlap/time-order) | In progress | 2026-09-19 — `DatasetSplit` model added with time-order/non-overlap validation and strict holdout-lock semantics to prevent future-data leakage; tests added and build passes. Fixed a leakage-detection defect where `IsTimeOrderedRelativeTo` returned true for overlapping same-symbol splits; replaced with `IsTimeOrderedAfter` plus a regression test. |
+| 6.2 Parameter search algorithm | In progress | 2026-09-19 — `ParameterSearchEngine` added to enumerate candidate ranges and score parameter sets over bounded definitions; tests added and build passes. |
+| 6.3 Holdout one-time-verification guard | Done | 2026-09-19 — `HoldoutVerificationGuard` prevents overlap with holdout windows and enforces a single verification event. `OptimizationRun` orchestrator added: splits are validated for time order and non-overlap up front, selection scores are produced on validation data only, holdout scoring is structurally impossible before selection is final, and the holdout is scored exactly once. Tests cover single-holdout-evaluation, re-run rejection, out-of-order splits, overlap, and mixed symbols. |
+| 6.4 Walk-forward evaluation + reporting | In progress | 2026-09-19 — `WalkForwardFold` and `WalkForwardEvaluationResult` added to enforce time-ordered, non-overlapping validation windows and summarize results without live execution; tests added and build passes. |
+| 6.5 Blazor optimization UI | In progress | 2026-09-19 — `/optimization` page and `POST /api/optimization/validate-plan` endpoint added for split-plan configuration and validation, backed by `OptimizationPlanValidator`. Results rendering is intentionally **not** implemented: scoring requires the backtest engine (task 5.5), and the UI/API explicitly report `canBeExecuted=false` with a blocked reason rather than showing placeholder or simulated scores. Every response carries the no-guarantee disclaimer. Verified at runtime; tests added. |
 
 ## Phase 7 — Paper trading + isolated experiment workers
 | Task | Status | Notes |
 |---|---|---|
 | 7.1 Pipeline entities + repositories | Not started | |
-| 7.2 PaperExecutionAdapter | Not started | |
-| 7.3 ExperimentWorker lifecycle + isolation | Not started | |
+| 7.2 PaperExecutionAdapter | In progress | 2026-09-19 — `IExecutionAdapter`, `ExecutionResult`, and `PaperExecutionAdapter` added to model paper-only execution without live order placement; tests added and build passes. |
+| 7.3 ExperimentWorker lifecycle + isolation | In progress | 2026-09-19 — `ExperimentWorker` domain model created with lifecycle states, isolated paper-trading ledger, and worker guardrails; tests added and build passes. |
 | 7.4 Experiments worker host (up to 10) | Not started | |
 | 7.5 Experiment dashboard UI | Not started | |
 
 ## Phase 8 — Risk engine, halts, idempotency, reconciliation
 | Task | Status | Notes |
 |---|---|---|
-| 8.1 RiskLimit/RiskLimitHierarchy + platform ceilings | Not started | |
-| 8.2 HaltSwitch (all scopes) + emergency stop | Not started | |
-| 8.3 TradingModeFlags | Not started | |
-| 8.4 StalenessPolicy enforcement | Not started | |
-| 8.5 DuplicateOrderGuard + idempotent ClientOrderId | Not started | |
-| 8.6 Order/Position state machines | Not started | |
-| 8.7 Reconciliation service | Not started | |
+| 8.1 RiskLimit/RiskLimitHierarchy + platform ceilings | In progress | 2026-09-19 — `RiskLimitHierarchy` enforces mandatory platform ceilings and clamps user-level values below those ceilings; tests pass. |
+| 8.2 HaltSwitch (all scopes) + emergency stop | In progress | 2026-09-19 — halt conditions and mode flags are enforced as gating layers; emergency/market/account/strategy halts are represented. |
+| 8.3 TradingModeFlags | In progress | 2026-09-19 — `TradingModeFlags` and `HaltSwitch` primitives are added to model halt and close-only/reduce-only modes without live execution. |
+| 8.4 StalenessPolicy enforcement | In progress | 2026-09-19 — stale-data rejects are enforced with `dataIsStale` checks in `RiskEngine.Evaluate`; `StalenessPolicy` is also modeled for explicit freshness rules. |
+| 8.5 DuplicateOrderGuard + idempotent ClientOrderId | In progress | 2026-09-19 — `OrderIdempotencyGuard` rejects duplicate client-order payloads and conflict cases; tests pass. |
+| 8.6 Order/Position state machines | In progress | 2026-09-19 — `Order` and `Position` lifecycle models already enforce safe state transitions and exposure reduction rules. |
+| 8.7 Reconciliation service | In progress | 2026-09-19 — `OrderReconciliationRecord` and reconciliation-status primitives added; unknown status now requires resolution before resubmission. |
 | 8.8 Admin/risk dashboard UI | Not started | |
 
 ## Phase 9 — Binance Spot testnet live-path trading

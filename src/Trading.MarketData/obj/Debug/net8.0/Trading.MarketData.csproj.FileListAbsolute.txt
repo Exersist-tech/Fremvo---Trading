@@ -1,0 +1,16 @@
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\bin\Debug\net8.0\Trading.MarketData.deps.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\bin\Debug\net8.0\Trading.MarketData.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\bin\Debug\net8.0\Trading.MarketData.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.AssemblyInfoInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.AssemblyInfo.cs
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.csproj.CoreCompileInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.sourcelink.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\refint\Trading.MarketData.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\ref\Trading.MarketData.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading.MarketData.csproj.AssemblyReference.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\bin\Debug\net8.0\Trading.Domain.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\bin\Debug\net8.0\Trading.Domain.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.MarketData\obj\Debug\net8.0\Trading..2D30A59E.Up2Date

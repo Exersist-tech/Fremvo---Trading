@@ -1,0 +1,12 @@
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\bin\Debug\net8.0\Trading.Exchanges.Abstractions.deps.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\bin\Debug\net8.0\Trading.Exchanges.Abstractions.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\bin\Debug\net8.0\Trading.Exchanges.Abstractions.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.AssemblyInfoInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.AssemblyInfo.cs
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.csproj.CoreCompileInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.sourcelink.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\refint\Trading.Exchanges.Abstractions.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\Trading.Exchanges.Abstractions.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Abstractions\obj\Debug\net8.0\ref\Trading.Exchanges.Abstractions.dll

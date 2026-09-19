@@ -1,0 +1,16 @@
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\bin\Debug\net8.0\Trading.Exchanges.Binance.deps.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\bin\Debug\net8.0\Trading.Exchanges.Binance.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\bin\Debug\net8.0\Trading.Exchanges.Binance.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.AssemblyInfoInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.AssemblyInfo.cs
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.csproj.CoreCompileInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.sourcelink.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\refint\Trading.Exchanges.Binance.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\ref\Trading.Exchanges.Binance.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\bin\Debug\net8.0\Trading.Exchanges.Abstractions.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\bin\Debug\net8.0\Trading.Exchanges.Abstractions.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading.Exchanges.Binance.csproj.AssemblyReference.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Exchanges.Binance\obj\Debug\net8.0\Trading..8DBCAA69.Up2Date

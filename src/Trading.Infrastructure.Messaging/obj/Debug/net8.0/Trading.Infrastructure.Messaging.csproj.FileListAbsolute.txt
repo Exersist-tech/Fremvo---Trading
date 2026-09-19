@@ -1,0 +1,12 @@
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\bin\Debug\net8.0\Trading.Infrastructure.Messaging.deps.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\bin\Debug\net8.0\Trading.Infrastructure.Messaging.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\bin\Debug\net8.0\Trading.Infrastructure.Messaging.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.AssemblyInfoInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.AssemblyInfo.cs
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.csproj.CoreCompileInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.sourcelink.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\refint\Trading.Infrastructure.Messaging.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\Trading.Infrastructure.Messaging.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Infrastructure.Messaging\obj\Debug\net8.0\ref\Trading.Infrastructure.Messaging.dll

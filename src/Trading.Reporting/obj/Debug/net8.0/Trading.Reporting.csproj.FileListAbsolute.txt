@@ -1,0 +1,12 @@
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\bin\Debug\net8.0\Trading.Reporting.deps.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\bin\Debug\net8.0\Trading.Reporting.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\bin\Debug\net8.0\Trading.Reporting.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.AssemblyInfoInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.AssemblyInfo.cs
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.csproj.CoreCompileInputs.cache
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.sourcelink.json
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\refint\Trading.Reporting.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\Trading.Reporting.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Reporting\obj\Debug\net8.0\ref\Trading.Reporting.dll
