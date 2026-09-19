@@ -92,7 +92,7 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 | 8.5 DuplicateOrderGuard + idempotent ClientOrderId | Done | 2026-09-19 — the guard is now wired into `TradePipeline` and evaluated as part of the risk gate, using the deterministic client order id derived from the trade intent. Fixed a defect where a client-order-id **conflict** (same id, different payload) was returned with `IsDuplicate = false`, which a caller could not distinguish from acceptance; `OrderIdempotencyResult` now exposes `IsConflict` and `IsAccepted`, and a conflict is never submitted. |
 | 8.6 Order/Position state machines | In progress | 2026-09-19 — `Order` and `Position` lifecycle models already enforce safe state transitions and exposure reduction rules. |
 | 8.7 Reconciliation service | In progress | 2026-09-19 — `OrderReconciliationRecord` and reconciliation-status primitives added; unknown status now requires resolution before resubmission. |
-| 8.8 Admin/risk dashboard UI | Not started | |
+| 8.8 Admin/risk dashboard UI | Done | 2026-09-19 — `/admin/risk` exposes the safety controls so an operator can actually use them: platform emergency stop, market halt, user halt, strategy halt, close-only, and reduce-only, each with engage and release. `GET`/`POST /api/risk/halts` require the Administrator or RiskOfficer role. Every change requires a reason and writes an immutable audit event naming the actor, the scope, and the target; the page states that a halt does not close existing positions. Verified at runtime: both endpoints return 401 when unauthenticated. Halt state is a singleton, so an emergency stop applies immediately to every trading path in the process. |
 
 ## Phase 9 — Binance Spot testnet live-path trading
 | Task | Status | Notes |

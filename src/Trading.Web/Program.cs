@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using Trading.Application.Experiments;
+using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Identity;
 using Trading.Domain.Audit;
@@ -74,6 +75,11 @@ builder.Services.AddAuthorization();
 // experiment data out of the trading database until a durable store is designed for it.
 builder.Services.AddSingleton<IExperimentWorkerRepository, InMemoryExperimentWorkerRepository>();
 builder.Services.AddSingleton<ExperimentWorkerPool>();
+
+// Halt state is shared by every trading path in this process. It is registered as a singleton so
+// an emergency stop takes effect immediately for all callers.
+builder.Services.AddSingleton<InMemoryTradingHaltState>();
+builder.Services.AddSingleton<ITradingHaltState>(sp => sp.GetRequiredService<InMemoryTradingHaltState>());
 
 var app = builder.Build();
 
@@ -666,6 +672,253 @@ app.MapGet("/experiments", () => Results.Content(
     """,
     "text/html"));
 
+app.MapGet("/api/risk/halts", (InMemoryTradingHaltState halts) => Results.Ok(new
+{
+    emergencyStop = halts.EmergencyStop,
+    liveTradingEnabled = false,
+    note = "Live trading is disabled platform-wide. The emergency stop blocks every new order for every user."
+})).RequireAuthorization(policy => policy.RequireRole(
+    nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
+
+app.MapPost("/api/risk/halts", async (
+    ClaimsPrincipal principal,
+    InMemoryTradingHaltState halts,
+    IAuditEventWriter auditWriter,
+    HaltCommandRequest request,
+    CancellationToken cancellationToken) =>
+{
+    ArgumentNullException.ThrowIfNull(request);
+
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Reason))
+    {
+        // A halt or a release is an operator decision that must be explainable afterwards.
+        return Results.BadRequest(new { error = "A reason is required for every halt change." });
+    }
+
+    string action;
+
+    switch (request.Scope?.Trim().ToUpperInvariant())
+    {
+        case "EMERGENCY":
+            if (request.Engage)
+            {
+                halts.EngageEmergencyStop();
+            }
+            else
+            {
+                halts.ReleaseEmergencyStop();
+            }
+
+            action = request.Engage ? "Trading.EmergencyStopEngaged" : "Trading.EmergencyStopReleased";
+            break;
+
+        case "MARKET":
+            if (string.IsNullOrWhiteSpace(request.Symbol))
+            {
+                return Results.BadRequest(new { error = "A symbol is required for a market halt." });
+            }
+
+            if (request.Engage)
+            {
+                halts.HaltMarket(request.Symbol);
+            }
+            else
+            {
+                halts.ResumeMarket(request.Symbol);
+            }
+
+            action = request.Engage ? "Trading.MarketHalted" : "Trading.MarketResumed";
+            break;
+
+        case "USER":
+            if (request.TargetId is not { } targetUserId || targetUserId == Guid.Empty)
+            {
+                return Results.BadRequest(new { error = "A user id is required for a user halt." });
+            }
+
+            if (request.Engage)
+            {
+                halts.HaltUser(targetUserId);
+            }
+            else
+            {
+                halts.ResumeUser(targetUserId);
+            }
+
+            action = request.Engage ? "Trading.UserHalted" : "Trading.UserResumed";
+            break;
+
+        case "STRATEGY":
+            if (request.TargetId is not { } targetStrategyId || targetStrategyId == Guid.Empty)
+            {
+                return Results.BadRequest(new { error = "A strategy id is required for a strategy halt." });
+            }
+
+            if (request.Engage)
+            {
+                halts.HaltStrategy(targetStrategyId);
+            }
+            else
+            {
+                halts.ResumeStrategy(targetStrategyId);
+            }
+
+            action = request.Engage ? "Trading.StrategyHalted" : "Trading.StrategyResumed";
+            break;
+
+        case "CLOSEONLY":
+            if (request.TargetId is not { } closeOnlyUserId || closeOnlyUserId == Guid.Empty)
+            {
+                return Results.BadRequest(new { error = "A user id is required for close-only mode." });
+            }
+
+            halts.SetCloseOnly(closeOnlyUserId, request.Engage);
+            action = request.Engage ? "Trading.CloseOnlyEnabled" : "Trading.CloseOnlyDisabled";
+            break;
+
+        case "REDUCEONLY":
+            if (request.TargetId is not { } reduceOnlyUserId || reduceOnlyUserId == Guid.Empty)
+            {
+                return Results.BadRequest(new { error = "A user id is required for reduce-only mode." });
+            }
+
+            halts.SetReduceOnly(reduceOnlyUserId, request.Engage);
+            action = request.Engage ? "Trading.ReduceOnlyEnabled" : "Trading.ReduceOnlyDisabled";
+            break;
+
+        default:
+            return Results.BadRequest(new { error = "Unknown halt scope." });
+    }
+
+    await auditWriter.WriteAsync(
+        new AuditEvent(
+            Guid.NewGuid(),
+            actorId.Value,
+            action,
+            "TradingHalt",
+            request.TargetId?.ToString() ?? request.Symbol ?? "platform",
+            DateTimeOffset.UtcNow,
+            null,
+            request.Reason,
+            Guid.NewGuid().ToString()),
+        cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new { action, emergencyStop = halts.EmergencyStop });
+}).RequireAuthorization(policy => policy.RequireRole(
+    nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
+
+app.MapGet("/admin/risk", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Trading safety controls — Exersist Trading</title>
+      <style>
+        body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
+        .container { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+        h1 { font-size: 2rem; margin-bottom: 8px; }
+        p.muted { color:#9bb6cd; line-height:1.6; }
+        fieldset { border:1px solid #24415d; border-radius:12px; margin:18px 0; padding:16px 18px; }
+        legend { color:#62d0ff; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; font-size:12px; }
+        label { display:block; margin:10px 0 4px; color:#9bb6cd; font-size:13px; }
+        input, select { width:100%; padding:9px 10px; border-radius:8px; border:1px solid #24415d;
+                        background:#0f1c2b; color:#eaf4ff; }
+        button { margin-top:14px; padding:11px 18px; border-radius:10px; border:1px solid rgba(98,208,255,0.4);
+                 background:rgba(98,208,255,0.12); color:#62d0ff; font-weight:700; cursor:pointer; }
+        button.stop { border-color:rgba(255,107,107,0.5); background:rgba(255,107,107,0.14); color:#ff8f8f; }
+        .state { border-radius:12px; padding:14px 16px; margin:18px 0; line-height:1.5; }
+        .state.ok { border:1px solid rgba(98,208,255,0.35); background:rgba(98,208,255,0.08); color:#8fd8ff; }
+        .state.halted { border:1px solid rgba(255,107,107,0.45); background:rgba(255,107,107,0.12); color:#ff8f8f; }
+        pre { background:#0f1c2b; border:1px solid #24415d; border-radius:12px; padding:14px; white-space:pre-wrap;
+              color:#cfe6fa; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>Trading safety controls</h1>
+        <p class="muted">
+          Halts take effect immediately for every trading path in this process. The emergency stop
+          blocks every new order for every user. Halts never close existing positions on their own;
+          use close-only or reduce-only to wind exposure down.
+        </p>
+
+        <div id="state" class="state ok">Loading halt state…</div>
+
+        <form id="halt">
+          <fieldset>
+            <legend>Halt control</legend>
+            <label for="scope">Scope</label>
+            <select id="scope">
+              <option value="EMERGENCY">Platform emergency stop</option>
+              <option value="MARKET">Market (symbol)</option>
+              <option value="USER">User</option>
+              <option value="STRATEGY">Strategy</option>
+              <option value="CLOSEONLY">Close-only (user)</option>
+              <option value="REDUCEONLY">Reduce-only (user)</option>
+            </select>
+            <label for="symbol">Symbol (market scope only)</label>
+            <input id="symbol" placeholder="BTCUSDT" />
+            <label for="targetId">Target id (user or strategy scope)</label>
+            <input id="targetId" placeholder="00000000-0000-0000-0000-000000000000" />
+            <label for="reason">Reason (required, recorded in the audit trail)</label>
+            <input id="reason" placeholder="Why this halt is being changed" />
+          </fieldset>
+          <button type="submit" class="stop" value="engage" id="engage">Engage halt</button>
+          <button type="submit" value="release" id="release">Release halt</button>
+        </form>
+
+        <pre id="output">No change submitted yet.</pre>
+      </div>
+
+      <script>
+        const out = document.getElementById('output');
+        async function refresh() {
+          const res = await fetch('/api/risk/halts');
+          const el = document.getElementById('state');
+          if (res.status === 401 || res.status === 403) {
+            el.className = 'state ok';
+            el.textContent = 'Sign in as an administrator or risk officer to view halt state.';
+            return;
+          }
+          const data = await res.json();
+          el.className = data.emergencyStop ? 'state halted' : 'state ok';
+          el.textContent = data.emergencyStop
+            ? 'EMERGENCY STOP ENGAGED. No new order will be accepted for any user.'
+            : 'No platform emergency stop. Live trading is disabled platform-wide.';
+        }
+        async function submit(engage) {
+          const body = {
+            scope: document.getElementById('scope').value,
+            engage: engage,
+            symbol: document.getElementById('symbol').value || null,
+            targetId: document.getElementById('targetId').value || null,
+            reason: document.getElementById('reason').value
+          };
+          const res = await fetch('/api/risk/halts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          out.textContent = JSON.stringify(await res.json(), null, 2);
+          await refresh();
+        }
+        document.getElementById('engage').addEventListener('click', e => { e.preventDefault(); submit(true); });
+        document.getElementById('release').addEventListener('click', e => { e.preventDefault(); submit(false); });
+        refresh();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
 app.Run();
 
 /// <summary>
@@ -678,3 +931,13 @@ internal sealed record CreateExperimentWorkerRequest(
     string MarketSymbol,
     decimal StartingCash,
     int RandomSeed);
+
+/// <summary>
+/// Halt change request. Every change requires a reason, which is written to the audit trail.
+/// </summary>
+internal sealed record HaltCommandRequest(
+    string? Scope,
+    bool Engage,
+    string? Symbol,
+    Guid? TargetId,
+    string? Reason);
