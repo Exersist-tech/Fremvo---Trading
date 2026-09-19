@@ -136,6 +136,8 @@ public sealed class TradePipeline
     private readonly IPortfolioUpdateRepository _portfolioUpdates;
     private readonly IAuditEventWriter _auditWriter;
     private readonly RiskEngine _riskEngine;
+    private readonly ITradingHaltState _haltState;
+    private readonly OrderIdempotencyGuard _idempotencyGuard;
     private readonly TradePipelineOptions _options;
 
     public TradePipeline(
@@ -147,6 +149,8 @@ public sealed class TradePipeline
         IPortfolioUpdateRepository portfolioUpdates,
         IAuditEventWriter auditWriter,
         RiskEngine riskEngine,
+        ITradingHaltState haltState,
+        OrderIdempotencyGuard idempotencyGuard,
         TradePipelineOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(marketEvents);
@@ -157,6 +161,8 @@ public sealed class TradePipeline
         ArgumentNullException.ThrowIfNull(portfolioUpdates);
         ArgumentNullException.ThrowIfNull(auditWriter);
         ArgumentNullException.ThrowIfNull(riskEngine);
+        ArgumentNullException.ThrowIfNull(haltState);
+        ArgumentNullException.ThrowIfNull(idempotencyGuard);
 
         _marketEvents = marketEvents;
         _decisions = decisions;
@@ -166,6 +172,8 @@ public sealed class TradePipeline
         _portfolioUpdates = portfolioUpdates;
         _auditWriter = auditWriter;
         _riskEngine = riskEngine;
+        _haltState = haltState;
+        _idempotencyGuard = idempotencyGuard;
         _options = options ?? new TradePipelineOptions();
     }
 
@@ -241,6 +249,24 @@ public sealed class TradePipeline
 
         var proposedExposure = intent.Quantity * intent.LimitPrice;
 
+        // Halt state is read for this specific trade and covers every scope: platform emergency
+        // stop, market halt, user or account halt, strategy halt, close-only and reduce-only.
+        var flags = await _haltState
+            .GetAsync(context, intent.Symbol, strategy.StrategyId, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The deterministic client order id is derived from the intent, so replaying the same
+        // intent can never create a second order. It is computed before the risk gate so the
+        // duplicate check is part of the same evaluation.
+        var clientOrderId = BuildClientOrderId(context, intent);
+
+        var idempotency = _idempotencyGuard.RegisterOrCheck(
+            clientOrderId, intent.Symbol, intent.Quantity, intent.LimitPrice);
+
+        // A sell that does not shrink the position is an increase in exposure.
+        var reducesExposure = intent.Direction == TradeDirection.Sell
+            && portfolio.PositionQuantity > 0m;
+
         var riskResult = _riskEngine.Evaluate(
             proposedExposure: proposedExposure,
             currentExposure: portfolio.CurrentExposure,
@@ -250,14 +276,14 @@ public sealed class TradePipeline
             maxPositionSize: _options.MaxPositionSize,
             maxNotional: _options.MaxNotional,
             dataIsStale: false,
-            accountIsHalted: false,
-            strategyIsHalted: false,
-            closeOnlyMode: false,
-            reduceOnlyMode: false,
-            duplicateOrderDetected: false,
-            orderIdempotencyConflict: false,
-            marketHalt: false,
-            emergencyStop: false,
+            accountIsHalted: flags.AccountHalted,
+            strategyIsHalted: flags.StrategyHalted,
+            closeOnlyMode: flags.CloseOnlyMode && !reducesExposure,
+            reduceOnlyMode: flags.ReduceOnlyMode && !reducesExposure,
+            duplicateOrderDetected: idempotency.IsDuplicate,
+            orderIdempotencyConflict: idempotency.IsConflict,
+            marketHalt: flags.MarketHalt,
+            emergencyStop: flags.EmergencyStop,
             stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
             lastDataUpdateUtc: portfolio.LastUpdatedUtc,
             nowUtc: now);
@@ -283,10 +309,7 @@ public sealed class TradePipeline
                 cancellationToken).ConfigureAwait(false);
         }
 
-        // Deterministic client order id derived from the intent, so a retry of the same
-        // intent can never create a second order.
-        var clientOrderId = BuildClientOrderId(context, intent);
-
+        // Deterministic client order id computed above, before the risk gate.
         var command = new ExecutionCommand(
             Guid.NewGuid(),
             intent.Id,

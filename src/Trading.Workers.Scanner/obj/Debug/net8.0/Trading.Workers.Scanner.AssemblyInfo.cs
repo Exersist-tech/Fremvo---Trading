@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Trading.Workers.Scanner")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+df4aa539261d67b6c7e8f17cc4fa4f07dd7c9294")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8d6cb2794de84d08fa36ac3a3de4f2aa562422d8")]
 [assembly: System.Reflection.AssemblyProductAttribute("Trading.Workers.Scanner")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Trading.Workers.Scanner")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

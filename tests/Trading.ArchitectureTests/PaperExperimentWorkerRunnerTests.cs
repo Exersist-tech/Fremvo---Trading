@@ -82,6 +82,8 @@ public sealed class PaperExperimentWorkerRunnerTests
             new InMemoryPortfolioUpdateRepository(),
             new InMemoryAuditEventWriter(),
             new RiskEngine(),
+            new InMemoryTradingHaltState(),
+            new OrderIdempotencyGuard(),
             new TradePipelineOptions { MaxDataAge = TimeSpan.FromHours(24) });
 
         return new PaperExperimentWorkerRunner(

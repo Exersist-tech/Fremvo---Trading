@@ -79,9 +79,13 @@ public sealed class TradePipelineTests
 
         public RecordingAuditWriter Audit { get; } = new();
 
+        public InMemoryTradingHaltState Halts { get; } = new();
+
+        public OrderIdempotencyGuard Idempotency { get; } = new();
+
         public TradePipeline Build(TradePipelineOptions? options = null) =>
             new(MarketEvents, Decisions, Intents, RiskEvaluations, Commands, PortfolioUpdates,
-                Audit, new RiskEngine(), options);
+                Audit, new RiskEngine(), Halts, Idempotency, options);
     }
 
     private static MarketEvent Event(bool isClosed = true, IReadOnlyCollection<string>? flags = null) =>
