@@ -1,13 +1,22 @@
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
+using Trading.Application.Experiments;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Identity;
 using Trading.Domain.Audit;
+using Trading.Domain.Experiments;
+using Trading.Domain.Identity;
 using Trading.Domain.Users;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
 using Trading.Optimization;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
+using Trading.Web.Security;
+using ITradingAuthenticationService = Trading.Application.UseCases.Identity.IAuthenticationService;
+using TradingAuthenticationService = Trading.Application.UseCases.Identity.AuthenticationService;
 
 var featureNames = new[]
 {
@@ -18,18 +27,58 @@ var featureNames = new[]
     "Safety-first trading gates"
 };
 
+const string ExperimentDisclaimer =
+    "Experiment workers trade with fake funds only and cannot place an order on a real exchange. " +
+    "Simulated results do not indicate future results, and no strategy is guaranteed to be profitable.";
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddTradingInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IInvitationService, InvitationService>();
 builder.Services.AddScoped<IRegistrationService, RegistrationService>();
-builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
+builder.Services.AddScoped<ITradingAuthenticationService, TradingAuthenticationService>();
 builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolicyService>();
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
     new AuditQueryService(provider.GetRequiredService<TradingDbContext>().AuditEvents));
 
+// Sign-in state is held in a cookie that the browser cannot read, so no identity or session
+// material is ever exposed to client-side script.
+builder.Services
+    .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "exersist.session";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Strict;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        options.SlidingExpiration = true;
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+
+        // API callers get a status code rather than a redirect to a sign-in page.
+        options.Events.OnRedirectToLogin = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        };
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        };
+    });
+
+builder.Services.AddAuthorization();
+
+// Experiment state is paper-only and non-durable. Registering the in-memory store here keeps
+// experiment data out of the trading database until a durable store is designed for it.
+builder.Services.AddSingleton<IExperimentWorkerRepository, InMemoryExperimentWorkerRepository>();
+builder.Services.AddSingleton<ExperimentWorkerPool>();
+
 var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapGet("/api/health", () => Results.Ok(new
 {
@@ -180,16 +229,51 @@ app.MapGet("/", () => Results.Content(
     """,
     "text/html"));
 
-app.MapPost("/api/invitations", (IInvitationService service, InvitationRequest request) =>
+// Issuing an invitation is an administrator action on an invitation-only platform. It is
+// authenticated, role-restricted, persisted, and audited.
+app.MapPost("/api/invitations", async (
+    ClaimsPrincipal principal,
+    IInvitationService service,
+    TradingDbContext dbContext,
+    IAuditEventWriter auditWriter,
+    InvitationRequest request,
+    CancellationToken cancellationToken) =>
 {
+    ArgumentNullException.ThrowIfNull(request);
+
+    var issuerId = CurrentUser.TryGetUserId(principal);
+    if (issuerId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    // The code is generated, never derived from the invitee's email address, which would make it
+    // guessable by anyone who knows the address.
     var invitation = service.CreateInvitation(
-        Guid.NewGuid(),
-        request.Email,
+        issuerId.Value,
+        InvitationCodeGenerator.Generate(),
         1,
         DateTimeOffset.UtcNow.AddDays(30));
 
+    dbContext.Invitations.Add(invitation);
+    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+    await auditWriter.WriteAsync(
+        new AuditEvent(
+            Guid.NewGuid(),
+            issuerId.Value,
+            "Invitation.Issued",
+            nameof(Invitation),
+            invitation.Id.ToString(),
+            DateTimeOffset.UtcNow,
+            null,
+            // The code itself is never written to the audit trail or to logs.
+            $"Invitation issued for {request.Email}.",
+            Guid.NewGuid().ToString()),
+        cancellationToken).ConfigureAwait(false);
+
     return Results.Ok(new { invitation.Id, invitation.Code, invitation.ExpiresAtUtc });
-});
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
 
 app.MapPost("/api/register", async (
     TradingDbContext dbContext,
@@ -237,21 +321,40 @@ app.MapPost("/api/register", async (
     return Results.Ok(new { user.Id, user.Email, user.DisplayName, user.Role });
 });
 
-app.MapPost("/api/login", (IAuthenticationService authService, TradingDbContext dbContext, LoginRequest request) =>
+app.MapPost("/api/login", async (
+    HttpContext httpContext,
+    ITradingAuthenticationService authService,
+    TradingDbContext dbContext,
+    LoginRequest request) =>
 {
     ArgumentNullException.ThrowIfNull(request);
 
     var user = dbContext.Users
         .SingleOrDefault(u => u.Email == request.Email.Trim());
 
-    if (user is null)
+    // The same response is returned for an unknown address and a wrong password so the endpoint
+    // cannot be used to discover which addresses are registered.
+    if (user is null || !authService.ValidateCredentials(user, request.Password))
     {
         return Results.BadRequest(new { error = "Invalid login" });
     }
 
-    return authService.ValidateCredentials(user, request.Password)
-        ? Results.Ok(new { user.Id, user.Email })
-        : Results.BadRequest(new { error = "Invalid login" });
+    var identity = new ClaimsIdentity(CookieAuthenticationDefaults.AuthenticationScheme);
+    identity.AddClaim(new Claim(CurrentUser.UserIdClaim, user.Id.ToString()));
+    identity.AddClaim(new Claim(ClaimTypes.Name, user.Email));
+    identity.AddClaim(new Claim(ClaimTypes.Role, user.Role.ToString()));
+
+    await httpContext.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        new ClaimsPrincipal(identity)).ConfigureAwait(false);
+
+    return Results.Ok(new { user.Id, user.Email });
+});
+
+app.MapPost("/api/logout", async (HttpContext httpContext) =>
+{
+    await httpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme).ConfigureAwait(false);
+    return Results.Ok(new { signedOut = true });
 });
 
 app.MapPost("/api/optimization/validate-plan", (OptimizationPlanDto request) =>
@@ -401,4 +504,177 @@ app.MapGet("/optimization", () => Results.Content(
     """,
     "text/html"));
 
+app.MapGet("/api/experiments", async (
+    ClaimsPrincipal principal,
+    IExperimentWorkerRepository repository,
+    CancellationToken cancellationToken) =>
+{
+    // The owning user comes from the signed-in principal only. There is no user id parameter, so
+    // one user cannot request another user's experiment workers.
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var workers = await repository.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        maxWorkers = ExperimentWorker.MaxWorkersPerUser,
+        used = workers.Count,
+        tradingMode = "Paper",
+        disclaimer = ExperimentDisclaimer,
+        workers = workers
+            .OrderBy(w => w.CreatedAtUtc)
+            .Select(w => new
+            {
+                w.Id,
+                w.Name,
+                strategyTemplateId = w.StrategyId,
+                w.MarketSymbol,
+                status = w.Status.ToString(),
+                w.RandomSeed,
+                w.StartingCash,
+                w.CashBalance,
+                w.PositionQuantity,
+                w.AverageEntryPrice,
+                w.RealizedProfitAndLoss,
+                w.FailureReason,
+                tradeCount = w.Ledger.Count,
+                w.CreatedAtUtc
+            })
+    });
+}).RequireAuthorization();
+
+app.MapPost("/api/experiments", async (
+    ClaimsPrincipal principal,
+    ExperimentWorkerPool pool,
+    CreateExperimentWorkerRequest request,
+    CancellationToken cancellationToken) =>
+{
+    ArgumentNullException.ThrowIfNull(request);
+
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    try
+    {
+        var worker = await pool.CreateWorkerAsync(
+            userId.Value,
+            request.Name,
+            request.StrategyTemplateId,
+            request.MarketSymbol,
+            request.StartingCash,
+            DateTimeOffset.UtcNow,
+            request.RandomSeed,
+            cancellationToken).ConfigureAwait(false);
+
+        return Results.Ok(new { worker.Id, worker.Name, status = worker.Status.ToString() });
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+}).RequireAuthorization();
+
+app.MapGet("/experiments", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Experiment workers — Exersist Trading</title>
+      <style>
+        body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 32px 20px 80px; }
+        h1 { font-size: 2rem; margin-bottom: 8px; }
+        p.muted { color:#9bb6cd; line-height:1.6; }
+        .badge { display:inline-block; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:700;
+                 border:1px solid rgba(98,208,255,0.4); background:rgba(98,208,255,0.12); color:#62d0ff; }
+        .notice { border:1px solid rgba(255,209,102,0.35); background:rgba(255,209,102,0.08); color:#ffd166;
+                  border-radius:12px; padding:14px 16px; margin:18px 0; line-height:1.5; }
+        table { width:100%; border-collapse:collapse; margin-top:18px; }
+        th, td { text-align:left; padding:10px 12px; border-bottom:1px solid #24415d; font-size:14px; }
+        th { color:#9bb6cd; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.05em; }
+        pre { background:#0f1c2b; border:1px solid #24415d; border-radius:12px; padding:14px; white-space:pre-wrap;
+              word-break:break-word; color:#cfe6fa; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>Experiment workers <span class="badge">Paper only</span></h1>
+        <p class="muted">
+          Up to ten isolated workers per user. Each worker keeps its own balance, position,
+          strategy state, parameters, random seed, and results. Workers may read the same
+          immutable historical data but never share mutable state, and a worker that fails does
+          not stop the others.
+        </p>
+
+        <div class="notice">
+          Experiment workers trade with fake funds only. They cannot place an order on a real
+          exchange. Past or simulated results do not indicate future results, and no strategy is
+          guaranteed to be profitable.
+        </div>
+
+        <div id="state"></div>
+        <table id="grid" hidden>
+          <thead>
+            <tr>
+              <th>Name</th><th>Symbol</th><th>Status</th><th>Seed</th>
+              <th>Cash</th><th>Position</th><th>Realized P&amp;L</th><th>Trades</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <script>
+        const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
+        (async () => {
+          const state = document.getElementById('state');
+          const res = await fetch('/api/experiments');
+          if (res.status === 401) {
+            state.innerHTML = '<p class="muted">Sign in to view your experiment workers.</p>';
+            return;
+          }
+          const data = await res.json();
+          state.innerHTML = '<p class="muted">Using ' + data.used + ' of ' + data.maxWorkers + ' workers.</p>';
+          if (data.workers.length === 0) {
+            state.innerHTML += '<p class="muted">No experiment workers yet.</p>';
+            return;
+          }
+          const grid = document.getElementById('grid');
+          grid.hidden = false;
+          grid.querySelector('tbody').innerHTML = data.workers.map(w =>
+            '<tr><td>' + w.name + '</td><td>' + w.marketSymbol + '</td><td>' + w.status +
+            '</td><td>' + w.randomSeed + '</td><td>' + n(w.cashBalance) + '</td><td>' +
+            n(w.positionQuantity) + '</td><td>' + n(w.realizedProfitAndLoss) + '</td><td>' +
+            w.tradeCount + '</td></tr>').join('');
+        })();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
 app.Run();
+
+/// <summary>
+/// Creation request for a paper experiment worker. It deliberately carries no user id: the owner
+/// is taken from the signed-in principal.
+/// </summary>
+internal sealed record CreateExperimentWorkerRequest(
+    string Name,
+    string StrategyTemplateId,
+    string MarketSymbol,
+    decimal StartingCash,
+    int RandomSeed);
