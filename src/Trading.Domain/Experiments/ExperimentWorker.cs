@@ -96,7 +96,8 @@ public sealed class ExperimentWorker
         string strategyId,
         string marketSymbol,
         decimal startingCash,
-        DateTimeOffset createdAtUtc)
+        DateTimeOffset createdAtUtc,
+        int randomSeed)
     {
         if (id == Guid.Empty)
         {
@@ -137,7 +138,7 @@ public sealed class ExperimentWorker
         CashBalance = startingCash;
         CreatedAtUtc = createdAtUtc;
         Status = ExperimentWorkerStatus.Created;
-        RandomSeed = Guid.NewGuid();
+        RandomSeed = randomSeed;
         StrategyParameters = "{}";
     }
 
@@ -163,7 +164,19 @@ public sealed class ExperimentWorker
 
     public ExperimentWorkerStatus Status { get; private set; }
 
-    public Guid RandomSeed { get; }
+    /// <summary>
+    /// Fixed seed for this worker's own random stream. It is supplied at construction and never
+    /// regenerated, so a worker's run can be reproduced exactly. Workers never share a stream.
+    /// </summary>
+    public int RandomSeed { get; }
+
+    public decimal RealizedProfitAndLoss { get; private set; }
+
+    /// <summary>
+    /// Why the worker failed, if it did. Retained so one worker's fault is diagnosable without
+    /// inspecting the other workers.
+    /// </summary>
+    public string? FailureReason { get; private set; }
 
     public string StrategyParameters { get; private set; }
 
@@ -237,10 +250,17 @@ public sealed class ExperimentWorker
         }
 
         Status = ExperimentWorkerStatus.Failed;
+        FailureReason = reason.Trim();
     }
 
     public void ApplyPaperTrade(decimal quantity, decimal executionPrice, decimal fee, string direction)
     {
+        if (Status != ExperimentWorkerStatus.Running)
+        {
+            throw new InvalidOperationException(
+                $"Only a running worker can trade. The worker is currently {Status}.");
+        }
+
         if (executionPrice <= 0m)
         {
             throw new ArgumentOutOfRangeException(nameof(executionPrice), "Execution price must be positive.");
@@ -256,9 +276,11 @@ public sealed class ExperimentWorker
             throw new ArgumentException("Direction is required.", nameof(direction));
         }
 
-        if (quantity == 0m)
+        if (quantity <= 0m)
         {
-            throw new ArgumentOutOfRangeException(nameof(quantity), "Quantity cannot be zero.");
+            throw new ArgumentOutOfRangeException(
+                nameof(quantity),
+                "Quantity must be positive; use the direction to express buy or sell.");
         }
 
         var directionLower = direction.Trim();
@@ -269,13 +291,18 @@ public sealed class ExperimentWorker
             throw new ArgumentException("Direction must be 'buy' or 'sell'.", nameof(direction));
         }
 
-        var notional = Math.Abs(quantity) * executionPrice;
-        var cashDelta = directionLower.Equals("buy", StringComparison.OrdinalIgnoreCase)
-            ? -(notional + fee)
-            : +(notional - fee);
+        var isBuy = directionLower.Equals("buy", StringComparison.OrdinalIgnoreCase);
+        var notional = quantity * executionPrice;
+        var cashDelta = isBuy ? -(notional + fee) : notional - fee;
 
-        if (directionLower.Equals("buy", StringComparison.OrdinalIgnoreCase))
+        if (isBuy)
         {
+            if (CashBalance + cashDelta < 0m)
+            {
+                throw new InvalidOperationException(
+                    "Paper-trading cash balance is insufficient for this buy. Experiment workers never borrow.");
+            }
+
             var previousQuantity = PositionQuantity;
             PositionQuantity += quantity;
             var weightedAverage = (AverageEntryPrice * previousQuantity) + (executionPrice * quantity);
@@ -290,6 +317,7 @@ public sealed class ExperimentWorker
                 throw new InvalidOperationException("Cannot sell more paper-trading quantity than the worker currently holds.");
             }
 
+            RealizedProfitAndLoss += ((executionPrice - AverageEntryPrice) * quantity) - fee;
             PositionQuantity -= quantity;
             if (PositionQuantity == 0m)
             {
@@ -311,16 +339,28 @@ public sealed class ExperimentWorker
     }
 }
 
+/// <summary>
+/// Every read is scoped to the owning user. There is deliberately no lookup by worker id alone:
+/// a worker belonging to another user must be unreachable, not merely refused.
+/// </summary>
 public interface IExperimentWorkerRepository
 {
-    Task<ExperimentWorker?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<ExperimentWorker?> GetAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyCollection<ExperimentWorker>> ListAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    Task<int> CountAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Ledger reads are scoped to the owning user as well as the worker, so one user can never read
+/// another user's paper-trading history by guessing a worker id.
+/// </summary>
 public interface IPaperTradingLedgerRepository
 {
-    Task AddAsync(PaperTradingLedgerEntry entry, CancellationToken cancellationToken = default);
+    Task AddAsync(Guid userId, PaperTradingLedgerEntry entry, CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyCollection<PaperTradingLedgerEntry>> ListAsync(Guid workerId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyCollection<PaperTradingLedgerEntry>> ListAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default);
 }
