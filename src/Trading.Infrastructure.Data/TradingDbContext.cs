@@ -4,6 +4,7 @@ using Trading.Domain.Execution;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Domain.Users;
+using Trading.Infrastructure.Data.Backtesting;
 using Trading.Exchanges.Abstractions;
 using Trading.Infrastructure.Data.MarketData;
 using Trading.Infrastructure.Data.Scanner;
@@ -36,6 +37,8 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedScanRequest> ScanRequests => Set<PersistedScanRequest>();
 
     public DbSet<PersistedScanResult> ScanResults => Set<PersistedScanResult>();
+
+    public DbSet<PersistedHistoricalDataset> HistoricalDatasets => Set<PersistedHistoricalDataset>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -399,8 +402,60 @@ public sealed class TradingDbContext : DbContext
                 result.Score,
                 result.Symbol
             });
+
+            modelBuilder.Entity<PersistedHistoricalDataset>(entity =>
+            {
+                entity.ToTable("HistoricalDatasets");
+                entity.HasKey(dataset => dataset.VersionIdentity);
+                entity.Property(dataset => dataset.VersionIdentity).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.Id).HasMaxLength(128).IsRequired();
+                entity.HasIndex(dataset => dataset.Id).IsUnique();
+                entity.Property(dataset => dataset.Source).HasMaxLength(128).IsRequired();
+                entity.Property(dataset => dataset.Symbol).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.Interval).HasMaxLength(8).IsRequired();
+                entity.Property(dataset => dataset.FromUtc).IsRequired();
+                entity.Property(dataset => dataset.ToUtc).IsRequired();
+                entity.Property(dataset => dataset.CandleCount).IsRequired();
+                entity.Property(dataset => dataset.ContentFingerprint).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.SourceVersion).HasMaxLength(128).IsRequired();
+                entity.Property(dataset => dataset.CreatedAtUtc).IsRequired();
+                entity.Property(dataset => dataset.ContainsOnlyClosedCandles).IsRequired();
+                entity.HasIndex(dataset => new
+                {
+                    dataset.Symbol,
+                    dataset.Interval,
+                    dataset.FromUtc,
+                    dataset.ToUtc,
+                    dataset.CreatedAtUtc,
+                    dataset.VersionIdentity
+                });
+            });
         });
 
         base.OnModelCreating(modelBuilder);
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        RejectHistoricalDatasetChanges();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        RejectHistoricalDatasetChanges();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void RejectHistoricalDatasetChanges()
+    {
+        ChangeTracker.DetectChanges();
+        if (ChangeTracker.Entries<PersistedHistoricalDataset>()
+            .Any(entry => entry.State is EntityState.Modified or EntityState.Deleted))
+        {
+            throw new InvalidOperationException("Historical dataset manifests are immutable and cannot be changed or deleted.");
+        }
     }
 }

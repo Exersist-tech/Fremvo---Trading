@@ -4,6 +4,8 @@ using Trading.Infrastructure.Data.MarketData;
 using Trading.Infrastructure.Data.Scanner;
 using Trading.MarketData;
 using Trading.Application.Scanner;
+using Trading.Backtesting;
+using Trading.Infrastructure.Data.Backtesting;
 
 namespace Trading.Web.Extensions;
 
@@ -24,6 +26,7 @@ internal static class ServiceCollectionExtensions
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlServer(connectionString));
         services.AddScoped<ICandleRepository, EfCandleRepository>();
+        services.AddScoped<IHistoricalDatasetRepository, EfHistoricalDatasetRepository>();
         services.AddScoped<IScanRequestRepository, EfScanRequestRepository>();
         services.AddScoped<IScanResultRepository, EfScanResultRepository>();
         services.AddScoped<ScannerResultsQueryService>();
