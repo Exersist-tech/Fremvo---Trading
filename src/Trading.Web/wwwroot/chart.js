@@ -21,11 +21,14 @@
   var ENTRY_SHORT = '#ff9f43';
   var STOP = '#ff5f56';
   var TARGET = '#3fbf6f';
+  var SMA = '#63b3ed';
+  var EMA = '#f6ad55';
 
   var state = {
     candles: [],
     positions: [],
     orders: [],
+    indicators: [],
     pairs: [],
     symbol: '',
     interval: '',
@@ -130,6 +133,19 @@
       maxVolume = Math.max(maxVolume, Number(c.volume));
     });
 
+    var visibleOpenTimes = {};
+    visible.forEach(function (c) { visibleOpenTimes[c.openTimeUtc] = true; });
+    state.indicators.filter(function (indicator) {
+      return indicator.status === 'Ready';
+    }).forEach(function (indicator) {
+      indicator.points.forEach(function (point) {
+        if (visibleOpenTimes[point.openTimeUtc]) {
+          high = Math.max(high, Number(point.value));
+          low = Math.min(low, Number(point.value));
+        }
+      });
+    });
+
     // Entry lines must stay on screen, otherwise a position can look absent.
     relevantEntries().forEach(function (entry) {
       high = Math.max(high, entry.price);
@@ -209,6 +225,44 @@
         ctx.fillRect(left, cssHeight - axisHeight - vh, bodyWidth, vh);
         ctx.globalAlpha = 1;
       }
+    });
+
+    // Overlay values are calculated as decimals on the server from safe closed
+    // candles. This loop only translates those returned values into pixels.
+    state.indicators.filter(function (indicator) {
+      return indicator.status === 'Ready';
+    }).forEach(function (indicator) {
+      var valuesByOpenTime = {};
+      indicator.points.forEach(function (point) {
+        valuesByOpenTime[point.openTimeUtc] = point.value;
+      });
+
+      var colour = indicator.name === 'sma' ? SMA : EMA;
+      var drawing = false;
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = 1.5;
+      // Draw below candle bodies and wicks so an overlay never hides price.
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath();
+      visible.forEach(function (c, index) {
+        var value = valuesByOpenTime[c.openTimeUtc];
+        if (value === undefined || value === null) {
+          drawing = false;
+          return;
+        }
+
+        var cx = padLeft + slot * index + slot / 2;
+        if (!drawing) {
+          ctx.moveTo(cx, y(value));
+          drawing = true;
+        } else {
+          ctx.lineTo(cx, y(value));
+        }
+      });
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
     });
 
     // Entry and position levels.
@@ -1023,6 +1077,31 @@
     return minutes[interval] ? minutes[interval] * 60 * 1000 : null;
   }
 
+  function selectedOverlayNames() {
+    return ['overlaySma', 'overlayEma'].filter(function (id) {
+      return $(id).checked;
+    }).map(function (id) {
+      return $(id).value;
+    });
+  }
+
+  function renderOverlayLegend() {
+    var host = $('overlayLegend');
+    var requested = selectedOverlayNames();
+    if (!requested.length) {
+      host.textContent = 'No overlays selected.';
+      return;
+    }
+
+    host.textContent = state.indicators.map(function (indicator) {
+      var label = indicator.name.toUpperCase() + '(' + indicator.period + ')';
+      if (indicator.status === 'Ready') {
+        return label + (indicator.name === 'sma' ? ' blue' : ' orange') + ', closed candles';
+      }
+      return label + ' unavailable: ' + (indicator.message || indicator.status);
+    }).join(' · ');
+  }
+
   function scheduleChartRefresh() {
     if (chartRefreshTimer !== null) {
       window.clearTimeout(chartRefreshTimer);
@@ -1049,6 +1128,8 @@
 
     var symbol = $('symbol').value.trim();
     var interval = $('interval').value;
+    var overlays = selectedOverlayNames();
+    var overlayPeriod = Number($('overlayPeriod').value);
 
     if (!symbol) {
       setStatus('Select a pair.', true);
@@ -1062,9 +1143,15 @@
     chartRefreshInFlight = true;
 
     try {
+      var url = '/api/marketdata/candles?symbol=' + encodeURIComponent(symbol) +
+        '&interval=' + encodeURIComponent(interval);
+      if (overlays.length) {
+        url += '&indicators=' + encodeURIComponent(overlays.join(',')) +
+          '&indicatorPeriod=' + encodeURIComponent(overlayPeriod);
+      }
+
       var response = await fetch(
-        '/api/marketdata/candles?symbol=' + encodeURIComponent(symbol) +
-        '&interval=' + encodeURIComponent(interval),
+        url,
         { headers: { 'Accept': 'application/json' } });
 
       var payload = await response.json();
@@ -1082,7 +1169,8 @@
 
       var switchedView = state.symbol !== symbol || state.interval !== interval;
 
-      state.candles = payload;
+      state.candles = Array.isArray(payload) ? payload : (payload.candles || []);
+      state.indicators = Array.isArray(payload) ? [] : (payload.indicators || []);
       state.symbol = symbol;
       state.interval = interval;
 
@@ -1095,6 +1183,7 @@
 
       if (isAutomaticRefresh) {
         draw();
+        renderOverlayLegend();
         return;
       }
 
@@ -1123,7 +1212,7 @@
       var orders = await fetch(ordersUrl, { headers: { 'Accept': 'application/json' } });
       state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
-      var message = tradingMode + ' trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
+      var message = tradingMode + ' trading. ' + state.candles.length + ' bars of ' + symbol + ' loaded from Kraken.';
 
       if (exits && exits.closed) {
         message += ' ' + exits.closed + ' position closed by a stop or target.';
@@ -1138,6 +1227,7 @@
       setStatus(message, false);
 
       draw();
+      renderOverlayLegend();
       renderPositionTable();
       renderActiveOrderTable();
       renderPairFilters();
@@ -1498,6 +1588,9 @@
     $('load').addEventListener('click', load);
     $('interval').addEventListener('change', load);
     $('symbol').addEventListener('change', load);
+    $('overlaySma').addEventListener('change', load);
+    $('overlayEma').addEventListener('change', load);
+    $('overlayPeriod').addEventListener('change', load);
     $('pairSearch').addEventListener('focus', function () {
       renderPairSearch($('pairSearch').value);
     });

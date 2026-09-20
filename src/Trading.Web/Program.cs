@@ -37,6 +37,7 @@ using Trading.Infrastructure.Secrets;
 using Trading.MarketData;
 using Trading.Optimization;
 using Trading.Risk;
+using Trading.Web.Charting;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
@@ -95,6 +96,7 @@ builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
 builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
 builder.Services.AddScoped<IPortfolioQueryService, PortfolioQueryService>();
+builder.Services.AddSingleton<ChartIndicatorOverlayService>();
 
 // Whether this deployment can reach a real venue. Registering an
 // ILiveExecutionRoute is the single act that opens the promotion ladder out of
@@ -1791,7 +1793,10 @@ app.MapGet("/api/portfolio", async (
 app.MapGet("/api/marketdata/candles", async (
     string symbol,
     string interval,
+    string? indicators,
+    int? indicatorPeriod,
     IHistoricalCandleSource candleSource,
+    ChartIndicatorOverlayService overlayService,
     CancellationToken cancellationToken) =>
 {
     if (!Enum.TryParse<CandleInterval>(interval, ignoreCase: true, out var parsedInterval)
@@ -1800,13 +1805,34 @@ app.MapGet("/api/marketdata/candles", async (
         return Results.BadRequest(new { error = "UnknownInterval", message = "Supported intervals: OneMinute, FiveMinutes, TenMinutes, FifteenMinutes, ThirtyMinutes, OneHour, FourHours, OneDay." });
     }
 
+    var requestedIndicators = (indicators ?? string.Empty)
+        .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Select(name => name.ToUpperInvariant() switch
+        {
+            "SMA" => "sma",
+            "EMA" => "ema",
+            _ => name,
+        })
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+    if (requestedIndicators.Any(name => name is not ("sma" or "ema")))
+    {
+        return Results.BadRequest(new { error = "UnknownIndicator", message = "Supported chart overlays: sma, ema." });
+    }
+
+    var period = indicatorPeriod ?? 20;
+    if (period is < 1 or > 200)
+    {
+        return Results.BadRequest(new { error = "InvalidIndicatorPeriod", message = "Indicator period must be between 1 and 200." });
+    }
+
     try
     {
         var candles = await candleSource
             .FetchAsync(symbol, parsedInterval, DateTimeOffset.UnixEpoch, cancellationToken)
             .ConfigureAwait(false);
 
-        return Results.Ok(candles.Select(candle => new
+        var responseCandles = candles.Select(candle => new
         {
             openTimeUtc = candle.OpenTimeUtc,
             closeTimeUtc = candle.CloseTimeUtc,
@@ -1817,7 +1843,21 @@ app.MapGet("/api/marketdata/candles", async (
             volume = candle.Volume,
             isClosed = candle.IsClosed,
             isDerived = candle.IsDerived
-        }));
+        }).ToArray();
+
+        // Retain the original array response when no overlay was requested.
+        // The chart asks for overlays explicitly, keeping existing read-only
+        // consumers compatible while calculating values from this same fetch.
+        if (requestedIndicators.Length == 0)
+        {
+            return Results.Ok(responseCandles);
+        }
+
+        return Results.Ok(new
+        {
+            candles = responseCandles,
+            indicators = overlayService.Calculate(candles, requestedIndicators, period)
+        });
     }
     catch (MarketDataIntervalNotSupportedException exception)
     {
@@ -2669,6 +2709,15 @@ app.MapGet("/chart", () => Results.Content(
               </div>
             </div>
 
+            <div class="chart-overlay-controls" aria-label="Chart overlays">
+              <span>Overlays (closed candles only)</span>
+              <label><input id="overlaySma" type="checkbox" value="sma" /> SMA</label>
+              <label><input id="overlayEma" type="checkbox" value="ema" /> EMA</label>
+              <label for="overlayPeriod">Period</label>
+              <input id="overlayPeriod" type="number" min="1" max="200" value="20" inputmode="numeric" />
+              <span id="overlayLegend" class="chart-overlay-legend" aria-live="polite">No overlays selected.</span>
+            </div>
+
             <div class="chart-stage">
               <canvas id="chart" width="1100" height="460"
                       style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
@@ -3375,6 +3424,8 @@ app.MapGet("/account", () => Results.Content(
     "text/html"));
 
 await app.RunAsync().ConfigureAwait(false);
+
+public partial class Program;
 
 /// <summary>
 /// A request to connect an exchange account.
