@@ -175,9 +175,11 @@ public sealed class OptimizationRun
 
         // Selection scores are produced on validation data only; the holdout is untouched here.
         var ranked = ParameterSearchEngine.Search(
+            new ParameterSearchSelection(Training, Validation),
             _definitions,
-            parameters => Score(objective, parameters, Validation),
-            gridPointsPerParameter);
+            (_, parameters) => Score(objective, parameters, Validation),
+            gridPointsPerParameter,
+            ParameterSearchEngine.MaximumCandidateCount);
 
         var best = ranked[0];
         var trainingScore = Score(objective, best.Parameters, Training);
