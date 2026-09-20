@@ -28,6 +28,18 @@ public static class DerivedCandleBuilder
             throw new ArgumentException("The derived candle end time must be after the start time.", nameof(endTimeUtc));
         }
 
+        var start = startTimeUtc.ToUniversalTime();
+        var end = endTimeUtc.ToUniversalTime();
+        if (start.Second != 0 || start.Millisecond != 0 || start.Minute % 10 != 0)
+        {
+            throw new ArgumentException("The derived candle must begin on a UTC ten-minute boundary.", nameof(startTimeUtc));
+        }
+
+        if (end != start.AddMinutes(10))
+        {
+            throw new ArgumentException("The derived candle must cover exactly ten minutes.", nameof(endTimeUtc));
+        }
+
         var ordered = oneMinuteCandles
             .OrderBy(c => c.OpenTimeUtc)
             .ToList();
@@ -37,41 +49,32 @@ public static class DerivedCandleBuilder
             throw new ArgumentException("All one-minute candles must match the requested symbol.", nameof(symbol));
         }
 
+        for (var index = 0; index < ordered.Count; index++)
+        {
+            var candle = ordered[index];
+            if (candle.Interval != CandleInterval.OneMinute ||
+                !candle.IsClosed ||
+                candle.OpenTimeUtc != start.AddMinutes(index) ||
+                candle.CloseTimeUtc != start.AddMinutes(index + 1))
+            {
+                throw new ArgumentException(
+                    "Constituents must be exactly ten contiguous closed one-minute candles.",
+                    nameof(oneMinuteCandles));
+            }
+        }
+
         var open = ordered.First().Open;
         var high = ordered.Max(c => c.High);
         var low = ordered.Min(c => c.Low);
         var close = ordered.Last().Close;
         var volume = ordered.Sum(c => c.Volume);
         var issues = new HashSet<DataQualityIssue>(ordered.SelectMany(candle => candle.QualityFlags));
-        for (var index = 0; index < ordered.Count; index++)
-        {
-            var expectedOpen = startTimeUtc.ToUniversalTime().AddMinutes(index);
-            if (ordered[index].OpenTimeUtc != expectedOpen)
-            {
-                issues.Add(DataQualityIssue.Missing);
-            }
-        }
-
-        for (var index = 1; index < oneMinuteCandles.Count; index++)
-        {
-            if (oneMinuteCandles[index].OpenTimeUtc <= oneMinuteCandles[index - 1].OpenTimeUtc)
-            {
-                issues.Add(oneMinuteCandles[index].OpenTimeUtc == oneMinuteCandles[index - 1].OpenTimeUtc
-                    ? DataQualityIssue.Duplicate
-                    : DataQualityIssue.OutOfOrder);
-            }
-        }
-
-        if (endTimeUtc.ToUniversalTime() != startTimeUtc.ToUniversalTime().AddMinutes(10))
-        {
-            issues.Add(DataQualityIssue.Missing);
-        }
 
         return new Candle(
             symbol,
             CandleInterval.TenMinutes,
-            startTimeUtc,
-            endTimeUtc,
+            start,
+            end,
             open,
             high,
             low,

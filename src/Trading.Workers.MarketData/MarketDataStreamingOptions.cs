@@ -13,5 +13,7 @@ public sealed class MarketDataStreamingOptions
 
     public Collection<CandleInterval> Intervals { get; init; } = [];
 
+    public bool DeriveTenMinuteCandles { get; init; }
+
     public int MaximumReconnectDelaySeconds { get; init; } = 30;
 }

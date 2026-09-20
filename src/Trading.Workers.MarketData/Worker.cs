@@ -81,7 +81,9 @@ public sealed class Worker : BackgroundService
 
         return options.Symbols
             .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
-            .SelectMany(symbol => options.Intervals.Where(interval => interval != Trading.Domain.Market.CandleInterval.None)
+            .SelectMany(symbol => options.Intervals.Where(interval =>
+                    interval != Trading.Domain.Market.CandleInterval.None &&
+                    interval != Trading.Domain.Market.CandleInterval.TenMinutes)
                 .Select(interval => new CandleSubscription(symbol, interval)))
             .Distinct()
             .ToArray();

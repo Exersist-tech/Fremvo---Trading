@@ -34,6 +34,31 @@ public sealed class EfCandleRepositoryTests
     }
 
     [Fact]
+    public async Task DerivedTenMinuteCandlePersistsWithConstituentQualityEvidenceAsync()
+    {
+        await using var context = CreateContext();
+        var repository = new EfCandleRepository(context);
+        var start = new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero);
+        var constituents = Enumerable.Range(0, 10).Select(index => new Candle(
+            "BTC/USD", CandleInterval.OneMinute,
+            start.AddMinutes(index), start.AddMinutes(index + 1),
+            100m + index, 101m + index, 99m + index, 100.5m + index, 2m,
+            isClosed: true, isDerived: false,
+            index == 4 ? new[] { DataQualityIssue.Late } : null)).ToArray();
+        var derived = DerivedCandleBuilder.BuildTenMinuteCandle(
+            constituents, "BTC/USD", start, start.AddMinutes(10), isClosed: true);
+
+        Assert.Equal(CandleWriteResult.Inserted, await repository.UpsertAsync(derived));
+
+        var persisted = Assert.Single(await repository.ListAsync(
+            "BTC/USD", CandleInterval.TenMinutes, start, start));
+        Assert.True(persisted.IsDerived);
+        Assert.Contains(DataQualityIssue.Late, persisted.QualityFlags);
+        Assert.Contains(DataQualityIssue.Derived, persisted.QualityFlags);
+        Assert.False(persisted.CanBeUsedForClosedCandleSignal);
+    }
+
+    [Fact]
     public async Task ListIsUtcBoundedAndChronologicalAsync()
     {
         await using var context = CreateContext();

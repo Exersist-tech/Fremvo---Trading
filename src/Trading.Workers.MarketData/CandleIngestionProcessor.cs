@@ -12,15 +12,18 @@ public sealed class CandleIngestionProcessor
     private readonly ICandleRepository _repository;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CandleIngestionProcessor> _logger;
+    private readonly bool _deriveTenMinuteCandles;
 
     public CandleIngestionProcessor(
         ICandleRepository repository,
         TimeProvider timeProvider,
-        ILogger<CandleIngestionProcessor> logger)
+        ILogger<CandleIngestionProcessor> logger,
+        bool deriveTenMinuteCandles = false)
     {
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _deriveTenMinuteCandles = deriveTenMinuteCandles;
     }
 
     public async Task<CandleWriteResult> ProcessAsync(Candle incoming, CancellationToken cancellationToken)
@@ -56,6 +59,52 @@ public sealed class CandleIngestionProcessor
                 string.Join(',', flags), null);
         }
 
+        if (_deriveTenMinuteCandles &&
+            normalized.Interval == Trading.Domain.Market.CandleInterval.OneMinute &&
+            normalized.IsClosed &&
+            result != CandleWriteResult.Conflict)
+        {
+            await PersistTenMinuteCandleAsync(normalized, cancellationToken).ConfigureAwait(false);
+        }
+
         return result;
+    }
+
+    private async Task PersistTenMinuteCandleAsync(Candle constituent, CancellationToken cancellationToken)
+    {
+        var start = new DateTimeOffset(
+            constituent.OpenTimeUtc.Year,
+            constituent.OpenTimeUtc.Month,
+            constituent.OpenTimeUtc.Day,
+            constituent.OpenTimeUtc.Hour,
+            constituent.OpenTimeUtc.Minute - (constituent.OpenTimeUtc.Minute % 10),
+            0,
+            TimeSpan.Zero);
+        var end = start.AddMinutes(10);
+        var constituents = await _repository.ListAsync(
+                constituent.Symbol,
+                Trading.Domain.Market.CandleInterval.OneMinute,
+                start,
+                end.AddTicks(-1),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (constituents.Count != 10)
+        {
+            return;
+        }
+
+        Candle derived;
+        try
+        {
+            derived = DerivedCandleBuilder.BuildTenMinuteCandle(
+                constituents.ToArray(), constituent.Symbol, start, end, isClosed: true);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+
+        await _repository.UpsertAsync(derived, cancellationToken).ConfigureAwait(false);
     }
 }

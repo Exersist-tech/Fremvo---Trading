@@ -35,6 +35,98 @@ public sealed class MarketDataWorkerTests
     }
 
     [Fact]
+    public void TenMinuteIsNeverSentAsANativeKrakenSubscription()
+    {
+        var subscriptions = Worker.GetSubscriptions(new MarketDataStreamingOptions
+        {
+            Enabled = true,
+            Symbols = ["BTC/USD"],
+            Intervals = [CandleInterval.OneMinute, CandleInterval.TenMinutes],
+            DeriveTenMinuteCandles = true,
+        });
+
+        var subscription = Assert.Single(subscriptions);
+        Assert.Equal(CandleInterval.OneMinute, subscription.Interval);
+    }
+
+    [Fact]
+    public async Task ProcessorPersistsExactlyOneDerivedTenMinuteCandleFromClosedContiguousMinutes()
+    {
+        var start = new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero);
+        var repository = new InMemoryRepository();
+        var processor = new CandleIngestionProcessor(
+            repository,
+            new AdvancingTimeProvider(start.AddMinutes(1)),
+            NullLogger<CandleIngestionProcessor>.Instance,
+            deriveTenMinuteCandles: true);
+
+        foreach (var minute in Enumerable.Range(0, 10).Select(index => CreateMinute(start, index)))
+        {
+            Assert.Equal(CandleWriteResult.Inserted, await processor.ProcessAsync(minute, CancellationToken.None));
+        }
+
+        var derived = Assert.Single(await repository.ListAsync(
+            "BTC/USD", CandleInterval.TenMinutes, start, start));
+        Assert.True(derived.IsDerived);
+        Assert.True(derived.CanBeUsedForClosedCandleSignal);
+        Assert.Equal(100m, derived.Open);
+        Assert.Equal(110m, derived.High);
+        Assert.Equal(99m, derived.Low);
+        Assert.Equal(109.5m, derived.Close);
+        Assert.Equal(20m, derived.Volume);
+
+        Assert.Equal(CandleWriteResult.Conflict,
+            await processor.ProcessAsync(CreateMinute(start, 9), CancellationToken.None));
+        Assert.Single(await repository.ListAsync("BTC/USD", CandleInterval.TenMinutes, start, start));
+    }
+
+    [Fact]
+    public async Task ProcessorRefusesDerivedCandleWhenAConstituentIsMissing()
+    {
+        var start = new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero);
+        var repository = new InMemoryRepository();
+        var processor = new CandleIngestionProcessor(
+            repository,
+            new FixedTimeProvider(start.AddMinutes(11)),
+            NullLogger<CandleIngestionProcessor>.Instance,
+            deriveTenMinuteCandles: true);
+
+        foreach (var index in Enumerable.Range(0, 10).Where(index => index != 5))
+        {
+            await processor.ProcessAsync(CreateMinute(start, index), CancellationToken.None);
+        }
+
+        Assert.Empty(await repository.ListAsync("BTC/USD", CandleInterval.TenMinutes, start, start));
+    }
+
+    [Fact]
+    public async Task ProcessorRefusesDerivedCandleWhenAConstituentIsIncomplete()
+    {
+        var start = new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero);
+        var repository = new InMemoryRepository();
+        var processor = new CandleIngestionProcessor(
+            repository,
+            new FixedTimeProvider(start.AddMinutes(11)),
+            NullLogger<CandleIngestionProcessor>.Instance,
+            deriveTenMinuteCandles: true);
+
+        foreach (var index in Enumerable.Range(0, 10))
+        {
+            var candle = CreateMinute(start, index);
+            if (index == 5)
+            {
+                candle = new Candle(
+                    candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
+                    candle.Open, candle.High, candle.Low, candle.Close, candle.Volume, false, false);
+            }
+
+            await processor.ProcessAsync(candle, CancellationToken.None);
+        }
+
+        Assert.Empty(await repository.ListAsync("BTC/USD", CandleInterval.TenMinutes, start, start));
+    }
+
+    [Fact]
     public async Task ProcessorPersistsQualityEvidenceAndDoesNotOverwriteConflicts()
     {
         var repository = new RecordingRepository(CreateCandle(10));
@@ -83,6 +175,11 @@ public sealed class MarketDataWorkerTests
         new DateTimeOffset(2026, 9, 20, hour + 1, 0, 0, TimeSpan.Zero),
         100m, 105m, 99m, 102m, 10m, true, false);
 
+    private static Candle CreateMinute(DateTimeOffset start, int minute) => new(
+        "BTC/USD", CandleInterval.OneMinute,
+        start.AddMinutes(minute), start.AddMinutes(minute + 1),
+        100m + minute, 101m + minute, 99m + minute, 100.5m + minute, 2m, true, false);
+
     private sealed class RecordingRepository : ICandleRepository
     {
         private readonly Candle _latest;
@@ -113,6 +210,61 @@ public sealed class MarketDataWorkerTests
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class AdvancingTimeProvider(DateTimeOffset first) : TimeProvider
+    {
+        private DateTimeOffset _next = first;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            var current = _next;
+            _next = _next.AddMinutes(1);
+            return current;
+        }
+    }
+
+    private sealed class InMemoryRepository : ICandleRepository
+    {
+        private readonly List<Candle> _candles = [];
+
+        public Task<CandleWriteResult> UpsertAsync(Candle candle, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var existing = _candles.SingleOrDefault(stored =>
+                stored.Symbol == candle.Symbol &&
+                stored.Interval == candle.Interval &&
+                stored.OpenTimeUtc == candle.OpenTimeUtc);
+            if (existing is null)
+            {
+                _candles.Add(candle);
+                return Task.FromResult(CandleWriteResult.Inserted);
+            }
+
+            return Task.FromResult(existing.Open == candle.Open &&
+                existing.High == candle.High &&
+                existing.Low == candle.Low &&
+                existing.Close == candle.Close &&
+                existing.Volume == candle.Volume &&
+                existing.IsClosed == candle.IsClosed &&
+                existing.IsDerived == candle.IsDerived &&
+                existing.QualityFlags.OrderBy(flag => flag).SequenceEqual(candle.QualityFlags.OrderBy(flag => flag))
+                ? CandleWriteResult.Duplicate
+                : CandleWriteResult.Conflict);
+        }
+
+        public Task<Candle?> GetLatestAsync(string symbol, CandleInterval interval, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_candles.Where(candle => candle.Symbol == symbol && candle.Interval == interval)
+                .OrderByDescending(candle => candle.CloseTimeUtc).ThenByDescending(candle => candle.OpenTimeUtc)
+                .FirstOrDefault());
+
+        public Task<IReadOnlyCollection<Candle>> ListAsync(
+            string symbol, CandleInterval interval, DateTimeOffset fromUtc, DateTimeOffset toUtc,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyCollection<Candle>>(_candles.Where(candle =>
+                    candle.Symbol == symbol && candle.Interval == interval &&
+                    candle.OpenTimeUtc >= fromUtc && candle.OpenTimeUtc <= toUtc)
+                .OrderBy(candle => candle.OpenTimeUtc).ToArray());
     }
 
 }

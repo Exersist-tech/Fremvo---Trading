@@ -50,14 +50,14 @@ public sealed class DerivedCandleTests
     }
 
     [Fact]
-    public void DerivedCandlePropagatesUnsafeConstituentAndGapEvidence()
+    public void DerivedCandlePropagatesUnsafeConstituentEvidenceAndRemainsUnusable()
     {
         var start = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var candles = Enumerable.Range(0, 10)
             .Select(index => new Candle(
                 "BTCUSDT", CandleInterval.OneMinute,
-                start.AddMinutes(index == 5 ? 6 : index),
-                start.AddMinutes(index == 5 ? 7 : index + 1),
+                start.AddMinutes(index),
+                start.AddMinutes(index + 1),
                 100m, 101m, 99m, 100m, 1m, true, false,
                 index == 4 ? new[] { DataQualityIssue.Late } : null))
             .ToArray();
@@ -67,7 +67,22 @@ public sealed class DerivedCandleTests
 
         Assert.Contains(DataQualityIssue.Derived, derived.QualityFlags);
         Assert.Contains(DataQualityIssue.Late, derived.QualityFlags);
-        Assert.Contains(DataQualityIssue.Missing, derived.QualityFlags);
         Assert.False(derived.CanBeUsedForClosedCandleSignal);
+    }
+
+    [Fact]
+    public void DerivedCandleRejectsUnalignedOrNonContiguousConstituents()
+    {
+        var start = new DateTimeOffset(2026, 1, 1, 0, 1, 0, TimeSpan.Zero);
+        var candles = Enumerable.Range(0, 10)
+            .Select(index => new Candle(
+                "BTCUSDT", CandleInterval.OneMinute,
+                start.AddMinutes(index),
+                start.AddMinutes(index + 1),
+                100m, 101m, 99m, 100m, 1m, true, false))
+            .ToArray();
+
+        Assert.Throws<ArgumentException>(() =>
+            DerivedCandleBuilder.BuildTenMinuteCandle(candles, "BTCUSDT", start, start.AddMinutes(10), true));
     }
 }

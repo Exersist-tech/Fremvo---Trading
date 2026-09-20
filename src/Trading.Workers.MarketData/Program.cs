@@ -11,7 +11,18 @@ builder.Services.Configure<MarketDataStreamingOptions>(
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IStreamingCandleSource, KrakenStreamingCandleSource>();
 builder.Services.AddScoped<ICandleRepository, EfCandleRepository>();
-builder.Services.AddScoped<CandleIngestionProcessor>();
+builder.Services.AddScoped<CandleIngestionProcessor>(serviceProvider =>
+{
+    var options = serviceProvider.GetRequiredService<
+        Microsoft.Extensions.Options.IOptions<MarketDataStreamingOptions>>().Value;
+    return new CandleIngestionProcessor(
+        serviceProvider.GetRequiredService<ICandleRepository>(),
+        serviceProvider.GetRequiredService<TimeProvider>(),
+        serviceProvider.GetRequiredService<ILogger<CandleIngestionProcessor>>(),
+        options.DeriveTenMinuteCandles &&
+        options.Enabled &&
+        options.Intervals.Contains(Trading.Domain.Market.CandleInterval.OneMinute));
+});
 var connectionString = builder.Configuration.GetConnectionString("TradingDb");
 if (!string.IsNullOrWhiteSpace(connectionString))
 {
