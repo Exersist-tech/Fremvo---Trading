@@ -2683,6 +2683,12 @@ app.MapGet("/exchange", () => Results.Content(
           logged, and never sent back to the browser.
         </div>
 
+        <section class="card">
+          <h2>Live activation status</h2>
+          <p id="live-activation" class="empty">Checking the deployment's live-trading safeguards.</p>
+          <p id="live-rollout-id" class="empty"></p>
+        </section>
+
         <h2>Trading stage</h2>
         <p>
           Simulated and real money are a property of the account, not a display option, so a
@@ -2780,6 +2786,37 @@ app.MapGet("/exchange", () => Results.Content(
           return 'badge badge-bad';
         }
 
+        async function loadLiveActivationStatus() {
+          var host = document.getElementById('live-activation');
+          var rolloutId = document.getElementById('live-rollout-id');
+
+          try {
+            var responses = await Promise.all([
+              fetch('/api/trading/modes', { headers: { 'Accept': 'application/json' } }),
+              fetch('/api/me', { headers: { 'Accept': 'application/json' } })
+            ]);
+            var modes = responses[0].ok ? await responses[0].json() : null;
+            var me = responses[1].ok ? await responses[1].json() : null;
+
+            if (!modes || !modes.live) {
+              host.textContent = 'Live activation status could not be read. No real order can be sent until it is available.';
+              return;
+            }
+
+            host.textContent = modes.live.available
+              ? 'This deployment can reach Kraken. Start proving to submit one small, approved real-money limit order.'
+              : 'Live trading is blocked: ' + (modes.live.reason || 'The deployment has not met its required safeguards.');
+
+            if (me && me.signedIn && me.id) {
+              rolloutId.textContent =
+                'Rollout user ID for the deployment configuration: ' + me.id +
+                '. This page cannot enable live trading itself.';
+            }
+          } catch (error) {
+            host.textContent = 'Live activation status could not be read. No real order can be sent until it is available.';
+          }
+        }
+
         async function changeStage(account, target) {
           var question = target === 'Paper'
             ? 'Return "' + account.displayName + '" to paper trading? No new order can reach Kraken.'
@@ -2811,6 +2848,7 @@ app.MapGet("/exchange", () => Results.Content(
         }
 
         async function load() {
+          await loadLiveActivationStatus();
           var response = await fetch('/api/exchange/accounts');
           tbody.textContent = '';
 
