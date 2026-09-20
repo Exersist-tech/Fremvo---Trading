@@ -13,7 +13,7 @@ public sealed class ReconciliationTests
             "ex-123",
             ExchangeOrderStatus.Unknown,
             DateTimeOffset.UtcNow,
-            "binance-testnet");
+            "kraken-proving");
 
         Assert.True(record.RequiresManualReview);
         Assert.True(record.RequiresResolutionBeforeResubmission);
@@ -33,7 +33,7 @@ public sealed class ReconciliationTests
             "ex-222",
             ExchangeOrderStatus.PendingNew,
             DateTimeOffset.UtcNow,
-            "binance-testnet");
+            "kraken-proving");
 
         var exception = Assert.Throws<ArgumentException>(() =>
             record.Resolve(ExchangeOrderStatus.Unknown, "This should be invalid.", DateTimeOffset.UtcNow));

@@ -15,7 +15,7 @@ Trading.sln
     Trading.Infrastructure.Messaging/ # Azure Service Bus abstraction
     Trading.Infrastructure.Cache/     # Redis abstraction
     Trading.Exchanges.Abstractions/   # exchange-neutral connector contracts
-    Trading.Exchanges.Binance/        # Binance-specific connector (Spot + Futures)
+    Trading.Exchanges.Kraken/        # Kraken-specific connector (Spot + Futures)
     Trading.MarketData/               # ingestion, normalization, candle storage access
     Trading.Indicators/                # technical indicator library (pure functions)
     Trading.Strategies/                # approved strategy templates + parameter contracts
@@ -31,7 +31,7 @@ Trading.sln
   tests/
     Trading.Domain.Tests/
     Trading.Application.Tests/
-    Trading.Exchanges.Binance.Tests/
+    Trading.Exchanges.Kraken.Tests/
     Trading.Backtesting.Tests/
     Trading.Risk.Tests/
     Trading.Web.Tests/
@@ -49,14 +49,14 @@ Trading.Domain  <-- depends on nothing platform-specific
 Trading.Application  <-- depends only on Domain (defines ports/interfaces)
       ^
 Trading.Infrastructure.*  <-- implement Application ports; depend on Domain+Application
-Trading.Exchanges.Binance  <-- implements Trading.Exchanges.Abstractions ports
+Trading.Exchanges.Kraken  <-- implements Trading.Exchanges.Abstractions ports
 Trading.MarketData / Strategies / Backtesting / Optimization / Risk / Reporting
-      <-- depend on Domain + Application abstractions, never on Infrastructure or Binance directly
+      <-- depend on Domain + Application abstractions, never on Infrastructure or Kraken directly
 Trading.Web / Trading.Workers.*  <-- composition roots; wire concrete implementations via DI
 ```
 
 `Trading.Domain` must never reference: Azure SDKs, EF Core, ASP.NET Core,
-HTTP clients, Binance types, or any UI framework. This is enforced with
+HTTP clients, Kraken types, or any UI framework. This is enforced with
 architecture tests (e.g. `NetArchTest`/`ArchUnitNET`) in
 `Trading.Domain.Tests`.
 
@@ -73,9 +73,9 @@ architecture tests (e.g. `NetArchTest`/`ArchUnitNET`) in
 - `ExchangeSymbol`, `PriceTick`, `QuantityStep`, `OrderFilterSet` — neutral
   value objects representing exchange trading rules.
 
-`Trading.Exchanges.Binance` implements these ports using Binance's official
-API/SDK, translating Binance-specific DTOs into neutral Domain/Application
-models at the boundary. No Binance type ever crosses into Domain,
+`Trading.Exchanges.Kraken` implements these ports using Kraken's official
+API/SDK, translating Kraken-specific DTOs into neutral Domain/Application
+models at the boundary. No Kraken type ever crosses into Domain,
 Strategies, Backtesting, or Risk projects.
 
 Adding a second exchange later means adding `Trading.Exchanges.<Name>` with
@@ -137,17 +137,37 @@ MarketEvent -> StrategyDecision -> TradeIntent -> RiskEvaluation
 - **GitHub Actions** for CI (build/test/lint/architecture tests) and CD
   (Bicep deployment, App Service deployment slots with staged rollout).
 - **Bicep** defines all infrastructure; environments are Dev/Test/
-  (eventually) Production, each with separate Key Vaults and Binance
-  credentials (testnet vs. live never share an environment).
+  (eventually) Production, each with separate Key Vaults and Kraken
+  credentials (proving credentials and live credentials never share an
+  environment).
 
 ## 5. Environments and trading modes
 
-| Environment | Exchange endpoint | Purpose |
-|---|---|---|
-| Dev | Binance Testnet | Local/dev iteration |
-| Test/Staging | Binance Testnet | Automated + manual QA, paper trading validation |
-| Production (paper) | Binance Live market data, simulated execution | Real prices, fake orders |
-| Production (live) | Binance Live | Real orders, gated per user/account/strategy |
+Kraken publishes a demo environment for **Futures**
+(`demo-futures.kraken.com`) but has **no public Spot sandbox**. Kraken's own
+guidance is to exercise the Spot API with a real account and minimal size,
+and its UAT environment is not self-service. The platform therefore cannot
+rely on a Spot testnet as the safety gate before live Spot trading, and
+substitutes two mechanisms that together give stronger coverage:
+
+1. A **recorded/replayed Spot response harness**, so automated tests
+   exercise the full execution and reconciliation path without ever
+   reaching Kraken. No automated test may submit a real order.
+2. A **minimum-size proving stage** on the real Spot API, described in
+   implementation plan Phase 9, constrained by hard platform ceilings.
+
+| Environment | Spot endpoint | Futures endpoint | Purpose |
+|---|---|---|---|
+| Dev | Public market data only; execution replayed from recorded responses | Kraken Futures demo | Local/dev iteration; no Spot credentials |
+| Test/Staging | Public market data; recorded-response execution | Kraken Futures demo | Automated + manual QA, paper trading validation |
+| Production (paper) | Kraken live market data, simulated execution | Kraken live market data, simulated execution | Real prices, fake orders |
+| Production (proving) | Kraken live Spot, minimum size, close-only after proving | n/a | Phase 9 proving stage, per-account opt-in |
+| Production (live) | Kraken live Spot | Kraken Futures live | Real orders, gated per user/account/strategy |
+
+Because the proving stage uses real funds, it is treated as live trading for
+every safety purpose: entitlements, risk ceilings, audit, halts, idempotency,
+and reconciliation all apply unchanged. It is distinguished only by a
+mandatory notional ceiling and a restricted instrument set.
 
 A single Production deployment supports both paper and live trading modes
 per experiment worker/account; live is opt-in and gated by entitlements,

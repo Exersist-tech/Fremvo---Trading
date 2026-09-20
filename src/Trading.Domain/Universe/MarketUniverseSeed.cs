@@ -22,24 +22,35 @@ public static class MarketUniverseSeed
     /// Version tag for the seed. Changing the membership changes the tag so
     /// an eligibility decision can be traced to the seed it came from.
     /// </summary>
-    public const string Version = "2026-09-20.spot-usdt-50";
+    public const string Version = "2026-09-20.kraken-spot-usd-50";
 
-    public const string ExchangeName = "Binance";
+    public const string ExchangeName = "Kraken";
 
-    public const string QuoteAsset = "USDT";
+    /// <summary>
+    /// Kraken's deepest spot liquidity is quoted in US dollars, so the seed
+    /// is USD quoted. This is a data-selection choice for research only and
+    /// is unrelated to a user's reporting currency, which each user chooses
+    /// for themselves.
+    /// </summary>
+    public const string QuoteAsset = "USD";
 
+    /// <summary>
+    /// Base assets use Kraken's display codes, so Bitcoin is XBT and
+    /// Dogecoin is XDG. Translating these to any other convention is the
+    /// connector's job, never this list's.
+    /// </summary>
     private static readonly string[] BaseAssets =
     {
-        "BTC",   "ETH",   "BNB",   "XRP",   "SOL",
-        "DOGE",  "ADA",   "LINK",  "AVAX",  "LTC",
-        "TRX",   "XLM",   "NEAR",  "UNI",   "SUI",
-        "ZEC",   "FIL",   "ARB",   "APT",   "ONDO",
-        "INJ",   "TAO",   "AR",    "DOT",   "TON",
-        "OP",    "ETC",   "CAKE",  "CRV",   "RUNE",
-        "ENA",   "WLD",   "PEPE",  "FLOKI", "STRK",
-        "TIA",   "SEI",   "AXS",   "CHZ",   "ORDI",
-        "BLUR",  "ZK",    "METIS", "ONE",   "PROVE",
-        "BANK",  "G",     "ZAMA",  "TRUMP", "DCR"
+        "XBT",   "ETH",   "SOL",   "XRP",   "ADA",
+        "XDG",   "LINK",  "AVAX",  "LTC",   "DOT",
+        "TRX",   "XLM",   "BCH",   "ATOM",  "UNI",
+        "NEAR",  "FIL",   "ETC",   "AAVE",  "ALGO",
+        "XTZ",   "XMR",   "ZEC",   "DASH",  "ICP",
+        "INJ",   "SUI",   "APT",   "ARB",   "OP",
+        "TIA",   "SEI",   "RENDER", "GRT",  "MANA",
+        "SAND",  "AXS",   "CRV",   "COMP",  "SNX",
+        "LDO",   "PEPE",  "SHIB",  "WIF",   "BONK",
+        "ONDO",  "ENA",   "JUP",   "PYTH",  "TAO"
     };
 
     /// <summary>
@@ -50,7 +61,7 @@ public static class MarketUniverseSeed
     public static IReadOnlyList<string> SeedBaseAssets => BaseAssets;
 
     /// <summary>
-    /// The seeded symbols, for example "BTCUSDT".
+    /// The seeded symbols, for example "XBTUSD".
     /// </summary>
     public static IReadOnlyList<string> SeedSymbols =>
         BaseAssets.Select(asset => asset + QuoteAsset).ToList();

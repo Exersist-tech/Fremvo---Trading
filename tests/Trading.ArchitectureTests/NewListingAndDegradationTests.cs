@@ -179,7 +179,7 @@ public sealed class NewListingAndDegradationTests
     public void NonTradingExchangeStatusForcesCloseOnly()
     {
         var instrument = Healthy();
-        instrument.ObserveInCatalogue("BREAK", SpotPermission, Now);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Halted, "MAINTENANCE", SpotPermission, Now);
 
         Assert.Equal(ExposureDirective.CloseOnly, Policy().Evaluate(instrument, HealthyMetrics(), Now).Directive);
     }
@@ -220,9 +220,9 @@ public sealed class NewListingAndDegradationTests
     private static Instrument Healthy()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
+            Guid.NewGuid(), "Kraken", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
 
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now.AddMinutes(-5));
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now.AddMinutes(-5));
         instrument.MarkFiltersLoaded(Now.AddMinutes(-5));
         instrument.RecordFirstObservedCandle(Now.AddDays(-400));
         return instrument;

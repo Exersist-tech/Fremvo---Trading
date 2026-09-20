@@ -45,7 +45,7 @@ Rules:
   daylight-saving transitions change the mapping.
 - Test time-of-day filters independently on training, validation, holdout,
   and walk-forward periods.
-- Binance provides native 1m, 5m, 15m, 30m, 1h, 4h and 1d klines. **10m is
+- Kraken provides native 1m, 5m, 15m, 30m, 1h, 4h and 1d klines. **10m is
   derived from ten closed 1m candles** and marked derived. If 4d is
   implemented it is derived from four closed 1d candles using one
   documented UTC boundary.
@@ -530,6 +530,6 @@ forward paper trading. None starts approved for live Spot or Futures.**
 ## 11. Explicitly excluded
 
 - Implementing strategy execution or signal generation.
-- Any live or testnet order placement.
+- Any live or proving-stage order placement.
 - Automatic promotion of any strategy to any approval state.
 - Any withdrawal capability (permanently out of scope).

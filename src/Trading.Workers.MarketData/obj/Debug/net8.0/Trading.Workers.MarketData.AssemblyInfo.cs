@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Trading.Workers.MarketData")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3af727392192e72cde4181dfbb11559d2fe83fe8")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f1d7031e1ad3a65cb993480e156d3e5081c99cfe")]
 [assembly: System.Reflection.AssemblyProductAttribute("Trading.Workers.MarketData")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Trading.Workers.MarketData")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

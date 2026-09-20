@@ -14,7 +14,7 @@
           "Trading.Backtesting": "1.0.0",
           "Trading.Domain": "1.0.0",
           "Trading.Exchanges.Abstractions": "1.0.0",
-          "Trading.Exchanges.Binance": "1.0.0",
+          "Trading.Exchanges.Kraken": "1.0.0",
           "Trading.Indicators": "1.0.0",
           "Trading.Infrastructure.Data": "1.0.0",
           "Trading.Infrastructure.Secrets": "1.0.0",
@@ -929,12 +929,12 @@
           }
         }
       },
-      "Trading.Exchanges.Binance/1.0.0": {
+      "Trading.Exchanges.Kraken/1.0.0": {
         "dependencies": {
           "Trading.Exchanges.Abstractions": "1.0.0"
         },
         "runtime": {
-          "Trading.Exchanges.Binance.dll": {
+          "Trading.Exchanges.Kraken.dll": {
             "assemblyVersion": "1.0.0.0",
             "fileVersion": "1.0.0.0"
           }
@@ -1419,7 +1419,7 @@
       "serviceable": false,
       "sha512": ""
     },
-    "Trading.Exchanges.Binance/1.0.0": {
+    "Trading.Exchanges.Kraken/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

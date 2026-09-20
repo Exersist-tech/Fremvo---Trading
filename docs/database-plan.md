@@ -20,7 +20,7 @@ mutable tables also have `RowVersion` (concurrency token).
 ## 2. Exchange accounts & secrets (Phase 2)
 
 - `ExchangeAccounts` (Id, UserId FK, Exchange, Environment
-  [Testnet/Live], SupportsSpot bit, SupportsFutures bit, Status,
+  [Paper/Proving/Live], SupportsSpot bit, SupportsFutures bit, Status,
   SecretReferenceId FK, LastValidatedAtUtc, GrantedPermissionsJson
   [safe metadata only, never secret values])
 - `SecretReferences` (Id, KeyVaultName, KeyVaultSecretName,
@@ -73,7 +73,7 @@ See `docs/market-universe.md`.
   ToState int, TriggeringGate int null, Reason nvarchar, OccurredAtUtc,
   ActorUserId null) — append-only.
 
-Seed data (the 50 USDT research pairs) is versioned configuration, not a
+Seed data (the 50 USD research pairs) is versioned configuration, not a
 migration constant, and inserts every pair as `Tracked` with **no**
 eligibility grant rows.
 

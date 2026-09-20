@@ -16,6 +16,10 @@ namespace Trading.ArchitectureTests
                 "Azure.Identity",
                 "Azure.Security.KeyVault",
                 "System.Net.Http",
+
+                // Exchange SDKs. Listed by name so an accidental package
+                // reference is caught, whichever venue it belongs to.
+                "Kraken.Net",
                 "Binance.Net"
             };
 
@@ -30,6 +34,14 @@ namespace Trading.ArchitectureTests
                     referencedAssemblies.Contains(forbidden),
                     $"Domain assembly should not reference '{forbidden}'.");
             }
+
+            // No connector may be referenced from the domain, regardless of
+            // which exchange it targets. Naming a single venue here would
+            // stop guarding the rule as soon as another venue is added.
+            Assert.DoesNotContain(
+                referencedAssemblies,
+                name => name is not null
+                    && name.StartsWith("Trading.Exchanges.", StringComparison.OrdinalIgnoreCase));
         }
     }
 }

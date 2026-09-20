@@ -8,7 +8,7 @@ public sealed class MarketDataDomainTests
     [Fact]
     public void MarketSymbolRequiresConcreteIdentifiers()
     {
-        var symbol = new MarketSymbol("BTCUSDT", "BTC", "USDT", true, "Binance");
+        var symbol = new MarketSymbol("BTCUSDT", "BTC", "USDT", true, "Kraken");
 
         Assert.Equal("BTCUSDT", symbol.Symbol);
         Assert.Equal("BTC", symbol.BaseAsset);

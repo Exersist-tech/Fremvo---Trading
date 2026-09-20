@@ -19,9 +19,9 @@ public sealed class ExchangeRepositoryPersistenceTests
         var account = new ExchangeAccount(
             Guid.NewGuid(),
             Guid.NewGuid(),
-            ExchangeKind.Binance,
+            ExchangeKind.Kraken,
             "Primary",
-            "kv/binance/primary",
+            "kv/kraken/primary",
             DateTimeOffset.UtcNow);
 
         await repository.AddAsync(account);
@@ -30,7 +30,7 @@ public sealed class ExchangeRepositoryPersistenceTests
 
         Assert.NotNull(persisted);
         Assert.Equal(account.DisplayName, persisted!.DisplayName);
-        Assert.Equal(ExchangeKind.Binance, persisted.ExchangeKind);
+        Assert.Equal(ExchangeKind.Kraken, persisted.ExchangeKind);
         Assert.Equal(ExchangeAccountStatus.Disconnected, persisted.Status);
     }
 }

@@ -33,7 +33,7 @@ Explicitly excluded work.
    `gitleaks`/GitHub secret scanning) before any real code lands.
 7. **Trading and financial risks**: None (no trading logic exists yet).
 8. **Required tests**: A placeholder architecture test asserting
-   `Trading.Domain` has zero references to Azure/EF/HTTP/Binance/UI
+   `Trading.Domain` has zero references to Azure/EF/HTTP/Kraken/UI
    assemblies (fails fast if violated later).
 9. **Acceptance criteria**: `dotnet build` and `dotnet test` succeed in CI
    on a clean checkout; architecture test passes.
@@ -90,15 +90,17 @@ Tasks:
 
 ---
 
-## Phase 2 — Exchange account connection (Binance, secrets)
+## Phase 2 — Exchange account connection (Kraken, secrets)
 
-1. **Purpose**: Let a user connect a Binance account (Testnet first) with
-   API keys stored securely, never granting withdrawal capability.
+1. **Purpose**: Let a user connect a Kraken account with API keys stored
+   securely, never granting withdrawal capability. Because Kraken has no
+   public Spot sandbox, an account is connected in the non-trading `Paper`
+   stage by default and can only be promoted later (Phase 9).
 2. **Features**: Add exchange account, validate API key permissions
    (read+trade only, no withdraw), store secret reference via Key Vault,
    revoke/disconnect account.
 3. **Projects affected**: `Trading.Exchanges.Abstractions`,
-   `Trading.Exchanges.Binance`, `Trading.Infrastructure.Secrets`,
+   `Trading.Exchanges.Kraken`, `Trading.Infrastructure.Secrets`,
    `Trading.Application`, `Trading.Web`.
 4. **Main entities and interfaces**: `ExchangeAccount`, `SecretReference`,
    `ApiPermissionSnapshot`, `IExchangeConnector`, `IAccountGateway`,
@@ -106,14 +108,16 @@ Tasks:
 5. **Database changes**: `ExchangeAccounts`, `SecretReferences` (see
    `docs/database-plan.md` §2).
 6. **Security considerations**: Key Vault + Managed Identity only; reject
-   keys with withdraw permission; separate Testnet/Live Key Vaults; secret
+   keys with withdraw permission; separate Key Vaults per trading stage; secret
    values never logged or returned to the browser.
 7. **Trading and financial risks**: None yet (no orders placed); risk is
    entirely about secret handling correctness.
 8. **Required tests**: Reject a key with withdraw permission; secret value
    never appears in any API response/log (serialization test); connection
-   validation flow against Binance Testnet (or recorded responses).
-9. **Acceptance criteria**: A user can connect a Binance Testnet account;
+   validation flow against recorded Kraken responses; no automated test may
+   hold a credential capable of placing an order.
+9. **Acceptance criteria**: A user can connect a Kraken account in the
+   `Paper` stage;
    the platform stores only a `SecretReference`; disconnect revokes access
    cleanly.
 10. **Dependencies on earlier phases**: Phases 0–1.
@@ -123,7 +127,7 @@ Tasks:
 Tasks:
 - 2.1 `Trading.Exchanges.Abstractions` ports + neutral value objects.
 - 2.2 `Trading.Infrastructure.Secrets` Key Vault-backed `ISecretStore`.
-- 2.3 `Trading.Exchanges.Binance` account/permission validation gateway.
+- 2.3 `Trading.Exchanges.Kraken` account/permission validation gateway.
 - 2.4 Application use cases: connect/validate/disconnect exchange account.
 - 2.5 Blazor UI for connecting/managing exchange accounts.
 
@@ -131,14 +135,14 @@ Tasks:
 
 ## Phase 3 — Market data ingestion, storage, indicators, charts
 
-1. **Purpose**: Continuously ingest Binance market data, normalize it into
+1. **Purpose**: Continuously ingest Kraken market data, normalize it into
    platform candle intervals, store it reliably, compute indicators, and
    render charts.
 2. **Features**: Historical + streaming candle ingestion, derived 10-minute
    candles, data-quality detection (missing/duplicate/stale/late/out-of-
    order), indicator library, chart UI.
 3. **Projects affected**: `Trading.MarketData`, `Trading.Indicators`,
-   `Trading.Exchanges.Binance` (market data source), `Trading.
+   `Trading.Exchanges.Kraken` (market data source), `Trading.
    Infrastructure.Data`, `Trading.Workers.MarketData`, `Trading.Web`
    (charts).
 4. **Main entities and interfaces**: `Symbol`, `SymbolFilterSet`,
@@ -161,14 +165,14 @@ Tasks:
    symbol/interval set are ingested, stored, flagged for quality issues,
    and rendered on a chart with at least two indicators.
 10. **Dependencies on earlier phases**: Phases 0–2 (uses `IMarketDataSource`
-    from the Binance connector).
+    from the Kraken connector).
 11. **Explicitly excluded work**: Scanner, strategies, backtesting, any
     trading.
 
 Tasks:
 - 3.1 `Symbol`/`Candle`/`CandleInterval` domain model + repository ports.
-- 3.2 Binance historical candle fetch + normalization.
-- 3.3 Binance streaming candle ingestion worker.
+- 3.2 Kraken historical candle fetch + normalization.
+- 3.3 Kraken streaming candle ingestion worker.
 - 3.4 Data-quality detection (missing/duplicate/stale/late/out-of-order).
 - 3.5 Derived 10-minute candle builder from closed 1-minute candles.
 - 3.6 Core indicator library (SMA, EMA, RSI, MACD, Bollinger, ATR).
@@ -183,14 +187,14 @@ Full detail: `docs/market-universe.md`.
 1. **Purpose**: Decide which instruments may be used, for what purpose,
    and in which trading mode — the gate in front of research, backtesting,
    paper trading, and later execution.
-2. **Features**: Binance exchange-information catalogue sync; the 50-pair
-   USDT research seed (all `Tracked` only); asset classification and
+2. **Features**: Kraken `AssetPairs` catalogue sync; the 50-pair
+   USD research seed (all `Tracked` only); asset classification and
    permanent exclusions; instrument state model with ten states; per
    purpose/timeframe/product/mode eligibility gates; rolling liquidity,
    spread, slippage and data-health metrics; scheduled recalculation;
    newly-listed restricted state; degradation behaviour.
 3. **Projects affected**: `Trading.Domain` (states, gates, metrics),
-   `Trading.MarketData`, `Trading.Exchanges.Binance` (catalogue mapping
+   `Trading.MarketData`, `Trading.Exchanges.Kraken` (catalogue mapping
    only), `Trading.Infrastructure`, `Trading.Workers.MarketData`,
    `Trading.Web`.
 4. **Main entities and interfaces**: `Instrument`, `InstrumentState`,
@@ -202,7 +206,7 @@ Full detail: `docs/market-universe.md`.
    `InstrumentMetrics`, `InstrumentEligibilityEvaluations`,
    `InstrumentStateTransitions` (see `docs/database-plan.md` §4A).
 6. **Security considerations**: Catalogue sync is read-only public market
-   data and must use no API secret. Binance DTOs must not reach
+   data and must use no API secret. Kraken DTOs must not reach
    `Trading.Domain`. Eligibility changes are audited. Only an
    administrator may edit the seed or thresholds, and configured
    thresholds may only be stricter than the platform floors.
@@ -227,7 +231,7 @@ Tasks:
 - 3B.2 Eligibility grant model (per purpose/timeframe/product/mode).
 - 3B.3 `EligibilityGate` evaluation engine + explainable evaluation record.
 - 3B.4 `InstrumentMetrics` rolling/median measurement model + repository.
-- 3B.5 Binance exchange-information catalogue source + neutral mapping.
+- 3B.5 Kraken `AssetPairs` catalogue source + neutral mapping.
 - 3B.6 50-pair seed as versioned configuration (all `Tracked` only).
 - 3B.7 Newly-listed restricted state + evidence-age expiry.
 - 3B.8 Degradation rules (block entries/increases, allow reduction).
@@ -350,7 +354,7 @@ Full detail: `docs/strategy-research-plan.md`.
 10. **Dependencies on earlier phases**: Phase 3 (candles, indicators),
     Phase 3B (instrument eligibility), Phase 5 (strategy contract,
     backtest engine, cost models).
-11. **Explicitly excluded work**: Live or testnet order placement;
+11. **Explicitly excluded work**: Live or proving-stage order placement;
     automatic approval promotion; withdrawals.
 
 Tasks:
@@ -515,58 +519,89 @@ Tasks:
 
 ---
 
-## Phase 9 — Binance Spot testnet live-path trading
+## Phase 9 — Kraken Spot proving stage (replay harness + minimum-size live path)
 
-1. **Purpose**: Prove the full pipeline against real Binance Testnet API
-   calls (not simulation) before any real money is involved.
-2. **Features**: `BinanceSpotExecutionAdapter` implementing
-   `IExecutionAdapter` against Binance Spot Testnet; order placement,
-   cancellation, status query, fill retrieval; reconciliation against real
-   (testnet) exchange responses.
-3. **Projects affected**: `Trading.Exchanges.Binance`, `Trading.Workers.
-   Execution`, `Trading.Application`.
-4. **Main entities and interfaces**: `ISpotOrderGateway` (Binance
-   implementation), `BinanceSpotExecutionAdapter`.
-5. **Database changes**: None beyond Phase 8's `Orders`/`Fills`/
-   `ReconciliationRecords` (now populated with real testnet exchange order
-   IDs).
-6. **Security considerations**: Uses Testnet `ExchangeAccount`/
-   `SecretReference` only; Live Key Vault remains inaccessible from this
-   code path in Test/Staging environments.
-7. **Trading and financial risks**: This is the first phase where real
-   (sandbox) exchange responses, latency, and error codes are handled;
-   focus on correct handling of partial fills, rejections, and unknown-
-   status timeouts exactly as designed in Phase 8.
-8. **Required tests**: Integration tests against Binance Testnet (or
-   recorded fixtures) for place/cancel/query/fill; simulated timeout →
-   `Unknown` → reconciliation resolution; filter/tick/step rejection
-   handling (never silently altering the order).
-9. **Acceptance criteria**: An experiment worker in `Live` mode against
-   Binance Testnet places, fills, and reconciles real (sandbox) Spot
-   orders end-to-end, with all Phase 8 safety controls active.
+> **Exchange constraint.** Kraken publishes no public Spot sandbox. Its own
+> guidance is to exercise the Spot API with a real account and minimal size,
+> and its UAT environment is not self-service. The "test before live" gate
+> therefore cannot be satisfied by a testnet and is replaced by the two
+> mechanisms below. The gate is not weakened: it is satisfied differently.
+
+1. **Purpose**: Prove the full execution path against real Kraken Spot API
+   semantics — real responses, latency, error codes, filters, and partial
+   fills — before any meaningful capital is exposed.
+2. **Features**:
+   - `KrakenSpotExecutionAdapter` implementing `IExecutionAdapter` against
+     the real Kraken Spot API; order placement, cancellation, status query,
+     fill retrieval.
+   - A **recorded-response replay harness** that serves captured Kraken
+     responses to the adapter, so the whole pipeline including
+     reconciliation is exercised in CI without contacting Kraken.
+   - A **proving mode** on an exchange account: real orders, but the
+     platform refuses any order above a hard notional ceiling, restricts the
+     instrument set, and requires the account to be explicitly opted in.
+3. **Projects affected**: `Trading.Exchanges.Kraken`, `Trading.Workers.
+   Execution`, `Trading.Application`, `Trading.Risk`.
+4. **Main entities and interfaces**: `ISpotOrderGateway` (Kraken
+   implementation), `KrakenSpotExecutionAdapter`, `IKrakenResponseReplay`,
+   `ExchangeAccountTradingStage` (`Paper` / `Proving` / `Live`).
+5. **Database changes**: `ExchangeAccounts` gains `TradingStage` and
+   `ProvingNotionalCeiling`. `Orders`/`Fills`/`ReconciliationRecords` are
+   otherwise unchanged and now carry real Kraken order IDs.
+6. **Security considerations**: Proving uses a dedicated API key with trade
+   permission and **no** withdrawal permission, validated before the stage
+   can be entered. Proving and live credentials are separate Key Vault
+   secrets. No automated test may hold a credential that can place an order.
+7. **Trading and financial risks**: **Proving uses real funds.** It is
+   treated as live trading for every safety purpose — entitlements, risk
+   ceilings, halts, idempotency, audit, and reconciliation all apply
+   unchanged. The only differences are a mandatory notional ceiling and a
+   restricted instrument set, both enforced in the risk engine rather than
+   in the adapter, so the adapter cannot be the single point of failure.
+8. **Required tests**:
+   - Replay-harness tests for place/cancel/query/fill, covering Kraken's
+     error taxonomy (rejection, filter violation, rate limit, nonce error,
+     timeout).
+   - Simulated timeout → `Unknown` → reconciliation resolution, asserting
+     no resubmission occurs until the exchange state is proven.
+   - Tick/step/minimum rejection handling, asserting the order is rejected
+     rather than silently altered.
+   - A guard test asserting the automated suite cannot reach a live
+     endpoint and submits no real order.
+   - Risk-engine tests asserting the proving notional ceiling cannot be
+     raised by a user and cannot be bypassed by the adapter.
+9. **Acceptance criteria**: The full pipeline runs end-to-end against
+   recorded Kraken responses in CI with every Phase 8 safety control active;
+   and a manually supervised proving account places, fills, cancels, and
+   reconciles real minimum-size Spot orders with the ceiling enforced.
 10. **Dependencies on earlier phases**: Phases 2, 8.
-11. **Explicitly excluded work**: Binance Production/Live credentials;
-    Futures; any change to risk/halt logic.
+11. **Explicitly excluded work**: Unrestricted live sizing (Phase 10);
+    Futures; any change to risk/halt logic beyond adding the proving
+    ceiling; any withdrawal capability.
 
 Tasks:
-- 9.1 `ISpotOrderGateway` Binance Testnet implementation (place/cancel/
-      query/fills).
-- 9.2 `BinanceSpotExecutionAdapter` (maps pipeline commands ↔ gateway).
-- 9.3 Reconciliation wiring against real testnet responses + error
-      taxonomy (rejections, filter violations, rate limits, timeouts).
-- 9.4 End-to-end Testnet integration test suite.
+- 9.1 `ISpotOrderGateway` Kraken Spot implementation (place/cancel/
+      query/fills) against the real API shape.
+- 9.2 `KrakenSpotExecutionAdapter` (maps pipeline commands ↔ gateway).
+- 9.3 Recorded-response replay harness + captured Kraken fixtures.
+- 9.4 Reconciliation wiring against replayed responses + error taxonomy
+      (rejections, filter violations, rate limits, nonce errors, timeouts).
+- 9.5 `ExchangeAccountTradingStage` + risk-engine enforcement of the
+      proving notional ceiling and restricted instrument set.
+- 9.6 End-to-end replay integration suite, including the guard test that
+      no automated test can place a real order.
 
 ---
 
-## Phase 10 — Binance Spot live trading (gated rollout)
+## Phase 10 — Kraken Spot live trading (gated rollout)
 
-1. **Purpose**: Enable real Binance Spot trading for opted-in users under
+1. **Purpose**: Enable real Kraken Spot trading for opted-in users under
    strict entitlement and risk gating, reusing the exact code path proven
    in Phase 9.
 2. **Features**: Live-mode enablement flow (explicit user action, platform
    entitlement check, RiskOfficer/Administrator visibility), production
    Key Vault wiring, staged rollout (small user cohort first).
-3. **Projects affected**: `Trading.Exchanges.Binance` (Live endpoint
+3. **Projects affected**: `Trading.Exchanges.Kraken` (Live endpoint
    config), `Trading.Application`, `Trading.Web` (live-trading enablement
    UI with explicit warnings), `deploy/bicep` (Production Key Vault/App
    Service config).
@@ -604,18 +639,18 @@ Tasks:
 
 ---
 
-## Phase 11 — Binance Futures testnet trading
+## Phase 11 — Kraken Futures demo-environment trading
 
-1. **Purpose**: Extend execution to Binance USD-M Futures on Testnet as a
+1. **Purpose**: Extend execution to Kraken Futures linear perpetuals on the Kraken Futures demo environment (`demo-futures.kraken.com`, a genuine sandbox, unlike Spot) as a
    capability separate from Spot, including margin/position tracking.
 2. **Features**: `IFuturesOrderGateway`, futures position tracking (margin,
    mark price, liquidation price, funding), reduce-only/close-only support,
    long/short handling.
-3. **Projects affected**: `Trading.Exchanges.Binance`, `Trading.Risk`
+3. **Projects affected**: `Trading.Exchanges.Kraken`, `Trading.Risk`
    (futures-specific limits), `Trading.Application`, `Trading.Workers.
    Execution`, `Trading.Web` (futures position UI).
 4. **Main entities and interfaces**: `IFuturesOrderGateway`,
-   `BinanceFuturesExecutionAdapter`, extended `Position` fields
+   `KrakenFuturesExecutionAdapter`, extended `Position` fields
    (`MarginMode`, `Leverage`, `LiquidationPrice`, `MarkPrice`,
    `FundingAccrued`).
 5. **Database changes**: `Positions` gains futures-specific columns (see
@@ -633,25 +668,25 @@ Tasks:
    test; stale-data-blocks-increase test on Futures specifically;
    reduce-only/close-only enforcement tests.
 9. **Acceptance criteria**: An experiment worker can open, manage, and
-   close long/short Futures positions on Binance Testnet with accurate
+   close long/short Futures positions on the Kraken Futures demo environment with accurate
    margin/liquidation/funding tracking and full risk-engine coverage.
 10. **Dependencies on earlier phases**: Phases 8, 9 (reuses the pipeline
     and reconciliation machinery), and Phase 10 must show Spot live is
-    stable before Futures Live (Phase 12) — Testnet Futures itself only
-    requires Phase 9's proven pipeline pattern.
+    stable before Futures Live (Phase 12) — demo-environment Futures itself
+    only requires Phase 9's proven pipeline pattern.
 11. **Explicitly excluded work**: Futures Live trading (Phase 12); cross-
     margin between Spot and Futures (kept as separate capabilities).
 
 Tasks:
-- 11.1 `IFuturesOrderGateway` Binance Testnet implementation.
-- 11.2 `BinanceFuturesExecutionAdapter`.
+- 11.1 `IFuturesOrderGateway` Kraken Futures demo-environment implementation.
+- 11.2 `KrakenFuturesExecutionAdapter`.
 - 11.3 Futures position tracking (margin/mark price/liquidation/funding).
 - 11.4 Futures-specific risk limits (leverage ceiling, exposure staleness).
 - 11.5 Futures position UI (long/short, reduce-only/close-only controls).
 
 ---
 
-## Phase 12 — Binance Futures live trading (gated, after Spot live is stable)
+## Phase 12 — Kraken Futures live trading (gated, after Spot live is stable)
 
 1. **Purpose**: Enable real leveraged Futures trading only once Spot live
    trading (Phase 10) has demonstrated operational stability.
@@ -820,9 +855,9 @@ Phase 0 (foundations)
           -> Phase 6 (optimization)
           -> Phase 7 (paper trading/experiment workers)
             -> Phase 8 (risk/halts/idempotency/reconciliation)
-              -> Phase 9 (Spot testnet live-path)
+              -> Phase 9 (Spot proving stage: replay + minimum size)
                 -> Phase 10 (Spot live, gated)
-                  -> Phase 11 (Futures testnet)
+                  -> Phase 11 (Futures demo environment)
                     -> Phase 12 (Futures live, gated — after Phase 10 stable)
 -> Phase 13 (admin/plans/entitlements, can start after Phase 7)
 -> Phase 14 (reporting, can start after Phase 7)

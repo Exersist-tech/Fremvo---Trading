@@ -22,10 +22,10 @@
   connection strings containing secrets are used from application code.
 - Secrets are fetched by the connector at call time and never persisted to
   disk, cache (Redis), or logs. Redis must never contain raw API secrets.
-- Test/sandbox (Binance Testnet) and production (Live) credentials are
-  stored in **separate Key Vaults per environment**; a Testnet identity has
+- Proving-stage and production (Live) credentials are
+  stored in **separate Key Vaults per environment**; a proving identity has
   no access to the Live vault and vice versa.
-- On connecting an exchange account, the platform calls Binance to confirm
+- On connecting an exchange account, the platform calls Kraken to confirm
   the key's actual granted permissions and rejects/flags any key that has
   withdrawal permission enabled, prompting the user to reissue a
   trade+read-only key.
@@ -94,7 +94,7 @@
 
 - Nullable reference types enabled; compiler warnings treated as build
   issues to fix, not ignore.
-- Architecture tests assert Domain purity (no Azure/EF/HTTP/Binance/UI
+- Architecture tests assert Domain purity (no Azure/EF/HTTP/Kraken/UI
   references) so a future PR cannot accidentally leak secrets or
   dependencies into the pure layers.
 - Code review checklist includes: no secrets in code/config, no
@@ -105,7 +105,7 @@
 
 ## 8. Operational security
 
-- Environment separation: Dev/Test use Binance Testnet only; Production is
+- Environment separation: Dev/Test hold no Spot trading credential and use recorded responses or the Kraken Futures demo environment only; Production is
   the only environment ever configured with Live credentials, and Live
   trading remains disabled by default even there until explicitly enabled
   per user/account/strategy.

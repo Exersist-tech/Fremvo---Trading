@@ -232,7 +232,7 @@ app.MapGet("/", () => Results.Content(
           <h1>Exersist Trading</h1>
           <p class="subtitle">
             A security-first, exchange-neutral crypto trading platform foundation built for disciplined market analysis,
-            risk controls, and staged rollout from Binance testnet paths before any live trading is enabled.
+            risk controls, and staged rollout through exchange sandbox environments before any live trading is enabled.
           </p>
           <div class="status-row">
             <span class="pill">Identity foundation ready</span>
@@ -246,7 +246,7 @@ app.MapGet("/", () => Results.Content(
           <article class="card">
             <h3>Platform scope</h3>
             <ul>
-              <li>Binance-first connector architecture</li>
+              <li>Kraken-first connector architecture</li>
               <li>Exchange-neutral domain design</li>
               <li>No withdrawals; user-owned accounts only</li>
               <li>Market data and strategy groundwork</li>
@@ -508,7 +508,7 @@ app.MapGet("/optimization", () => Results.Content(
           <fieldset>
             <legend>Instrument</legend>
             <label for="symbol">Symbol</label>
-            <input id="symbol" value="BTCUSDT" />
+            <input id="symbol" value="XBTUSD" />
           </fieldset>
 
           <fieldset>
@@ -943,7 +943,7 @@ app.MapGet("/admin/risk", () => Results.Content(
               <option value="REDUCEONLY">Reduce-only (user)</option>
             </select>
             <label for="symbol">Symbol (market scope only)</label>
-            <input id="symbol" placeholder="BTCUSDT" />
+            <input id="symbol" placeholder="XBTUSD" />
             <label for="targetId">Target id (user or strategy scope)</label>
             <input id="targetId" placeholder="00000000-0000-0000-0000-000000000000" />
             <label for="reason">Reason (required, recorded in the audit trail)</label>

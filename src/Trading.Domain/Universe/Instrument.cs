@@ -59,10 +59,17 @@ public sealed class Instrument
     public InstrumentState State { get; private set; }
 
     /// <summary>
-    /// The exchange's own status string, as reported by the catalogue.
+    /// The exchange's own status string, as reported by the catalogue, kept
+    /// for audit and diagnosis only. Never used to decide tradability.
     /// Null until the instrument has been seen in a catalogue synchronisation.
     /// </summary>
     public string? ExchangeStatus { get; private set; }
+
+    /// <summary>
+    /// The neutral trading status translated by the connector. This is the
+    /// only status the platform reasons about.
+    /// </summary>
+    public InstrumentTradingStatus TradingStatus { get; private set; }
 
     /// <summary>
     /// False until a catalogue synchronisation has actually observed this
@@ -90,13 +97,15 @@ public sealed class Instrument
     public IReadOnlyCollection<string> Permissions => _permissions;
 
     /// <summary>
-    /// True when the exchange currently reports the instrument as trading.
+    /// True only when the exchange reports the instrument as fully tradable.
+    /// Restricted statuses such as cancel-only or reduce-only are deliberately
+    /// excluded, because an order placed against them would be rejected or
+    /// would behave differently from the order the platform intended.
     /// </summary>
     public bool IsTradingOnExchange =>
-        IsPresentOnExchange &&
-        string.Equals(ExchangeStatus, "TRADING", StringComparison.OrdinalIgnoreCase);
+        IsPresentOnExchange && TradingStatus == InstrumentTradingStatus.Trading;
 
-    public bool HasSpotPermission => _permissions.Contains("SPOT");
+    public bool HasSpotPermission => _permissions.Contains(InstrumentCapabilities.Spot);
 
     public bool FiltersLoaded => FiltersLoadedAtUtc is not null;
 
@@ -130,6 +139,7 @@ public sealed class Instrument
     /// Records that a catalogue synchronisation observed this instrument.
     /// </summary>
     public void ObserveInCatalogue(
+        InstrumentTradingStatus tradingStatus,
         string exchangeStatus,
         IEnumerable<string> permissions,
         DateTimeOffset observedAtUtc,
@@ -143,6 +153,7 @@ public sealed class Instrument
                 "A removed instrument cannot be reinstated by a catalogue synchronisation.");
         }
 
+        TradingStatus = tradingStatus;
         ExchangeStatus = Require(exchangeStatus, nameof(exchangeStatus)).ToUpperInvariant();
         IsPresentOnExchange = true;
         LastCatalogueSyncUtc = observedAtUtc;
@@ -176,6 +187,7 @@ public sealed class Instrument
 
         IsPresentOnExchange = false;
         LastCatalogueSyncUtc = observedAtUtc;
+        TradingStatus = InstrumentTradingStatus.Unknown;
         _permissions.Clear();
         Suspend(reason, observedAtUtc);
     }
@@ -256,6 +268,7 @@ public sealed class Instrument
         SuspensionReason = Require(reason, nameof(reason));
         State = InstrumentState.Removed;
         IsPresentOnExchange = false;
+        TradingStatus = InstrumentTradingStatus.Unknown;
         LastSuspendedAtUtc = occurredAtUtc;
         _permissions.Clear();
     }

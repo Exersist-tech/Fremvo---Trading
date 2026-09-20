@@ -18,7 +18,7 @@ measurements.
 
 1. **The exchange is the source of truth, not this file.** The configured
    seed list below is a *research starting point*. The platform must load
-   the current instrument catalogue from the Binance exchange-information
+   the current instrument catalogue from the Kraken `AssetPairs`
    endpoint and treat any configured symbol that is absent, not `TRADING`,
    or lacking `SPOT` permission as unusable.
 2. **A configured pair is not an approved pair.** Configuration only makes
@@ -41,22 +41,27 @@ measurements.
 
 ---
 
-## 2. Initial Spot research seed (50 USDT pairs)
+## 2. Initial Spot research seed (50 USD pairs)
 
 All of these begin as **`Tracked` only**. None is research-eligible,
 backtest-eligible, paper-eligible, or live-eligible on creation.
 
+Symbols use **Kraken's own asset codes**, so Bitcoin is `XBT` and Dogecoin
+is `XDG`. The quote asset is **USD**, which carries Kraken's deepest spot
+liquidity. This is a data-selection choice for research only and is
+unrelated to a user's reporting currency, which each user chooses.
+
 ```
-BTCUSDT   ETHUSDT   BNBUSDT   XRPUSDT   SOLUSDT
-DOGEUSDT  ADAUSDT   LINKUSDT  AVAXUSDT  LTCUSDT
-TRXUSDT   XLMUSDT   NEARUSDT  UNIUSDT   SUIUSDT
-ZECUSDT   FILUSDT   ARBUSDT   APTUSDT   ONDOUSDT
-INJUSDT   TAOUSDT   ARUSDT    DOTUSDT   TONUSDT
-OPUSDT    ETCUSDT   CAKEUSDT  CRVUSDT   RUNEUSDT
-ENAUSDT   WLDUSDT   PEPEUSDT  FLOKIUSDT STRKUSDT
-TIAUSDT   SEIUSDT   AXSUSDT   CHZUSDT   ORDIUSDT
-BLURUSDT  ZKUSDT    METISUSDT ONEUSDT   PROVEUSDT
-BANKUSDT  GUSDT     ZAMAUSDT  TRUMPUSDT DCRUSDT
+XBTUSD    ETHUSD    SOLUSD    XRPUSD    ADAUSD
+XDGUSD    LINKUSD   AVAXUSD   LTCUSD    DOTUSD
+TRXUSD    XLMUSD    BCHUSD    ATOMUSD   UNIUSD
+NEARUSD   FILUSD    ETCUSD    AAVEUSD   ALGOUSD
+XTZUSD    XMRUSD    ZECUSD    DASHUSD   ICPUSD
+INJUSD    SUIUSD    APTUSD    ARBUSD    OPUSD
+TIAUSD    SEIUSD    RENDERUSD GRTUSD    MANAUSD
+SANDUSD   AXSUSD    CRVUSD    COMPUSD   SNXUSD
+LDOUSD    PEPEUSD   SHIBUSD   WIFUSD    BONKUSD
+ONDOUSD   ENAUSD    JUPUSD    PYTHUSD   TAOUSD
 ```
 
 This list is an **initial research seed, not a permanent list and not an
@@ -69,17 +74,25 @@ change.
 These are flagged so the implementation does not silently assume the seed
 is correct:
 
-- **Several of these symbols are recent listings** (for example
-  `PROVEUSDT`, `BANKUSDT`, `GUSDT`, `ZAMAUSDT`, `TRUMPUSDT`, `ENAUSDT`).
+- **Several of these symbols are recent listings** (for example `WIFUSD`,
+  `BONKUSD`, `JUPUSD`, `ENAUSD`, `ONDOUSD`).
   Recent listings have short history, unstable liquidity, and wide
   spreads. They must enter the newly-listed restricted state (§7) and are
   expected to remain research-only for a long time.
-- **Some symbols may not exist on Binance Spot, may be delisted, or may
+- **Kraken's `AssetPairs` response carries no listing date.** Listing age
+  is therefore *unknown* for every instrument until the platform has
+  observed enough of its own candle history. Unknown age fails the
+  new-listing gate; it must never be treated as "old enough".
+- **Some symbols may not exist on Kraken Spot, may be delisted, or may
   exist only as a Futures contract or on a different quote asset.** The
   catalogue sync must record "configured but not present on the exchange"
   as an explicit, visible state rather than dropping the symbol silently.
-- **Ticker collisions are possible** (short tickers such as `G`, `ONE`,
-  and `AR` are reused across projects and exchanges). The platform keys
+- **Kraken's internal asset codes differ from its display codes**
+  (`XXBT`/`ZUSD` versus `XBT`/`USD`). Only the connector may perform that
+  translation, and the four-character prefix strip must not be applied to
+  genuine three-character assets such as `XRP` and `ZEC`.
+- **Ticker collisions are possible** (short tickers such as `OP` are
+  reused across projects and exchanges). The platform keys
   instruments on the exchange's own symbol identifier plus base/quote
   asset codes, never on a display name.
 - **Memecoins and very low-capitalisation assets in this list carry
@@ -92,10 +105,13 @@ is correct:
 The following are excluded from the initial strategy universe regardless
 of liquidity:
 
-- Stablecoin-to-stablecoin pairs (for example `USDCUSDT`, `FDUSDUSDT`,
-  `TUSDUSDT`, `DAIUSDT`).
+- Stablecoin-quoted or stablecoin-based pairs whose **base** asset is a
+  stablecoin (for example `USDCUSD`, `USDTUSD`, `DAIUSD`, `PYUSDUSD`).
 - Tokenized stocks and tokenized equity/ETF products.
-- Fiat and fiat-settled pairs.
+- Pairs whose **base** asset is fiat. Note that a fiat *quote* asset is
+  expected and permitted: this universe is USD-quoted, and USD is fiat.
+  The classification exclusions apply to the base asset; the quote asset
+  is governed separately by the configured allowed-quote list.
 - Non-cryptocurrency instruments of any kind.
 - Leveraged tokens and any instrument whose value is a derived, rebalanced
   basket (their behaviour breaks candle-based strategy assumptions).
@@ -120,9 +136,9 @@ independently computed **eligibility grants**.
 | `ResearchEligible` | Enough history and data health for exploratory analysis and the scanner. |
 | `BacktestEligible` | Complete, gap-free required history; filters loaded; cost model parameters available. |
 | `PaperEligible` | Backtest-eligible plus live data health and current liquidity/spread evidence. |
-| `SpotTestEligible` | Paper-eligible plus a validated Spot **testnet** account path. |
-| `SpotLiveEligible` | Spot test-eligible plus explicit administrator approval and passing live-liquidity thresholds. |
-| `FuturesTestEligible` | A futures contract exists, margin/funding data is available, and the testnet path is validated. |
+| `SpotProvingEligible` | Paper-eligible plus a validated Spot account whose execution path has been proven against recorded Kraken responses. Kraken has no public Spot sandbox, so this grant permits only minimum-size orders under the Phase 9 proving ceiling. |
+| `SpotLiveEligible` | Spot proving-eligible plus explicit administrator approval and passing live-liquidity thresholds. |
+| `FuturesTestEligible` | A futures contract exists, margin/funding data is available, and the path is validated on the Kraken Futures demo environment. |
 | `FuturesLiveEligible` | Futures test-eligible plus explicit administrator approval; only after Spot live is stable. |
 | `Suspended` | Blocked by the exchange, by data health, by liquidity failure, or by an operator. New exposure forbidden. |
 | `Removed` | Delisted or permanently withdrawn from the platform. Records preserved. |
@@ -140,8 +156,8 @@ also currently holding.
 Tracked ──(history + data health)──────────► ResearchEligible
 ResearchEligible ──(complete history + filters)──► BacktestEligible
 BacktestEligible ──(live data health + liquidity)─► PaperEligible
-PaperEligible ──(testnet path validated)──────► SpotTestEligible
-SpotTestEligible ──(administrator approval)───► SpotLiveEligible
+PaperEligible ──(replay path proven)──────────► SpotProvingEligible
+SpotProvingEligible ──(admin approval)────────► SpotLiveEligible
 PaperEligible ──(contract + margin data)──────► FuturesTestEligible
 FuturesTestEligible ──(administrator approval)► FuturesLiveEligible
 
@@ -169,7 +185,7 @@ the following holds**:
 |---|---|---|
 | 1 | Exchange status | Current catalogue status is `TRADING`. |
 | 2 | Permissions | `SPOT` permission present (and the corresponding permission for the requested product type). |
-| 3 | Quote asset | Quote asset is `USDT` for this initial universe. |
+| 3 | Quote asset | Quote asset is `USD` for this initial universe. |
 | 4 | Filters loaded | Price tick, quantity step, min quantity, max quantity, and min notional are all loaded and non-null. |
 | 5 | Data health | No unresolved gaps, duplicates, stale-data events, or out-of-order events inside the required window. |
 | 6 | History complete | The required history for the requested timeframe is present and gap-free. |
@@ -327,7 +343,7 @@ Domain and application tests, all runnable without network access:
 2. A symbol whose status is not `TRADING` is not eligible for anything
    above `Tracked`.
 3. A symbol lacking `SPOT` permission is not Spot-eligible.
-4. A non-USDT quote asset is excluded from this universe.
+4. A non-USD quote asset is excluded from this universe.
 5. Stablecoin, tokenized-equity, fiat, and leveraged-token classes are
    excluded even when every liquidity gate passes.
 6. An asset of `Unknown` class never exceeds `Tracked`.
@@ -380,8 +396,8 @@ Domain and application tests, all runnable without network access:
 
 ## 11. Acceptance criteria
 
-1. The instrument catalogue is retrieved from the Binance
-   exchange-information endpoint and stored exchange-neutrally; no Binance
+1. The instrument catalogue is retrieved from the Kraken
+   `AssetPairs` endpoint and stored exchange-neutrally; no Kraken
    DTO reaches `Trading.Domain`.
 2. The 50-pair seed is present, versioned, administrator-editable, and
    every pair is `Tracked` only.
@@ -407,7 +423,7 @@ Domain and application tests, all runnable without network access:
 ## 12. Explicitly excluded from this work
 
 - Any order placement, Spot or Futures, test or live.
-- The Binance order endpoints.
+- The Kraken order endpoints.
 - Futures contract eligibility beyond the state definitions above.
 - Automatic promotion of any instrument to a live grant.
 - Any withdrawal-related capability (permanently out of scope).

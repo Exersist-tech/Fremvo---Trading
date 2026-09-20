@@ -3,7 +3,7 @@
 ## 1. Vision
 
 A global, invitation-only platform that lets individual users connect their
-**own** exchange accounts (starting with Binance) and run **approved,
+**own** exchange accounts (starting with Kraken) and run **approved,
 platform-vetted** trading strategies — first in paper trading, later in
 supervised live trading — with strong risk controls, auditability, and no
 custody of user funds.
@@ -47,10 +47,10 @@ allowance (if enabled later). No public self-service sign-up initially.
 1. **Identity & access** — invitations, registration, authentication (with
    MFA for administrators, optional/encouraged for users), roles,
    authorization, audit log of sensitive actions.
-2. **Exchange account connection** — Binance Spot and Futures (testnet and
+2. **Exchange account connection** — Kraken Spot and Futures (testnet and
    live), API key validation (permission + IP restriction checks), secret
    storage via Key Vault references only.
-3. **Market data** — ingestion of trades/candles from Binance, normalization
+3. **Market data** — ingestion of trades/candles from Kraken, normalization
    into platform-neutral candle intervals, gap/duplicate/staleness detection,
    historical storage for backtesting and charting.
 4. **Charting & indicators** — standard technical indicators computed from
@@ -70,9 +70,9 @@ allowance (if enabled later). No public self-service sign-up initially.
 10. **Paper trading** — simulated order execution against real-time market
     data with fake balances, using the exact same strategy/risk pipeline as
     live trading.
-11. **Automated Spot trading (live)** — real order placement on Binance Spot
+11. **Automated Spot trading (live)** — real order placement on Kraken Spot
     once paper trading, risk controls, and reconciliation are proven.
-12. **Leveraged futures trading (live)** — Binance USD-M futures, long/short,
+12. **Leveraged futures trading (live)** — Kraken USD-M futures, long/short,
     isolated from Spot, gated behind additional safety requirements.
 13. **Risk engine** — pre-trade and continuous risk evaluation, halts at
     multiple scopes, staleness protection, exposure ceilings.
@@ -134,7 +134,7 @@ run against them, are governed by two dedicated planning documents:
 
 1. Foundations (solution skeleton *only after this plan is approved*),
    identity, invitations.
-2. Exchange account connection + secret storage (Binance testnet only).
+2. Exchange account connection + secret storage (non-trading Paper stage only).
 3. Market data ingestion + storage + indicators + charts.
 4. Market scanner.
 5. Approved strategy templates + backtesting engine.
@@ -142,10 +142,10 @@ run against them, are governed by two dedicated planning documents:
 7. Paper trading + experiment workers (isolated, up to 10).
 8. Risk engine + halts + duplicate-order protection + idempotency +
    reconciliation.
-9. Binance Spot **testnet** live-path trading (real API calls, sandbox funds).
-10. Binance Spot **live** trading (small, gated rollout).
-11. Binance Futures **testnet** trading.
-12. Binance Futures **live** trading (gated, after Spot live is stable).
+9. Kraken Spot **proving stage** (recorded-response replay in CI, plus a minimum-size supervised live path; Kraken has no public Spot sandbox).
+10. Kraken Spot **live** trading (small, gated rollout).
+11. Kraken Futures trading on the Kraken Futures **demo environment**.
+12. Kraken Futures **live** trading (gated, after Spot live is stable).
 13. User administration, plans/trials/entitlements.
 14. International reporting.
 15. Hardening: security review, DR drills, alerting maturity, billing prep.

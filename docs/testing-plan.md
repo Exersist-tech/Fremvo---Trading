@@ -4,7 +4,7 @@
 
 - All important behavior has automated tests; xUnit is the test framework.
 - No automated test ever places a real order against a live exchange —
-  Binance connector tests use the Binance **Testnet** or a mocked/faked
+  Kraken connector tests use recorded Kraken responses or a mocked/faked
   HTTP layer, never Production credentials, and CI has no Live secrets at
   all.
 - Financial calculations (fees, slippage, P&L, indicators, risk limits) are
@@ -26,7 +26,7 @@
 | Backtesting tests | Reproducibility, fee/slippage application, no look-ahead bias, partial fills | xUnit, fixed seeds, fixed historical fixtures |
 | Optimization tests | Train/validation/holdout separation is enforced; holdout touched at most once | xUnit, guard-violation tests expected to throw/reject |
 | Risk engine tests | Limit enforcement, halts at each scope, staleness blocking, duplicate-order guard | xUnit |
-| Exchange connector tests (Binance) | Request/response mapping, filter application, error handling | xUnit against Binance Testnet or recorded/mocked HTTP responses |
+| Exchange connector tests (Kraken) | Request/response mapping, filter application, error handling | xUnit against recorded/mocked Kraken HTTP responses; Futures may additionally use the Kraken Futures demo environment |
 | Integration tests | EF Core against a real (ephemeral) SQL instance (e.g. SQL container/LocalDB), repository correctness, migrations apply cleanly | xUnit + test containers or LocalDB |
 | Web/API tests | AuthN/AuthZ enforcement, cross-user isolation, input validation | xUnit + `WebApplicationFactory` |
 | Architecture tests | Domain has no forbidden references; dependency direction holds | xUnit + `NetArchTest`/`ArchUnitNET` |
@@ -84,7 +84,7 @@
 
 - Every pull request runs: build (warnings as errors where practical),
   unit tests, architecture tests, and fast integration tests.
-- Slower integration/E2E suites (real SQL container, Binance Testnet calls)
+- Slower integration/E2E suites (real SQL container, Kraken Futures demo calls)
   run on a scheduled/gated job, not necessarily every commit, but must pass
   before any change touching the trading pipeline or connectors merges.
 - Live-trading-enabling changes require passing the full suite plus a
@@ -92,6 +92,6 @@
 
 ## 8. What is explicitly out of scope for automated tests
 
-- No test suite ever runs against Binance Production/Live credentials.
+- No test suite ever runs against Kraken Production/Live credentials.
 - No test asserts or predicts strategy profitability; performance metrics
   in tests validate calculation correctness only, not trading outcomes.

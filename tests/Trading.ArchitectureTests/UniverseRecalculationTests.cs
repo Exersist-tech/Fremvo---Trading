@@ -165,7 +165,7 @@ public sealed class UniverseRecalculationTests
     public async Task AdminViewExplainsEveryFailingGate()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
+            Guid.NewGuid(), "Kraken", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
 
         var views = await AdminQuery(Evidence.Blind()).GetAsync(
             new[] { instrument }, EligibilityPurpose.Research, CandleInterval.OneHour, CancellationToken.None);
@@ -249,9 +249,9 @@ public sealed class UniverseRecalculationTests
     private static Instrument TradingInstrument(DateTimeOffset? firstCandleUtc = null)
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
+            Guid.NewGuid(), "Kraken", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
 
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now.AddMinutes(-5));
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now.AddMinutes(-5));
         instrument.MarkFiltersLoaded(Now.AddMinutes(-5));
         instrument.RecordFirstObservedCandle(firstCandleUtc ?? Now.AddDays(-500));
         return instrument;

@@ -8,11 +8,17 @@ multiple tasks' status changes into "done" without a build+test pass.
 
 Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 
+## Platform changes
+
+| Change | Date | Notes |
+|---|---|---|
+| Exchange switched from Binance to Kraken | 2026-09-20 | The first supported venue is now Kraken, for access reasons. `Trading.Exchanges.Binance` was renamed to `Trading.Exchanges.Kraken` and its wire mapping rewritten against Kraken's real `AssetPairs` response, verified live against `api.kraken.com`. Two substantive findings came out of the switch rather than a rename alone. **First, a domain vocabulary leak:** `Instrument` hard-coded Binance's literal strings `"TRADING"` and `"SPOT"`, so against Kraken — whose statuses are `online`, `cancel_only`, `post_only`, `limit_only`, `reduce_only`, `maintenance` — every instrument would have been silently ineligible forever. Replaced with the neutral `InstrumentTradingStatus` enum and `InstrumentCapabilities` constants, mirrored as `CatalogueTradingStatus` in the exchange abstraction and mapped in `CatalogueSynchronizer`, so no venue's vocabulary reaches the domain. An unrecognised status maps to `Unknown`, which is never tradable, so a status Kraken adds later cannot be read as permission to trade. **Second, Kraken publishes no public Spot sandbox** (only Futures has one, at `demo-futures.kraken.com`), which invalidated the plan's "Spot testnet before live" safety gate. The gate was redesigned rather than dropped: Phase 9 is now a recorded-response replay harness for CI plus a supervised minimum-size proving stage whose notional ceiling is enforced in the risk engine, and an explicit test asserts no automated test can place a real order. Kraken also supplies no listing date, so listing age is now genuinely unknown and fails the new-listing gate. The 50-pair seed moved to Kraken USD pairs using Kraken's own codes (`XBT`, `XDG`) under version tag `2026-09-20.kraken-spot-usd-50`. Build clean; 335 tests passing. |
+
 ## Phase 0 — Solution foundations
 | Task | Status | Notes |
 |---|---|---|
 | 0.1 Solution + project shells + analyzers | Done | 2026-09-19 — solution skeleton and repo-level build settings created; `dotnet build Trading.sln` succeeded. |
-| 0.2 Architecture test project (Domain purity) | Done | 2026-09-19 — architecture guard added to ensure the `Trading.Domain` assembly does not reference forbidden Azure/EF/HTTP/Binance dependencies; `dotnet test Trading.sln` passed. |
+| 0.2 Architecture test project (Domain purity) | Done | 2026-09-19 — architecture guard added to ensure the `Trading.Domain` assembly does not reference forbidden Azure/EF/HTTP/Kraken dependencies; `dotnet test Trading.sln` passed. |
 | 0.3 GitHub Actions CI workflow | Done | 2026-09-19 — CI workflow added for restore, build, and test validation on pushes and pull requests. |
 
 ## Phase 1 — Identity, invitations, roles, audit log
@@ -25,12 +31,12 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 | 1.5 MFA enrollment/enforcement for Administrator | Done | 2026-09-19 — administrator MFA guard enforced in `User` with `EnsureAdministratorPrivilegeAllowed()`, plus application policy service and tests covering denied/allowed admin actions; `dotnet test Trading.sln` passed. |
 | 1.6 Audit event writer + viewer UI | Done | 2026-09-19 — persisted audit writer and query service added in Application/Infrastructure layers, with tests verifying write and most-recent-first ordering; the web app exposes the audit API and build/test pass. |
 
-## Phase 2 — Exchange account connection (Binance, secrets)
+## Phase 2 — Exchange account connection (Kraken, secrets)
 | Task | Status | Notes |
 |---|---|---|
 | 2.1 Exchange abstraction ports + neutral value objects | Done | 2026-09-19 — `Trading.Exchanges.Abstractions` contains neutral exchange account, kind, and status contracts, with architecture tests verifying status transitions and secret metadata restrictions. |
 | 2.2 Key Vault-backed ISecretStore | Done | 2026-09-19 — `Trading.Infrastructure.Secrets` defines the safe secret-reference contract and secret store abstraction for later Key Vault-backed implementation. |
-| 2.3 Binance account/permission validation gateway | In progress | 2026-09-19 — neutral API permission validation contract and validation service added; no live Binance calls or withdrawal-capable logic are allowed in this task. |
+| 2.3 Kraken account/permission validation gateway | In progress | 2026-09-19 — neutral API permission validation contract and validation service added; no live Kraken calls or withdrawal-capable logic are allowed in this task. |
 | 2.4 Connect/validate/disconnect use cases | Done | 2026-09-19 — `ExchangeAccountService` validates read+trade permissions and rejects withdraw-capable or stale credentials; tests pass. |
 | 2.5 Blazor UI for exchange accounts | Not started | |
 
@@ -38,8 +44,8 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 | Task | Status | Notes |
 |---|---|---|
 | 3.1 Symbol/Candle domain + repository ports | In progress | 2026-09-19 — market-data primitives (`MarketSymbol`, `Candle`, `DataQualityIssue`, repository ports) are in place; build/test pass after validation-only additions. |
-| 3.2 Binance historical candle fetch + normalization | Not started | |
-| 3.3 Binance streaming candle ingestion worker | Not started | |
+| 3.2 Kraken historical candle fetch + normalization | Not started | |
+| 3.3 Kraken streaming candle ingestion worker | Not started | |
 | 3.4 Data-quality detection | In progress | 2026-09-19 — `CandleQualityEvaluator` exists and validates incomplete/derived/out-of-order/duplicate checks; tests pass. |
 | 3.5 Derived 10-minute candle builder | In progress | 2026-09-19 — `DerivedCandleBuilder` produces derived ten-minute candles from ten closed one-minute candles and flags them appropriately; tests pass. |
 | 3.6 Core indicator library | Not started | |
@@ -53,8 +59,8 @@ See `docs/market-universe.md`. All 50 seed pairs are `Tracked` only; none is liv
 | 3B.2 Eligibility grant model (purpose/timeframe/product/mode) | Done | 2026-09-20 — `EligibilityPurpose`, `EligibilityScope`, `InstrumentEligibilityGrant`, and `InstrumentEligibility` added. Eligibility is keyed on (purpose, interval, product type), so a pair eligible for a 4-hour strategy is provably not eligible for a 1-minute strategy and Spot eligibility confers no Futures eligibility. Grants are strictly additive: a purpose cannot be granted while a prerequisite is missing or expired, which makes granting live trading to a non-paper-eligible instrument impossible. Revocation cascades to every dependent purpose in one operation. Every grant carries its evidence timestamp and expires once that evidence exceeds the configured maximum age — including when only a *prerequisite's* evidence goes stale — so a failure to refresh degrades eligibility instead of preserving it. A live grant is rejected without an explicit approving administrator. 18 tests added; 200 passing. |
 | 3B.3 EligibilityGate evaluation engine + explainable record | Done | 2026-09-20 — `EligibilityGate` (12 gates), `EligibilityGateResult`, `EligibilityThresholds`, `EligibilityEvaluation`, and `InstrumentEligibilityEvaluator` added. Every gate fails closed: absent metrics, unloaded filters, an unknown exchange status, an unknown listing age, or stale evidence all evaluate to *not eligible* rather than being assumed acceptable. The liquidity gate requires **both** the rolling and the median measure, so a single 24-hour volume spike with a failing median cannot grant eligibility. `EligibilityThresholds.ConstrainedBy` takes the stricter of operator configuration and the mandatory platform floor for every field, making it impossible to configure a threshold more permissive than the floor. Each evaluation records every gate with its measured value, threshold, and pass/fail detail, and `Explain()` names each failing gate. Determinism is covered by test. |
 | 3B.4 InstrumentMetrics rolling/median model + repository | Done | 2026-09-20 — `InstrumentMetrics` added with all-`decimal` values and UTC windows. Carries rolling, median and minimum quote volume, average and worst spread, estimated slippage, trade frequency, data-gap and stale-event counts, and optional depth. Validation rejects an inverted window, metrics computed before the window they describe ends, a worst spread tighter than the average, and negative values. Unmeasured depth is `null` rather than `0`, so "not measured" is never read as "no depth". `Median` is a `decimal` helper proven resistant to a single spike. Repository port deferred to the persistence task. |
-| 3B.5 Binance exchange-information catalogue source + neutral mapping | Done | 2026-09-20 � Neutral `InstrumentCatalogueEntry`, `InstrumentCatalogueSnapshot`, and `IInstrumentCatalogueSource` added to `Trading.Exchanges.Abstractions`; the Binance wire DTOs are `internal` to `Trading.Exchanges.Binance`, so Binance field names, casing, status strings, and string-encoded numbers cannot leak into the core. `BinanceExchangeInfoMapper` performs no I/O and holds no credentials (exchangeInfo is public market data), parses every trading rule to `decimal` with the invariant culture so a host locale cannot change a tick size, leaves an unsupplied or zero-encoded rule `null` rather than defaulting it, skips a symbol whose identity is missing rather than guessing, and throws on a malformed document rather than returning an empty catalogue that would look like a mass delisting. `CatalogueSynchronizer` applies a snapshot without granting anything: absence suspends and clears filters only when the snapshot is **complete**, so a truncated response can never suspend the whole universe; incomplete filters clear the loaded flag; a removed instrument is never reinstated. 17 tests added. |
-| 3B.6 50-pair seed as versioned configuration (Tracked only) | Done | 2026-09-20 — `MarketUniverseSeed` added with the 50 configured Binance USDT pairs and a version tag (`2026-09-20.spot-usdt-50`) so any eligibility decision can be traced to the seed it came from. Membership grants nothing: every seeded instrument is created `Tracked`, with no catalogue observation, no grant, and `BlocksNewExposure` true, all covered by test. The live exchange catalogue — not this list — remains the source of truth for existence, trading status, and Spot permission. The seed classifier recognises the seed base assets as cryptocurrencies while keeping the standard stablecoin, fiat, and leveraged-token exclusions; short tickers `G`, `ONE`, and `AR` are explicitly tested as genuine assets rather than leveraged tokens. Several seeded pairs are recent listings expected to fail the listing-age and liquidity gates and to stay research-only; that is the intended outcome, not a defect. 13 tests added; 242 passing. |
+| 3B.5 Kraken `AssetPairs` catalogue source + neutral mapping | Done | 2026-09-20 � Neutral `InstrumentCatalogueEntry`, `InstrumentCatalogueSnapshot`, and `IInstrumentCatalogueSource` added to `Trading.Exchanges.Abstractions`; the Kraken wire DTOs are `internal` to `Trading.Exchanges.Kraken`, so Kraken field names, casing, status strings, and string-encoded numbers cannot leak into the core. `KrakenAssetPairMapper` performs no I/O and holds no credentials (`AssetPairs` is public market data), treats a non-empty Kraken `error` array as a failure rather than an empty catalogue (Kraken answers HTTP 200 even when the call failed), parses every trading rule to `decimal` with the invariant culture so a host locale cannot change a tick size, leaves an unsupplied or zero-encoded rule `null` rather than defaulting it, skips a symbol whose identity is missing rather than guessing, and throws on a malformed document rather than returning an empty catalogue that would look like a mass delisting. `CatalogueSynchronizer` applies a snapshot without granting anything: absence suspends and clears filters only when the snapshot is **complete**, so a truncated response can never suspend the whole universe; incomplete filters clear the loaded flag; a removed instrument is never reinstated. 17 tests added. |
+| 3B.6 50-pair seed as versioned configuration (Tracked only) | Done | 2026-09-20 — `MarketUniverseSeed` added with 50 configured Kraken USD spot pairs and a version tag (`2026-09-20.kraken-spot-usd-50`) so any eligibility decision can be traced to the seed it came from. Membership grants nothing: every seeded instrument is created `Tracked`, with no catalogue observation, no grant, and `BlocksNewExposure` true, all covered by test. The live exchange catalogue — not this list — remains the source of truth for existence, trading status, and Spot permission. The seed classifier recognises the seed base assets as cryptocurrencies while keeping the standard stablecoin, fiat, and leveraged-token exclusions; short tickers such as `OP` are explicitly tested as genuine assets rather than leveraged tokens, and Kraken's own codes `XBT` and `XDG` are asserted so a symbol the venue does not recognise cannot silently vanish from the catalogue. Several seeded pairs are recent listings expected to fail the listing-age and liquidity gates and to stay research-only; that is the intended outcome, not a defect. 13 tests added; 242 passing. |
 | 3B.7 Newly-listed restricted state + evidence-age expiry | Done | 2026-09-20 � `NewListingPolicy` and `NewListingRestriction` added. A new listing has thin, unrepresentative history, so the restriction is expressed in permitted purposes rather than as a warning: tracking only, then research, then simulation, then unrestricted. An unknown listing age is `Unknown` and permits nothing � it is never treated as mature. `Stricter(floor)` takes the longer window for every stage, so configuration can only delay access, never hasten it, and the simulation window provably never permits any test or live purpose. Evidence-age expiry is carried by the grants from 3B.2; `InstrumentEligibility.HasGrant` was added so revocation can distinguish "there was something to withdraw" from "already absent". 9 tests added. |
 | 3B.8 Degradation rules (block entries/increases, allow reduction) | Done | 2026-09-20 � `InstrumentDegradationPolicy`, `ExposureDirective`, and `ExposureDecision` added. Conditions are evaluated in strict severity order and every unknown fails closed: absent measurements, stale measurements, and degraded data health all drop to `ReduceOnly`. Delisting, absence from the catalogue, a non-TRADING status, and missing trading rules force `CloseOnly` � without filters an order cannot be correctly sized, so a partial reduction could be rounded into a materially different order and only a full close is safe. `PermitsReduction` is true under **every** directive and is covered by test: blocking exits would trap capital in a deteriorating market. Every decision carries its reason. 13 tests added. |
 | 3B.9 Recalculation worker (scheduled + event-triggered) | Done | 2026-09-20 � `UniverseRecalculationService` plus `UniverseRecalculationWorker` hosted in `Trading.Workers.Scanner`. Recalculation is a safety control, not a convenience: it is the mechanism by which an instrument that stops meeting its gates loses its grant without anyone having to notice. It grants at most `Paper` � test and live purposes require an explicit audited approval and are never produced automatically � but it **revokes** them automatically when evidence fails, because withdrawing capability must never need an approval. An evidence failure revokes rather than retains, since not knowing must never read as still qualifying, and one failing instrument never stops the others. Time comes from an injected `TimeProvider`, so passes are deterministic under test. The host binds unconfigured evidence and work sources that report nothing rather than fabricating a universe. 9 tests added. |
@@ -133,15 +139,17 @@ See `docs/strategy-research-plan.md`. These are falsifiable research templates, 
 | 8.8 Application shell and operator UI | Done | 2026-09-20 — added a shared navigation shell (`wwwroot/app.css`, `wwwroot/nav.js`) mounted on every page, which renders entirely through `textContent` so no server or exchange string can become markup, and which displays a persistent "live trading disabled" badge and a footer stating that the platform never holds or withdraws funds and never predicts results. New `/orders` view shows orders, open positions and outstanding reconciliations, with frozen orders flagged; new `/account` view covers invitation-only registration, sign in and sign out without ever echoing a credential. `/api/orders` and `/api/orders/reconciliations` take the owning user from the signed-in principal only and expose no user id parameter. Verified at runtime: all pages 200 anonymous, both APIs 401 anonymous. |
 | 8.8 Admin/risk dashboard UI | Done | 2026-09-19 — `/admin/risk` exposes the safety controls so an operator can actually use them: platform emergency stop, market halt, user halt, strategy halt, close-only, and reduce-only, each with engage and release. `GET`/`POST /api/risk/halts` require the Administrator or RiskOfficer role. Every change requires a reason and writes an immutable audit event naming the actor, the scope, and the target; the page states that a halt does not close existing positions. Verified at runtime: both endpoints return 401 when unauthenticated. Halt state is a singleton, so an emergency stop applies immediately to every trading path in the process. |
 
-## Phase 9 — Binance Spot testnet live-path trading
+## Phase 9 — Kraken Spot proving stage (replay harness + minimum-size live path)
 | Task | Status | Notes |
 |---|---|---|
-| 9.1 ISpotOrderGateway Binance Testnet implementation | Not started | |
-| 9.2 BinanceSpotExecutionAdapter | Not started | |
-| 9.3 Reconciliation wiring + error taxonomy | Not started | |
-| 9.4 End-to-end Testnet integration test suite | Not started | |
+| 9.1 ISpotOrderGateway Kraken Spot implementation | Not started | |
+| 9.2 KrakenSpotExecutionAdapter | Not started | |
+| 9.3 Recorded-response replay harness + Kraken fixtures | Not started | |
+| 9.4 Reconciliation wiring + error taxonomy | Not started | |
+| 9.5 ExchangeAccountTradingStage + proving ceiling enforcement | Not started | |
+| 9.6 End-to-end replay integration suite + no-real-order guard test | Not started | |
 
-## Phase 10 — Binance Spot live trading (gated rollout)
+## Phase 10 — Kraken Spot live trading (gated rollout)
 | Task | Status | Notes |
 |---|---|---|
 | 10.1 Production Key Vault + Managed Identity (Bicep) | Not started | |
@@ -149,16 +157,16 @@ See `docs/strategy-research-plan.md`. These are falsifiable research templates, 
 | 10.3 Staged rollout cohort gating | Not started | |
 | 10.4 Alerting rules for live-trading anomalies | Not started | |
 
-## Phase 11 — Binance Futures testnet trading
+## Phase 11 — Kraken Futures demo-environment trading
 | Task | Status | Notes |
 |---|---|---|
-| 11.1 IFuturesOrderGateway Binance Testnet implementation | Not started | |
-| 11.2 BinanceFuturesExecutionAdapter | Not started | |
+| 11.1 IFuturesOrderGateway Kraken Futures demo implementation | Not started | |
+| 11.2 KrakenFuturesExecutionAdapter | Not started | |
 | 11.3 Futures position tracking | Not started | |
 | 11.4 Futures-specific risk limits | Not started | |
 | 11.5 Futures position UI | Not started | |
 
-## Phase 12 — Binance Futures live trading (gated, after Spot live is stable)
+## Phase 12 — Kraken Futures live trading (gated, after Spot live is stable)
 | Task | Status | Notes |
 |---|---|---|
 | 12.1 Futures live-trading entitlement + enablement flow | Not started | |

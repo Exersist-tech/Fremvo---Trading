@@ -32,8 +32,8 @@ public sealed class InstrumentEligibilityEvaluatorTests
     private static Instrument HealthyInstrument()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now, Now.AddYears(-2));
+            Guid.NewGuid(), "Kraken", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now, Now.AddYears(-2));
         instrument.MarkFiltersLoaded(Now);
         return instrument;
     }
@@ -206,8 +206,8 @@ public sealed class InstrumentEligibilityEvaluatorTests
     public void ANewlyListedInstrumentFailsTheListingAgeGate()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "PROVEUSDT", "PROVE", "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now, Now.AddDays(-5));
+            Guid.NewGuid(), "Kraken", "PROVEUSDT", "PROVE", "USDT", AssetClass.Cryptocurrency);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now, Now.AddDays(-5));
         instrument.MarkFiltersLoaded(Now);
 
         var evaluation = EvaluateWith(instrument);
@@ -220,8 +220,8 @@ public sealed class InstrumentEligibilityEvaluatorTests
     public void UnknownListingAgeFailsClosed()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "NEWUSDT", "NEW", "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now);
+            Guid.NewGuid(), "Kraken", "NEWUSDT", "NEW", "USDT", AssetClass.Cryptocurrency);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now);
         instrument.MarkFiltersLoaded(Now);
 
         var evaluation = EvaluateWith(instrument);
@@ -302,8 +302,8 @@ public sealed class InstrumentEligibilityEvaluatorTests
     public void AnExcludedAssetClassFailsEvenWhenEveryOtherGatePasses()
     {
         var instrument = Instrument.CreateSeed(
-            Guid.NewGuid(), "Binance", "USDCUSDT", "USDC", "USDT", AssetClass.Stablecoin);
-        instrument.ObserveInCatalogue("TRADING", SpotPermission, Now, Now.AddYears(-3));
+            Guid.NewGuid(), "Kraken", "USDCUSDT", "USDC", "USDT", AssetClass.Stablecoin);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermission, Now, Now.AddYears(-3));
         instrument.MarkFiltersLoaded(Now);
 
         var evaluation = EvaluateWith(instrument);

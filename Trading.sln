@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -19,7 +19,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Infrastructure.Cach
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Exchanges.Abstractions", "src\Trading.Exchanges.Abstractions\Trading.Exchanges.Abstractions.csproj", "{65FF5266-E986-4F9C-8897-FE372915C5C0}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Exchanges.Binance", "src\Trading.Exchanges.Binance\Trading.Exchanges.Binance.csproj", "{030DED3F-371E-4803-8C15-53EF2E03AC17}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Exchanges.Kraken", "src\Trading.Exchanges.Kraken\Trading.Exchanges.Kraken.csproj", "{030DED3F-371E-4803-8C15-53EF2E03AC17}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.MarketData", "src\Trading.MarketData\Trading.MarketData.csproj", "{515694F7-F9E8-4FCF-B529-9CC86B919FD2}"
 EndProject

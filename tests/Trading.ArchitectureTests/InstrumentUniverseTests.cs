@@ -23,12 +23,12 @@ public sealed class InstrumentUniverseTests
     private static AssetClassifier Classifier() => new(KnownCryptocurrencies);
 
     private static Instrument Seed(string symbol, string baseAsset, string quoteAsset, AssetClass assetClass) =>
-        Instrument.CreateSeed(Guid.NewGuid(), "Binance", symbol, baseAsset, quoteAsset, assetClass);
+        Instrument.CreateSeed(Guid.NewGuid(), "Kraken", symbol, baseAsset, quoteAsset, assetClass);
 
     private static Instrument TradingSpotInstrument(string symbol = "BTCUSDT", string baseAsset = "BTC")
     {
         var instrument = Seed(symbol, baseAsset, "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", SpotAndMarginPermissions, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotAndMarginPermissions, DateTimeOffset.UnixEpoch);
         return instrument;
     }
 
@@ -71,7 +71,7 @@ public sealed class InstrumentUniverseTests
     public void StatusOtherThanTradingIsExcluded()
     {
         var instrument = Seed("BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("BREAK", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Halted, "MAINTENANCE", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
 
         Assert.False(instrument.IsTradingOnExchange);
         Assert.Equal(InstrumentExclusionReason.ExchangeStatusNotTrading, instrument.EvaluateExclusion(UsdtOnly));
@@ -82,7 +82,7 @@ public sealed class InstrumentUniverseTests
     public void MissingSpotPermissionIsExcluded()
     {
         var instrument = Seed("BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", MarginPermissionOnly, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", MarginPermissionOnly, DateTimeOffset.UnixEpoch);
 
         Assert.Equal(InstrumentExclusionReason.SpotPermissionMissing, instrument.EvaluateExclusion(UsdtOnly));
     }
@@ -91,7 +91,7 @@ public sealed class InstrumentUniverseTests
     public void QuoteAssetOutsideTheAllowlistIsExcluded()
     {
         var instrument = Seed("BTCFDUSD", "BTC", "FDUSD", AssetClass.Cryptocurrency);
-        instrument.ObserveInCatalogue("TRADING", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
 
         Assert.Equal(InstrumentExclusionReason.QuoteAssetNotAllowed, instrument.EvaluateExclusion(UsdtOnly));
     }
@@ -107,7 +107,7 @@ public sealed class InstrumentUniverseTests
         InstrumentExclusionReason expected)
     {
         var instrument = Seed("XXXUSDT", "XXX", "USDT", assetClass);
-        instrument.ObserveInCatalogue("TRADING", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
         instrument.MarkFiltersLoaded(DateTimeOffset.UnixEpoch);
 
         Assert.Equal(expected, instrument.EvaluateExclusion(UsdtOnly));
@@ -164,7 +164,7 @@ public sealed class InstrumentUniverseTests
 
         Assert.Equal(InstrumentState.Removed, instrument.State);
         Assert.Throws<InvalidOperationException>(() =>
-            instrument.ObserveInCatalogue("TRADING", SpotPermissionOnly, DateTimeOffset.UnixEpoch));
+            instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermissionOnly, DateTimeOffset.UnixEpoch));
         Assert.Equal(InstrumentExclusionReason.Removed, instrument.EvaluateExclusion(UsdtOnly));
     }
 
@@ -199,7 +199,7 @@ public sealed class InstrumentUniverseTests
     {
         var instrument = Seed("BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency);
         var onboard = new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        instrument.ObserveInCatalogue("TRADING", SpotPermissionOnly, onboard, onboard);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermissionOnly, onboard, onboard);
         instrument.RecordFirstObservedCandle(new DateTimeOffset(2024, 3, 1, 0, 0, 0, TimeSpan.Zero));
 
         var age = instrument.ListingAge(new DateTimeOffset(2024, 1, 31, 0, 0, 0, TimeSpan.Zero));
@@ -230,7 +230,7 @@ public sealed class InstrumentUniverseTests
     public void SymbolAndAssetCodesAreNormalisedSoLookupsCannotDiverge()
     {
         var instrument = Instrument.CreateFromCatalogue(
-            Guid.NewGuid(), "Binance", " btcusdt ", " btc ", " usdt ", AssetClass.Cryptocurrency);
+            Guid.NewGuid(), "Kraken", " btcusdt ", " btc ", " usdt ", AssetClass.Cryptocurrency);
 
         Assert.Equal("BTCUSDT", instrument.ExchangeSymbol);
         Assert.Equal("BTC", instrument.BaseAsset);
@@ -241,9 +241,9 @@ public sealed class InstrumentUniverseTests
     public void EmptyIdentifiersAreRejected()
     {
         Assert.Throws<ArgumentException>(() =>
-            Instrument.CreateSeed(Guid.Empty, "Binance", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency));
+            Instrument.CreateSeed(Guid.Empty, "Kraken", "BTCUSDT", "BTC", "USDT", AssetClass.Cryptocurrency));
         Assert.Throws<ArgumentException>(() =>
-            Instrument.CreateSeed(Guid.NewGuid(), "Binance", " ", "BTC", "USDT", AssetClass.Cryptocurrency));
+            Instrument.CreateSeed(Guid.NewGuid(), "Kraken", " ", "BTC", "USDT", AssetClass.Cryptocurrency));
     }
 
     // --- Asset classification -------------------------------------------------
@@ -323,7 +323,7 @@ public sealed class InstrumentUniverseTests
         var classifier = Classifier();
         var baseClass = classifier.Classify("USDC");
         var instrument = Seed("USDCUSDT", "USDC", "USDT", baseClass);
-        instrument.ObserveInCatalogue("TRADING", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
+        instrument.ObserveInCatalogue(InstrumentTradingStatus.Trading, "ONLINE", SpotPermissionOnly, DateTimeOffset.UnixEpoch);
 
         Assert.Equal(InstrumentExclusionReason.StablecoinPair, instrument.EvaluateExclusion(UsdtOnly));
     }

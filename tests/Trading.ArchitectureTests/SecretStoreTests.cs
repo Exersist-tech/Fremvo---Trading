@@ -9,10 +9,10 @@ public sealed class SecretStoreTests
     {
         var store = new InMemorySecretStore();
 
-        await store.StoreSecretAsync("binance-testnet-key", "super-secret-value", "v2");
+        await store.StoreSecretAsync("kraken-proving-key", "super-secret-value", "v2");
 
-        var readSecret = await store.GetSecretAsync("binance-testnet-key");
-        var version = await store.GetSecretVersionAsync("binance-testnet-key");
+        var readSecret = await store.GetSecretAsync("kraken-proving-key");
+        var version = await store.GetSecretVersionAsync("kraken-proving-key");
 
         Assert.Equal("super-secret-value", readSecret);
         Assert.Equal("v2", version);
@@ -23,9 +23,9 @@ public sealed class SecretStoreTests
     {
         var store = new InMemorySecretStore();
 
-        await store.StoreSecretAsync("binance-live-key", "livesecret");
-        await store.RemoveSecretAsync("binance-live-key");
+        await store.StoreSecretAsync("kraken-live-key", "livesecret");
+        await store.RemoveSecretAsync("kraken-live-key");
 
-        await Assert.ThrowsAsync<KeyNotFoundException>(() => store.GetSecretAsync("binance-live-key").AsTask());
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => store.GetSecretAsync("kraken-live-key").AsTask());
     }
 }

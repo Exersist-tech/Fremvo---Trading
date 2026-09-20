@@ -13,9 +13,9 @@ public sealed class ExchangeConnectionValidationTests
             Guid.NewGuid(),
             new ExchangeAccountRequest(
                 Guid.NewGuid(),
-                ExchangeKind.Binance,
+                ExchangeKind.Kraken,
                 "Primary account",
-                "kv/binance/primary-api-key"),
+                "kv/kraken/primary-api-key"),
             DateTimeOffset.UtcNow);
 
         var permissions = new ApiPermissionSnapshot(true, true, true, DateTimeOffset.UtcNow);
@@ -31,9 +31,9 @@ public sealed class ExchangeConnectionValidationTests
             Guid.NewGuid(),
             new ExchangeAccountRequest(
                 Guid.NewGuid(),
-                ExchangeKind.Binance,
+                ExchangeKind.Kraken,
                 "Primary account",
-                "kv/binance/primary-api-key"),
+                "kv/kraken/primary-api-key"),
             DateTimeOffset.UtcNow);
 
         var permissions = new ApiPermissionSnapshot(true, true, false, DateTimeOffset.UtcNow);
@@ -52,9 +52,9 @@ public sealed class ExchangeConnectionValidationTests
             Guid.NewGuid(),
             new ExchangeAccountRequest(
                 Guid.NewGuid(),
-                ExchangeKind.Binance,
+                ExchangeKind.Kraken,
                 "Primary account",
-                "kv/binance/primary-api-key"),
+                "kv/kraken/primary-api-key"),
             DateTimeOffset.UtcNow);
 
         var permissions = new ApiPermissionSnapshot(true, true, false, DateTimeOffset.UtcNow.AddDays(-2));

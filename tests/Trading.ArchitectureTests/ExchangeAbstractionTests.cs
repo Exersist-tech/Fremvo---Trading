@@ -12,9 +12,9 @@ public sealed class ExchangeAbstractionTests
         var account = new ExchangeAccount(
             Guid.NewGuid(),
             Guid.NewGuid(),
-            ExchangeKind.Binance,
+            ExchangeKind.Kraken,
             "Primary account",
-            "secret-ref/binance-primary",
+            "secret-ref/kraken-primary",
             now);
 
         Assert.Equal(ExchangeAccountStatus.Disconnected, account.Status);
@@ -34,9 +34,9 @@ public sealed class ExchangeAbstractionTests
     [Fact]
     public void SecretReferenceModelIsSafeMetadataOnly()
     {
-        var reference = new SecretReference("crypto/binance/api-key", "v2");
+        var reference = new SecretReference("crypto/kraken/api-key", "v2");
 
-        Assert.Equal("crypto/binance/api-key", reference.SecretName);
+        Assert.Equal("crypto/kraken/api-key", reference.SecretName);
         Assert.Equal("v2", reference.Version);
     }
 }

@@ -14,11 +14,11 @@ public sealed class MarketUniverseSeedTests
     }
 
     [Fact]
-    public void EverySeedSymbolIsQuotedInUsdt()
+    public void EverySeedSymbolIsQuotedInUsd()
     {
         foreach (var symbol in MarketUniverseSeed.SeedSymbols)
         {
-            Assert.EndsWith("USDT", symbol, StringComparison.Ordinal);
+            Assert.EndsWith("USD", symbol, StringComparison.Ordinal);
         }
     }
 
@@ -75,13 +75,14 @@ public sealed class MarketUniverseSeedTests
     [Fact]
     public void ShortSeedTickersAreNotMisreadAsLeveragedTokens()
     {
-        // "G", "ONE" and "AR" are genuine short tickers, not leveraged
-        // products, and must not be excluded by the leveraged-token rule.
+        // "OP" is a genuine short ticker, not a leveraged product, and must
+        // not be excluded by the leveraged-token rule. "XBT" and "XDG" are
+        // Kraken's own codes for Bitcoin and Dogecoin.
         var classifier = MarketUniverseSeed.CreateClassifier();
 
-        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("G"));
-        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("ONE"));
-        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("AR"));
+        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("OP"));
+        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("XBT"));
+        Assert.Equal(AssetClass.Cryptocurrency, classifier.Classify("XDG"));
     }
 
     [Fact]
@@ -137,11 +138,25 @@ public sealed class MarketUniverseSeedTests
     }
 
     [Fact]
-    public void SeedTargetsTheBinanceExchange()
+    public void SeedTargetsTheKrakenExchange()
     {
         foreach (var instrument in MarketUniverseSeed.Create())
         {
-            Assert.Equal("Binance", instrument.ExchangeName, StringComparer.Ordinal);
+            Assert.Equal("Kraken", instrument.ExchangeName, StringComparer.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Kraken names Bitcoin XBT and Dogecoin XDG. The seed must use the
+    /// venue's own codes, because a symbol the exchange does not recognise
+    /// would silently never appear in the catalogue.
+    /// </summary>
+    [Fact]
+    public void SeedUsesKrakenAssetCodes()
+    {
+        Assert.Contains("XBT", MarketUniverseSeed.SeedBaseAssets, StringComparer.Ordinal);
+        Assert.Contains("XDG", MarketUniverseSeed.SeedBaseAssets, StringComparer.Ordinal);
+        Assert.DoesNotContain("BTC", MarketUniverseSeed.SeedBaseAssets, StringComparer.Ordinal);
+        Assert.DoesNotContain("DOGE", MarketUniverseSeed.SeedBaseAssets, StringComparer.Ordinal);
     }
 }

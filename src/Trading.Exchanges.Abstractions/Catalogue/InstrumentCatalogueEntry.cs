@@ -1,6 +1,27 @@
 namespace Trading.Exchanges.Abstractions.Catalogue;
 
 /// <summary>
+/// Exchange-neutral trading status reported by a connector.
+/// </summary>
+/// <remarks>
+/// Declared here rather than reused from the domain so connectors depend only
+/// on this abstraction package. Each connector translates its own exchange's
+/// vocabulary into these values; anything unrecognised becomes
+/// <see cref="Unknown"/> and is never treated as tradable.
+/// </remarks>
+public enum CatalogueTradingStatus
+{
+    Unknown = 0,
+    Trading = 1,
+    LimitOnly = 2,
+    PostOnly = 3,
+    ReduceOnly = 4,
+    CancelOnly = 5,
+    Halted = 6,
+    Delisted = 7
+}
+
+/// <summary>
 /// One instrument as described by an exchange catalogue, in exchange-neutral
 /// terms. Contains no exchange-specific field names, casing, or encoding.
 /// </summary>
@@ -16,7 +37,8 @@ public sealed record InstrumentCatalogueEntry
         string exchangeSymbol,
         string baseAsset,
         string quoteAsset,
-        string status,
+        CatalogueTradingStatus status,
+        string exchangeStatusRaw,
         IReadOnlyCollection<string> permissions,
         decimal? priceTickSize = null,
         decimal? quantityStepSize = null,
@@ -29,7 +51,8 @@ public sealed record InstrumentCatalogueEntry
         ExchangeSymbol = Require(exchangeSymbol, nameof(exchangeSymbol)).ToUpperInvariant();
         BaseAsset = Require(baseAsset, nameof(baseAsset)).ToUpperInvariant();
         QuoteAsset = Require(quoteAsset, nameof(quoteAsset)).ToUpperInvariant();
-        Status = Require(status, nameof(status)).ToUpperInvariant();
+        Status = status;
+        ExchangeStatusRaw = Require(exchangeStatusRaw, nameof(exchangeStatusRaw)).ToUpperInvariant();
 
         Permissions = permissions
             .Where(permission => !string.IsNullOrWhiteSpace(permission))
@@ -51,10 +74,14 @@ public sealed record InstrumentCatalogueEntry
     public string QuoteAsset { get; }
 
     /// <summary>
-    /// The exchange's own trading status, upper-cased. Not interpreted here:
-    /// the eligibility gate decides what counts as tradable.
+    /// The neutral trading status. The eligibility gate reasons about this.
     /// </summary>
-    public string Status { get; }
+    public CatalogueTradingStatus Status { get; }
+
+    /// <summary>
+    /// The exchange's own status text, retained for audit and diagnosis only.
+    /// </summary>
+    public string ExchangeStatusRaw { get; }
 
     public IReadOnlyCollection<string> Permissions { get; }
 

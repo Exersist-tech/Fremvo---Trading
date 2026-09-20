@@ -168,11 +168,11 @@ C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-a
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Strategies.dll
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Indicators.pdb
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Strategies.pdb
-C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Exchanges.Binance.dll
-C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Exchanges.Binance.pdb
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Risk.dll
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Risk.pdb
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Backtesting.dll
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Backtesting.pdb
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Optimization.dll
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Optimization.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Exchanges.Kraken.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\tests\Trading.ArchitectureTests\bin\Debug\net8.0\Trading.Exchanges.Kraken.pdb

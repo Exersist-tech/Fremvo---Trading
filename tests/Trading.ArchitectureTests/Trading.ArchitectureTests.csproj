@@ -27,7 +27,7 @@
     <ProjectReference Include="..\..\src\Trading.MarketData\Trading.MarketData.csproj" />
     <ProjectReference Include="..\..\src\Trading.Indicators\Trading.Indicators.csproj" />
     <ProjectReference Include="..\..\src\Trading.Strategies\Trading.Strategies.csproj" />
-    <ProjectReference Include="..\..\src\Trading.Exchanges.Binance\Trading.Exchanges.Binance.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Exchanges.Kraken\Trading.Exchanges.Kraken.csproj" />
     <ProjectReference Include="..\..\src\Trading.Risk\Trading.Risk.csproj" />
     <ProjectReference Include="..\..\src\Trading.Backtesting\Trading.Backtesting.csproj" />
     <ProjectReference Include="..\..\src\Trading.Optimization\Trading.Optimization.csproj" />

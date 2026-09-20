@@ -3,7 +3,7 @@
 All types below live in exchange-neutral projects (`Trading.Domain`,
 `Trading.Application`, `Trading.Strategies`, `Trading.Risk`,
 `Trading.Backtesting`) unless marked otherwise. None of these reference
-Binance types, EF Core, Azure SDKs, or ASP.NET Core.
+Kraken types, EF Core, Azure SDKs, or ASP.NET Core.
 
 ## 1. Identity & access
 
@@ -18,7 +18,7 @@ Binance types, EF Core, Azure SDKs, or ASP.NET Core.
 ## 2. Exchange accounts & secrets
 
 - `ExchangeAccount` (id, owner `UserId`, exchange identifier e.g.
-  `Binance`, environment: `Testnet`/`Live`, market type capability flags:
+  `Kraken`, environment: `Paper`/`Proving`/`Live`, market type capability flags:
   Spot/Futures, status: `PendingValidation`/`Active`/`Suspended`/`Revoked`,
   granted-permission summary, `SecretReferenceId`).
 - `SecretReference` (opaque pointer to a Key Vault secret — never the
@@ -77,7 +77,7 @@ Full detail: `docs/market-universe.md`.
   `Fiat`, `LeveragedToken`, `Unknown`). Only `Cryptocurrency` may exceed
   `Tracked`.
 - `InstrumentState` (enum: `Tracked`, `ResearchEligible`,
-  `BacktestEligible`, `PaperEligible`, `SpotTestEligible`,
+  `BacktestEligible`, `PaperEligible`, `SpotProvingEligible`,
   `SpotLiveEligible`, `FuturesTestEligible`, `FuturesLiveEligible`,
   `Suspended`, `Removed`). Every instrument begins as `Tracked` only.
 - `InstrumentEligibilityGrant` — eligibility is a function of
@@ -93,8 +93,8 @@ Full detail: `docs/market-universe.md`.
   `EligibilityEvaluation` — an explainable record of each gate's measured
   value, threshold, and pass/fail result.
 - `IInstrumentCatalogueSource` — port returning the current neutral
-  instrument catalogue; the Binance implementation maps
-  exchange-information responses and keeps Binance DTOs in the connector.
+  instrument catalogue; the Kraken implementation maps
+  `AssetPairs` responses and keeps Kraken DTOs in the connector.
 - `IInstrumentEligibilityEvaluator` — deterministic; identical inputs
   produce an identical result and an identical explanation.
 
@@ -165,7 +165,7 @@ Full detail: `docs/strategy-research-plan.md`.
 - `ExecutionCommand` — the risk-approved instruction to place/cancel an
   order, carrying an idempotent `ClientOrderId`.
 - `IExecutionAdapter` (Application port) — implemented by
-  `PaperExecutionAdapter` and by Binance Spot/Futures adapters; identical
+  `PaperExecutionAdapter` and by Kraken Spot/Futures adapters; identical
   contract for both.
 - `ExecutionResult` — raw outcome from the adapter (accepted, rejected,
   unknown/timeout) before reconciliation.
@@ -277,11 +277,11 @@ Rules:
 
 | Interface | Implemented by |
 |---|---|
-| `IExchangeConnector`, `IMarketDataSource`, `ISpotOrderGateway`, `IFuturesOrderGateway`, `IAccountGateway` | `Trading.Exchanges.Binance` (later: other exchanges) |
+| `IExchangeConnector`, `IMarketDataSource`, `ISpotOrderGateway`, `IFuturesOrderGateway`, `IAccountGateway` | `Trading.Exchanges.Kraken` (later: other exchanges) |
 | `ISecretStore` | `Trading.Infrastructure.Secrets` (Key Vault) |
 | `ICandleRepository`, `IOrderRepository`, `IPositionRepository`, `IAuditEventRepository`, etc. | `Trading.Infrastructure.Data` (EF Core / Azure SQL) |
 | `IRealtimeCache` | `Trading.Infrastructure.Cache` (Redis) |
 | `IEventBus` | `Trading.Infrastructure.Messaging` (Azure Service Bus) |
-| `IExecutionAdapter` | `PaperExecutionAdapter`, Binance Spot/Futures adapters |
+| `IExecutionAdapter` | `PaperExecutionAdapter`, Kraken Spot/Futures adapters |
 | `IStrategy` | Each approved strategy template in `Trading.Strategies` |
 | `IIndicator<T>` | Each indicator in `Trading.Indicators` |

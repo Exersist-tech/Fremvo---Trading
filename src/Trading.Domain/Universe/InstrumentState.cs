@@ -30,9 +30,16 @@ public enum InstrumentState
     PaperEligible = 3,
 
     /// <summary>
-    /// Paper-eligible plus a validated Spot testnet account path.
+    /// Paper-eligible plus an execution path proven against recorded
+    /// exchange responses.
     /// </summary>
-    SpotTestEligible = 4,
+    /// <remarks>
+    /// Kraken publishes no public Spot sandbox, so this grant does not mean
+    /// "proven on a testnet". It permits only minimum-size orders under the
+    /// proving notional ceiling, on a real account with real funds, and is
+    /// therefore subject to every live-trading safety control.
+    /// </remarks>
+    SpotProvingEligible = 4,
 
     /// <summary>
     /// Requires an explicit, audited administrator approval. Never automatic.

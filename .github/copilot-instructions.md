@@ -14,7 +14,7 @@ repository.
 
 Build a global, invitation-only cryptocurrency trading platform.
 
-The platform will initially support Binance through its official API, but the
+The platform will initially support Kraken through its official API, but the
 core architecture must allow additional exchanges later.
 
 Users connect their own exchange accounts. The platform must never hold,
@@ -71,11 +71,11 @@ The Domain project must not depend on:
 - Entity Framework Core
 - SQL
 - HTTP
-- Binance models
+- Kraken models
 - Exchange SDKs
 - UI frameworks
 
-Keep Binance-specific models inside the Binance connector.
+Keep Kraken-specific models inside the Kraken connector.
 
 Core trading, strategy, risk, backtesting, and reporting logic must use
 exchange-neutral models and interfaces.

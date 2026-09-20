@@ -145,12 +145,38 @@ public sealed class CatalogueSynchronizer
             snapshot.ExchangeName, snapshot.RetrievedAtUtc, snapshot.IsComplete, changes);
     }
 
+    /// <summary>
+    /// Maps the connector's neutral status onto the domain's neutral status.
+    /// </summary>
+    /// <remarks>
+    /// The two enums are deliberately separate types so the domain does not
+    /// depend on the exchange abstraction package. The mapping is exhaustive
+    /// and anything unmatched becomes
+    /// <see cref="InstrumentTradingStatus.Unknown"/>, which is never tradable.
+    /// </remarks>
+    private static InstrumentTradingStatus MapTradingStatus(CatalogueTradingStatus status) => status switch
+    {
+        CatalogueTradingStatus.Trading => InstrumentTradingStatus.Trading,
+        CatalogueTradingStatus.LimitOnly => InstrumentTradingStatus.LimitOnly,
+        CatalogueTradingStatus.PostOnly => InstrumentTradingStatus.PostOnly,
+        CatalogueTradingStatus.ReduceOnly => InstrumentTradingStatus.ReduceOnly,
+        CatalogueTradingStatus.CancelOnly => InstrumentTradingStatus.CancelOnly,
+        CatalogueTradingStatus.Halted => InstrumentTradingStatus.Halted,
+        CatalogueTradingStatus.Delisted => InstrumentTradingStatus.Delisted,
+        _ => InstrumentTradingStatus.Unknown
+    };
+
     private CatalogueSyncChange Apply(
         Instrument instrument,
         InstrumentCatalogueEntry entry,
         DateTimeOffset observedAtUtc)
     {
-        instrument.ObserveInCatalogue(entry.Status, entry.Permissions, observedAtUtc, entry.OnboardUtc);
+        instrument.ObserveInCatalogue(
+            MapTradingStatus(entry.Status),
+            entry.ExchangeStatusRaw,
+            entry.Permissions,
+            observedAtUtc,
+            entry.OnboardUtc);
 
         // The classification may change when an asset is reviewed or when the
         // exchange renames it. Re-applying it here keeps an asset that has
