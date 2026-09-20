@@ -18,6 +18,17 @@ public interface IPipelineStrategy
 }
 
 /// <summary>
+/// Optional platform-owned intent details. This is deliberately an internal pipeline extension:
+/// callers still cannot bypass the risk or execution stages.
+/// </summary>
+public interface IPipelineIntentDetailsStrategy
+{
+    PipelineIntentDetails GetIntentDetails(MarketEvent marketEvent, StrategyDecision decision);
+}
+
+public sealed record PipelineIntentDetails(decimal Quantity, bool ReduceOnly = false, bool CloseOnly = false);
+
+/// <summary>
 /// Portfolio state supplied to the risk gate before exposure may be increased.
 /// </summary>
 public sealed class PortfolioSnapshot
@@ -92,13 +103,15 @@ public sealed class TradePipelineResult
         bool executed,
         string? blockedReason,
         PortfolioUpdate? portfolioUpdate,
-        bool requiresReconciliation)
+        bool requiresReconciliation,
+        Guid? executionCommandId = null)
     {
         ReachedStage = reachedStage;
         Executed = executed;
         BlockedReason = blockedReason;
         PortfolioUpdate = portfolioUpdate;
         RequiresReconciliation = requiresReconciliation;
+        ExecutionCommandId = executionCommandId;
     }
 
     /// <summary>The last stage the trade reached before stopping.</summary>
@@ -116,15 +129,16 @@ public sealed class TradePipelineResult
     /// resubmission; it must never be blindly retried.
     /// </summary>
     public bool RequiresReconciliation { get; }
+    public Guid? ExecutionCommandId { get; }
 
     internal static TradePipelineResult Blocked(PipelineStage stage, string reason) =>
         new(stage, false, reason, null, false);
 
-    internal static TradePipelineResult NeedsReconciliation(string reason) =>
-        new(PipelineStage.Reconciliation, false, reason, null, true);
+    internal static TradePipelineResult NeedsReconciliation(string reason, Guid executionCommandId) =>
+        new(PipelineStage.Reconciliation, false, reason, null, true, executionCommandId);
 
-    internal static TradePipelineResult Completed(PortfolioUpdate update) =>
-        new(PipelineStage.AuditEvent, true, null, update, false);
+    internal static TradePipelineResult Completed(PortfolioUpdate update, Guid executionCommandId) =>
+        new(PipelineStage.AuditEvent, true, null, update, false, executionCommandId);
 }
 
 /// <summary>
@@ -248,14 +262,19 @@ public sealed class TradePipeline
             cancellationToken).ConfigureAwait(false);
 
         var direction = decision.Direction == SignalDirection.Buy ? TradeDirection.Buy : TradeDirection.Sell;
+        var details = strategy is IPipelineIntentDetailsStrategy detailedStrategy
+            ? detailedStrategy.GetIntentDetails(marketEvent, decision)
+            : new PipelineIntentDetails(_options.OrderQuantity);
         var intent = new TradeIntent(
             Guid.NewGuid(),
             strategy.StrategyId,
             marketEvent.Symbol,
             direction,
-            _options.OrderQuantity,
+            details.Quantity,
             marketEvent.LastPrice,
-            now);
+            now,
+            details.ReduceOnly,
+            details.CloseOnly);
 
         await _intents.AddAsync(
             new PipelineRecord<TradeIntent>(Guid.NewGuid(), context, PipelineStage.TradeIntent, intent, now),
@@ -377,7 +396,7 @@ public sealed class TradePipeline
                 UnknownReason,
                 cancellationToken).ConfigureAwait(false);
 
-            return TradePipelineResult.NeedsReconciliation(UnknownReason);
+            return TradePipelineResult.NeedsReconciliation(UnknownReason, command.Id);
         }
 
         if (!execution.Success)
@@ -428,7 +447,7 @@ public sealed class TradePipeline
             $"Filled {execution.FilledQuantity} {command.Symbol} at {execution.AverageFillPrice}.",
             cancellationToken).ConfigureAwait(false);
 
-        return TradePipelineResult.Completed(portfolioUpdate);
+        return TradePipelineResult.Completed(portfolioUpdate, command.Id);
     }
 
     private static bool IsUnknownOutcome(ExecutionResult execution) =>
