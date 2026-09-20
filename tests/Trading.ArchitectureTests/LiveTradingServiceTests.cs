@@ -144,6 +144,21 @@ public sealed class LiveTradingServiceTests
     }
 
     [Fact]
+    public async Task FuturePriceDataBlocksALiveOrderBeforePersistenceOrAdapterSubmission()
+    {
+        var harness = new Harness(
+            TradingStage.Live,
+            candles: [ClosedCandle(Now.AddMinutes(1), 30000m)]);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-future-price");
+
+        Assert.Equal(LiveTradeOutcome.PriceUnavailable, result.Outcome);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
     public async Task AFormingCandleIsNeverUsedAsAReferencePrice()
     {
         var harness = new Harness(

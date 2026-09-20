@@ -337,6 +337,17 @@ public sealed class PaperTradingServiceTests
     }
 
     [Fact]
+    public async Task FutureMarketDataCannotBeUsedToOpenAPaperPosition()
+    {
+        var harness = new Harness([ClosedCandle(Now.AddMinutes(1), 30000m)]);
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 1m, null);
+
+        Assert.Equal(PaperTradeOutcome.PriceStale, result.Outcome);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task AHaltBlocksTheOrderAndStoresNothing()
     {
         var harness = FreshMarket();

@@ -239,6 +239,63 @@ public sealed class RiskEngineTests
     }
 
     [Fact]
+    public void StalenessPolicyTreatsTheExactUtcBoundaryAsFresh()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var policy = new StalenessPolicy(TimeSpan.FromMinutes(5));
+
+        Assert.False(policy.IsStale(now.AddMinutes(-5), now));
+        Assert.True(policy.IsStale(now.AddMinutes(-5).AddTicks(-1), now));
+    }
+
+    [Fact]
+    public void StalenessPolicyFailsClosedForMissingFutureAndNonUtcTimestamps()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var policy = new StalenessPolicy(TimeSpan.FromMinutes(5));
+
+        Assert.True(policy.IsStale(null, now));
+        Assert.True(policy.IsStale(now.AddTicks(1), now));
+        Assert.True(policy.IsStale(
+            new DateTimeOffset(2026, 1, 1, 13, 0, 0, TimeSpan.FromHours(1)),
+            now));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new StalenessPolicy(TimeSpan.FromTicks(-1)));
+    }
+
+    [Fact]
+    public void StaleSeparateDataCannotPermitExposureButDoesNotPreventASafetyReduction()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var engine = new RiskEngine(timeProvider: new FixedTimeProvider(now));
+
+        RiskEvaluationResult Evaluate(bool increases) => engine.Evaluate(
+            proposedExposure: 10m,
+            currentExposure: 100m,
+            dailyPnL: 0m,
+            openOrders: 0,
+            openPositions: 1,
+            maxPositionSize: 100m,
+            maxNotional: 500m,
+            dataIsStale: false,
+            accountIsHalted: false,
+            strategyIsHalted: false,
+            closeOnlyMode: false,
+            reduceOnlyMode: false,
+            duplicateOrderDetected: false,
+            orderIdempotencyConflict: false,
+            marketHalt: false,
+            emergencyStop: false,
+            stalenessPolicy: new StalenessPolicy(TimeSpan.FromMinutes(5)),
+            proposedQuantity: 1m,
+            exposureIsIncreasing: increases,
+            lastMarketDataUpdateUtc: now,
+            lastAccountDataUpdateUtc: null);
+
+        Assert.False(Evaluate(increases: true).IsAllowed);
+        Assert.True(Evaluate(increases: false).IsAllowed);
+    }
+
+    [Fact]
     public void HierarchyUsesDecimalBoundariesWithoutMixingQuantityAndNotional()
     {
         var engine = new RiskEngine();
@@ -257,5 +314,10 @@ public sealed class RiskEngineTests
 
         Assert.True(allowed.IsAllowed);
         Assert.False(rejected.IsAllowed);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }

@@ -434,12 +434,11 @@ public sealed class PaperTradingService : IPaperTradingService
                 $"No closed candle is available for {symbol}, so there is no settled price to fill against.");
         }
 
-        var age = now - latestClosed.CloseTimeUtc;
-        if (age > MaxPriceAge)
+        if (new StalenessPolicy(MaxPriceAge).IsStale(latestClosed.CloseTimeUtc, now))
         {
             return FillPrice.Unavailable(
                 PaperTradeOutcome.PriceStale,
-                $"The most recent closed candle for {symbol} is {Math.Round(age.TotalMinutes)} minutes old. Orders are blocked while market data is stale.");
+                "No current settled market price is available. Orders are blocked while market data is stale.");
         }
 
         if (latestClosed.Close <= 0m)

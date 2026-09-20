@@ -148,6 +148,7 @@ public sealed class TradePipeline
     private readonly OrderIdempotencyGuard _idempotencyGuard;
     private readonly IOrderReconciliationRepository? _reconciliations;
     private readonly TradePipelineOptions _options;
+    private readonly TimeProvider _timeProvider;
 
     public TradePipeline(
         IMarketEventRepository marketEvents,
@@ -161,7 +162,8 @@ public sealed class TradePipeline
         ITradingHaltState haltState,
         OrderIdempotencyGuard idempotencyGuard,
         TradePipelineOptions? options = null,
-        IOrderReconciliationRepository? reconciliations = null)
+        IOrderReconciliationRepository? reconciliations = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(marketEvents);
         ArgumentNullException.ThrowIfNull(decisions);
@@ -186,6 +188,7 @@ public sealed class TradePipeline
         _idempotencyGuard = idempotencyGuard;
         _reconciliations = reconciliations;
         _options = options ?? new TradePipelineOptions();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<TradePipelineResult> ProcessAsync(
@@ -202,7 +205,7 @@ public sealed class TradePipeline
         ArgumentNullException.ThrowIfNull(portfolio);
         ArgumentNullException.ThrowIfNull(executionAdapter);
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
 
         await _marketEvents.AddAsync(
             new PipelineRecord<MarketEvent>(Guid.NewGuid(), context, PipelineStage.MarketEvent, marketEvent, now),
@@ -274,9 +277,11 @@ public sealed class TradePipeline
         var idempotency = _idempotencyGuard.RegisterOrCheck(
             clientOrderId, intent.Symbol, intent.Quantity, intent.LimitPrice);
 
-        // A sell that does not shrink the position is an increase in exposure.
+        // Only a sell no larger than the current long position is a safety
+        // reduction. A larger sell can cross through zero and open a short,
+        // so it must retain every new-exposure control, including freshness.
         var reducesExposure = intent.Direction == TradeDirection.Sell
-            && portfolio.PositionQuantity > 0m;
+            && portfolio.PositionQuantity >= intent.Quantity;
 
         var riskLimits = BuildEffectiveRiskLimits(_options.PlatformRiskLimits);
         var riskResult = riskLimits is null
@@ -300,9 +305,11 @@ public sealed class TradePipeline
                 emergencyStop: flags.EmergencyStop,
                 stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
                 riskLimitHierarchy: riskLimits,
-                lastDataUpdateUtc: portfolio.LastUpdatedUtc,
                 nowUtc: now,
-                proposedQuantity: intent.Quantity);
+                proposedQuantity: intent.Quantity,
+                exposureIsIncreasing: !reducesExposure,
+                lastMarketDataUpdateUtc: marketEvent.EventTimeUtc,
+                lastAccountDataUpdateUtc: portfolio.LastUpdatedUtc);
 
         var riskEvaluation = new RiskEvaluation(
             Guid.NewGuid(),
@@ -476,7 +483,7 @@ public sealed class TradePipeline
             action,
             nameof(TradePipeline),
             targetId,
-            DateTimeOffset.UtcNow,
+            _timeProvider.GetUtcNow(),
             null,
             detail,
             context.CorrelationId);

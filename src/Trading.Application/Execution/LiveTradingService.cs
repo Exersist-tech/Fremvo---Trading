@@ -579,6 +579,8 @@ public sealed class LiveTradingService : ILiveTradingService
             return null;
         }
 
-        return now - latestClosed.CloseTimeUtc > MaxPriceAge ? null : latestClosed.Close;
+        return new StalenessPolicy(MaxPriceAge).IsStale(latestClosed.CloseTimeUtc, now)
+            ? null
+            : latestClosed.Close;
     }
 }

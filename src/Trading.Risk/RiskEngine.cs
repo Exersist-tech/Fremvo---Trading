@@ -122,11 +122,23 @@ public sealed class StalenessPolicy
 
     public bool IsStale(DateTimeOffset? lastUpdatedUtc, DateTimeOffset nowUtc)
     {
-        if (!RequiresFreshData || !lastUpdatedUtc.HasValue)
+        if (!RequiresFreshData)
         {
-            return RequiresFreshData && !lastUpdatedUtc.HasValue;
+            return false;
         }
 
+        // Values named *Utc must actually be UTC. Treat a malformed or
+        // future timestamp as unusable rather than trusting it as fresh.
+        if (!lastUpdatedUtc.HasValue
+            || lastUpdatedUtc.Value.Offset != TimeSpan.Zero
+            || nowUtc.Offset != TimeSpan.Zero
+            || lastUpdatedUtc.Value > nowUtc)
+        {
+            return true;
+        }
+
+        // The precise boundary is fresh: a source remains usable through its
+        // configured maximum age and becomes stale only after it.
         return nowUtc - lastUpdatedUtc.Value > MaxAge;
     }
 }
@@ -134,10 +146,14 @@ public sealed class StalenessPolicy
 public sealed class RiskEngine
 {
     private readonly IReadOnlyCollection<RiskLimit> _mandatoryLimits;
+    private readonly TimeProvider _timeProvider;
 
-    public RiskEngine(IEnumerable<RiskLimit>? mandatoryLimits = null)
+    public RiskEngine(
+        IEnumerable<RiskLimit>? mandatoryLimits = null,
+        TimeProvider? timeProvider = null)
     {
         _mandatoryLimits = mandatoryLimits?.ToArray() ?? Array.Empty<RiskLimit>();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public RiskEvaluationResult Evaluate(
@@ -164,7 +180,10 @@ public sealed class RiskEngine
         DateTimeOffset? lastDataUpdateUtc = null,
         DateTimeOffset? nowUtc = null,
         ProvingRestriction? provingRestriction = null,
-        decimal? proposedQuantity = null)
+        decimal? proposedQuantity = null,
+        bool exposureIsIncreasing = true,
+        DateTimeOffset? lastMarketDataUpdateUtc = null,
+        DateTimeOffset? lastAccountDataUpdateUtc = null)
     {
         var active = new List<RiskLimit>();
 
@@ -201,11 +220,23 @@ public sealed class RiskEngine
             return new RiskEvaluationResult(false, "Trading is currently halted.", active);
         }
 
-        // Evaluate the policy against the actual data age. A missing timestamp is treated as
-        // stale by StalenessPolicy, so the fail-safe is to block rather than to trade blind.
-        var effectiveDataIsStale = dataIsStale
-            || (stalenessPolicy is not null
-                && stalenessPolicy.IsStale(lastDataUpdateUtc, nowUtc ?? DateTimeOffset.UtcNow));
+        // A safety exit can proceed without the fresh data needed to open or
+        // enlarge a position. New and increasing exposure cannot: every
+        // relevant timestamp must be present, UTC, non-future, and in policy.
+        // lastDataUpdateUtc remains for existing callers with one combined
+        // snapshot; new callers pass market and account timestamps separately.
+        var evaluationTime = nowUtc ?? _timeProvider.GetUtcNow();
+        var hasSeparateDataTimestamps =
+            lastMarketDataUpdateUtc.HasValue || lastAccountDataUpdateUtc.HasValue;
+        var marketDataIsStale = stalenessPolicy is not null
+            && (hasSeparateDataTimestamps
+                ? stalenessPolicy.IsStale(lastMarketDataUpdateUtc, evaluationTime)
+                : stalenessPolicy.IsStale(lastDataUpdateUtc, evaluationTime));
+        var accountDataIsStale = exposureIsIncreasing
+            && hasSeparateDataTimestamps
+            && stalenessPolicy is not null
+            && stalenessPolicy.IsStale(lastAccountDataUpdateUtc, evaluationTime);
+        var effectiveDataIsStale = dataIsStale || marketDataIsStale || accountDataIsStale;
 
         if (effectiveDataIsStale)
         {

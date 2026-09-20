@@ -83,9 +83,10 @@ public sealed class TradePipelineTests
 
         public OrderIdempotencyGuard Idempotency { get; } = new();
 
-        public TradePipeline Build(TradePipelineOptions? options = null) =>
+        public TradePipeline Build(TradePipelineOptions? options = null, TimeProvider? timeProvider = null) =>
             new(MarketEvents, Decisions, Intents, RiskEvaluations, Commands, PortfolioUpdates,
-                Audit, new RiskEngine(), Halts, Idempotency, options);
+                Audit, new RiskEngine(timeProvider: timeProvider), Halts, Idempotency, options,
+                timeProvider: timeProvider);
     }
 
     private static MarketEvent Event(bool isClosed = true, IReadOnlyCollection<string>? flags = null) =>
@@ -185,6 +186,87 @@ public sealed class TradePipelineTests
         // The risk evaluation was recorded even though the trade was denied.
         Assert.Single(await harness.RiskEvaluations.ListForUserAsync(UserId));
         Assert.Empty(await harness.Commands.ListForUserAsync(UserId));
+    }
+
+    [Fact]
+    public async Task MissingOrFutureRelevantDataBlocksBeforeExecution()
+    {
+        var now = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+        var harness = new Harness();
+        var pipeline = harness.Build(
+            new TradePipelineOptions { MaxDataAge = TimeSpan.FromMinutes(5) },
+            new FixedTimeProvider(now));
+        var adapter = new UnknownStatusAdapter();
+
+        var missingAccount = await pipeline.ProcessAsync(
+            EventAt(now), Context(), new FixedStrategy(SignalDirection.Buy),
+            new PortfolioSnapshot(0m, 0m, 10_000m, 0m, 0, 0, lastUpdatedUtc: null),
+            adapter);
+
+        var futureMarket = await pipeline.ProcessAsync(
+            EventAt(now.AddTicks(1)), new PipelineContext(UserId, TradingMode.Paper, "corr-future"),
+            new FixedStrategy(SignalDirection.Buy),
+            new PortfolioSnapshot(0m, 0m, 10_000m, 0m, 0, 0, now),
+            adapter);
+
+        Assert.Equal(PipelineStage.RiskEvaluation, missingAccount.ReachedStage);
+        Assert.Equal(PipelineStage.RiskEvaluation, futureMarket.ReachedStage);
+        Assert.Equal(0, adapter.Calls);
+        Assert.Empty(await harness.Commands.ListForUserAsync(UserId));
+    }
+
+    [Fact]
+    public async Task FreshMarketAndAccountDataPermitNewExposure()
+    {
+        var now = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+        var harness = new Harness();
+        var pipeline = harness.Build(
+            new TradePipelineOptions { MaxDataAge = TimeSpan.FromMinutes(5) },
+            new FixedTimeProvider(now));
+
+        var result = await pipeline.ProcessAsync(
+            EventAt(now.AddMinutes(-5)), Context(), new FixedStrategy(SignalDirection.Buy),
+            new PortfolioSnapshot(0m, 0m, 10_000m, 0m, 0, 0, now.AddMinutes(-5)),
+            new PaperExecutionAdapter());
+
+        Assert.True(result.Executed);
+    }
+
+    [Fact]
+    public async Task AnOversizedSellCannotBypassStalenessAsAReduction()
+    {
+        var now = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+        var harness = new Harness();
+        var pipeline = harness.Build(
+            new TradePipelineOptions { MaxDataAge = TimeSpan.FromMinutes(5) },
+            new FixedTimeProvider(now));
+        var adapter = new UnknownStatusAdapter();
+
+        var result = await pipeline.ProcessAsync(
+            EventAt(now), Context(), new FixedStrategy(SignalDirection.Sell),
+            new PortfolioSnapshot(50m, 0.5m, 10_000m, 0m, 0, 1, lastUpdatedUtc: null),
+            adapter);
+
+        Assert.Equal(PipelineStage.RiskEvaluation, result.ReachedStage);
+        Assert.Contains("stale", result.BlockedReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, adapter.Calls);
+    }
+
+    [Fact]
+    public async Task AVerifiedReductionMayProceedWithoutAFreshAccountSnapshot()
+    {
+        var now = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+        var harness = new Harness();
+        var pipeline = harness.Build(
+            new TradePipelineOptions { MaxDataAge = TimeSpan.FromMinutes(5) },
+            new FixedTimeProvider(now));
+
+        var result = await pipeline.ProcessAsync(
+            EventAt(now), Context(), new FixedStrategy(SignalDirection.Sell),
+            new PortfolioSnapshot(100m, 1m, 10_000m, 0m, 0, 1, lastUpdatedUtc: null),
+            new PaperExecutionAdapter());
+
+        Assert.True(result.Executed);
     }
 
     [Fact]
@@ -307,5 +389,13 @@ public sealed class TradePipelineTests
         Assert.NotEmpty(await harness.Commands.ListForUserAsync(UserId));
         Assert.Empty(await harness.Commands.ListForUserAsync(otherUser));
         Assert.Empty(await harness.PortfolioUpdates.ListForUserAsync(otherUser));
+    }
+
+    private static MarketEvent EventAt(DateTimeOffset timestamp) =>
+        new(Guid.NewGuid(), "BTCUSDT", CandleInterval.OneMinute, timestamp, 100m, 5m, true);
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }
