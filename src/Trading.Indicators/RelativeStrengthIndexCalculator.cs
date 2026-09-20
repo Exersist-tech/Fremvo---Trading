@@ -1,76 +1,50 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed class RelativeStrengthIndexCalculator : IIndicatorCalculator
+/// <summary>RSI uses Wilder smoothing, seeded from the arithmetic mean of the first period changes.</summary>
+public sealed class RelativeStrengthIndexCalculator
 {
     public RelativeStrengthIndexCalculator(int period)
     {
-        if (period <= 1)
-        {
-            throw new ArgumentOutOfRangeException(nameof(period), "Period must be greater than 1.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(period);
         Period = period;
-        Definition = new IndicatorDefinition(
-            "RSI",
-            "Relative strength index over the selected lookback window.",
-            "Close prices",
-            "Momentum oscillator from 0 to 100.");
     }
-
-    public string Name => "RSI";
-
-    public IndicatorDefinition Definition { get; }
 
     public int Period { get; }
 
-    public decimal Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<decimal> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count <= Period)
+        ClosedCandleSeries.Validate(candles);
+        var required = Period + 1;
+        if (candles.Count < required)
         {
-            throw new InvalidOperationException("Insufficient values for the requested RSI period.");
+            return IndicatorResults.InsufficientHistory<decimal>(required, candles.Count);
         }
 
-        var changes = new List<decimal>(values.Count - 1);
-        for (var i = 1; i < values.Count; i++)
+        var gains = new decimal[Period];
+        var losses = new decimal[Period];
+        for (var index = 1; index <= Period; index++)
         {
-            changes.Add(values[i] - values[i - 1]);
+            AddChange(candles[index].Close - candles[index - 1].Close, out gains[index - 1], out losses[index - 1]);
         }
 
-        var gains = new List<decimal>();
-        var losses = new List<decimal>();
-        foreach (var change in changes.TakeLast(Period))
+        var averageGain = ClosedCandleSeries.Average(gains);
+        var averageLoss = ClosedCandleSeries.Average(losses);
+        for (var index = required; index < candles.Count; index++)
         {
-            if (change >= 0m)
-            {
-                gains.Add(change);
-            }
-            else
-            {
-                losses.Add(Math.Abs(change));
-            }
+            AddChange(candles[index].Close - candles[index - 1].Close, out var gain, out var loss);
+            averageGain = ((averageGain * (Period - 1)) + gain) / Period;
+            averageLoss = ((averageLoss * (Period - 1)) + loss) / Period;
         }
 
-        if (gains.Count == 0)
-        {
-            return 0m;
-        }
+        var value = averageLoss == 0m ? 100m : averageGain == 0m ? 0m : 100m - (100m / (1m + (averageGain / averageLoss)));
+        return IndicatorResults.Ready(value, required, candles.Count);
+    }
 
-        if (losses.Count == 0)
-        {
-            return 100m;
-        }
-
-        var avgGain = gains.Average();
-        var avgLoss = losses.Average();
-
-        if (avgLoss == 0m)
-        {
-            return 100m;
-        }
-
-        var relativeStrength = avgGain / avgLoss;
-        return 100m - (100m / (1m + relativeStrength));
+    private static void AddChange(decimal change, out decimal gain, out decimal loss)
+    {
+        gain = change > 0m ? change : 0m;
+        loss = change < 0m ? -change : 0m;
     }
 }

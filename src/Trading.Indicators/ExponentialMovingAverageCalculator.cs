@@ -1,48 +1,37 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed class ExponentialMovingAverageCalculator : IIndicatorCalculator
+/// <summary>EMA is seeded with the SMA of the first complete period, then uses 2 / (period + 1).</summary>
+public sealed class ExponentialMovingAverageCalculator
 {
     public ExponentialMovingAverageCalculator(int period)
     {
-        if (period <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(period), "Period must be positive.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(period);
         Period = period;
-        Definition = new IndicatorDefinition(
-            "EMA",
-            "Exponential moving average using the selected smoothing window.",
-            "Close prices",
-            "Weighted average across the selected window.");
     }
-
-    public string Name => "EMA";
-
-    public IndicatorDefinition Definition { get; }
 
     public int Period { get; }
 
-    public decimal Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<decimal> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count == 0)
+        ClosedCandleSeries.Validate(candles);
+        if (candles.Count < Period)
         {
-            throw new InvalidOperationException("No values available for EMA calculation.");
+            return IndicatorResults.InsufficientHistory<decimal>(Period, candles.Count);
         }
 
-        if (values.Count == 1)
-        {
-            return values[0];
-        }
+        var closes = candles.Select(candle => candle.Close).ToArray();
+        return IndicatorResults.Ready(CalculateSeeded(closes, Period), Period, candles.Count);
+    }
 
-        var multiplier = 2m / (Period + 1m);
-        decimal ema = values[0];
-
-        foreach (var value in values.Skip(1))
+    internal static decimal CalculateSeeded(IReadOnlyList<decimal> values, int period)
+    {
+        var ema = ClosedCandleSeries.Average(values.Take(period).ToArray());
+        var multiplier = 2m / (period + 1m);
+        for (var index = period; index < values.Count; index++)
         {
-            ema = (value - ema) * multiplier + ema;
+            ema += (values[index] - ema) * multiplier;
         }
 
         return ema;

@@ -1,49 +1,43 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed class AverageTrueRangeCalculator : IIndicatorCalculator
+/// <summary>ATR uses Wilder smoothing, seeded from the first period true ranges; each later range uses the prior candle close.</summary>
+public sealed class AverageTrueRangeCalculator
 {
     public AverageTrueRangeCalculator(int period)
     {
-        if (period <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(period), "Period must be positive.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(period);
         Period = period;
-        Definition = new IndicatorDefinition(
-            "ATR",
-            "Average true range over the selected window.",
-            "High/low/close prices",
-            "Average volatility over the selected window.");
     }
-
-    public string Name => "ATR";
-
-    public IndicatorDefinition Definition { get; }
 
     public int Period { get; }
 
-    public decimal Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<decimal> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count < Period)
+        ClosedCandleSeries.Validate(candles);
+        if (candles.Count < Period)
         {
-            throw new InvalidOperationException("Insufficient values for the requested ATR period.");
+            return IndicatorResults.InsufficientHistory<decimal>(Period, candles.Count);
         }
 
-        var window = values.TakeLast(Period).ToList();
-        var trueRanges = new List<decimal>();
-
-        for (var i = 1; i < window.Count; i++)
+        var trueRanges = new decimal[candles.Count];
+        trueRanges[0] = candles[0].High - candles[0].Low;
+        for (var index = 1; index < candles.Count; index++)
         {
-            var previousClose = window[i - 1];
-            var currentHigh = window[i];
-            var currentLow = window[i] - 1m;
-            var trueRange = Math.Max(currentHigh - currentLow, Math.Max(currentHigh - previousClose, Math.Abs(previousClose - currentLow)));
-            trueRanges.Add(trueRange);
+            var current = candles[index];
+            var previousClose = candles[index - 1].Close;
+            trueRanges[index] = decimal.Max(
+                current.High - current.Low,
+                decimal.Max(decimal.Abs(current.High - previousClose), decimal.Abs(current.Low - previousClose)));
         }
 
-        return trueRanges.Average();
+        var atr = ClosedCandleSeries.Average(trueRanges.Take(Period).ToArray());
+        for (var index = Period; index < trueRanges.Length; index++)
+        {
+            atr = ((atr * (Period - 1)) + trueRanges[index]) / Period;
+        }
+
+        return IndicatorResults.Ready(atr, Period, candles.Count);
     }
 }

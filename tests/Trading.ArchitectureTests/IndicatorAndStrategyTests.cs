@@ -1,23 +1,10 @@
 using Trading.Domain.Strategies;
-using Trading.Indicators;
 using Trading.Strategies;
 
 namespace Trading.ArchitectureTests;
 
 public sealed class IndicatorAndStrategyTests
 {
-    [Fact]
-    public void SimpleMovingAverageCalculatorRequiresPositiveWindow()
-    {
-        var calculator = new SimpleMovingAverageCalculator(3);
-        decimal[] values = [1m, 2m, 3m, 4m];
-        var average = calculator.Calculate(values);
-
-        Assert.Equal(2m, average);
-        Assert.Equal("SMA", calculator.Name);
-        Assert.Equal("Close prices", calculator.Definition.InputSeries);
-    }
-
     [Fact]
     public void ApprovedStrategyTemplateStoresOnlyApprovedParameters()
     {

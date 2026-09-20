@@ -1,21 +1,16 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed record BollingerBandsResult(decimal MiddleBand, decimal UpperBand, decimal LowerBand, decimal StandardDeviation);
+public readonly record struct BollingerBandsValue(decimal Middle, decimal Upper, decimal Lower, decimal StandardDeviation);
 
+/// <summary>Bollinger Bands use population standard deviation over the closing-price window.</summary>
 public sealed class BollingerBandsCalculator
 {
     public BollingerBandsCalculator(int period, decimal standardDeviationMultiplier = 2m)
     {
-        if (period <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(period), "Period must be positive.");
-        }
-
-        if (standardDeviationMultiplier < 0m)
-        {
-            throw new ArgumentOutOfRangeException(nameof(standardDeviationMultiplier), "Standard deviation multiplier cannot be negative.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(period);
+        ArgumentOutOfRangeException.ThrowIfNegative(standardDeviationMultiplier);
         Period = period;
         StandardDeviationMultiplier = standardDeviationMultiplier;
     }
@@ -24,24 +19,31 @@ public sealed class BollingerBandsCalculator
 
     public decimal StandardDeviationMultiplier { get; }
 
-    public BollingerBandsResult Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<BollingerBandsValue> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count < Period)
+        ClosedCandleSeries.Validate(candles);
+        if (candles.Count < Period)
         {
-            throw new InvalidOperationException("Insufficient values for the requested Bollinger period.");
+            return IndicatorResults.InsufficientHistory<BollingerBandsValue>(Period, candles.Count);
         }
 
-        var window = values.TakeLast(Period).ToArray();
-        var middleBand = window.Average();
-        var variance = window.Average(v => (v - middleBand) * (v - middleBand));
-        var standardDeviation = (decimal)Math.Sqrt((double)variance);
+        var closes = candles.Skip(candles.Count - Period).Select(candle => candle.Close).ToArray();
+        var middle = ClosedCandleSeries.Average(closes);
+        decimal squaredDifferenceSum = 0m;
+        foreach (var close in closes)
+        {
+            var difference = close - middle;
+            squaredDifferenceSum += difference * difference;
+        }
 
-        return new BollingerBandsResult(
-            middleBand,
-            middleBand + (standardDeviation * StandardDeviationMultiplier),
-            middleBand - (standardDeviation * StandardDeviationMultiplier),
-            standardDeviation);
+        var standardDeviation = ClosedCandleSeries.SquareRoot(squaredDifferenceSum / Period);
+        return IndicatorResults.Ready(
+            new BollingerBandsValue(
+                middle,
+                middle + (standardDeviation * StandardDeviationMultiplier),
+                middle - (standardDeviation * StandardDeviationMultiplier),
+                standardDeviation),
+            Period,
+            candles.Count);
     }
 }
