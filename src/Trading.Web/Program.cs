@@ -10,6 +10,7 @@ using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Application.Scanner;
 using Trading.Application.Backtesting;
+using Trading.Application.Optimization;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
@@ -104,6 +105,10 @@ builder.Services.AddSingleton<ChartIndicatorOverlayService>();
 // running an in-memory backtest or inventing results.
 builder.Services.AddSingleton<IBacktestResultSource, UnavailableBacktestResultSource>();
 builder.Services.AddScoped<BacktestResultsQueryService>();
+// Research evidence is supplied only by a future trusted durable source. The
+// default intentionally reports nothing and never executes an optimization.
+builder.Services.AddSingleton<IOptimizationResearchReportSource, UnavailableOptimizationResearchReportSource>();
+builder.Services.AddScoped<OptimizationResultsQueryService>();
 
 // Whether this deployment can reach a real venue. Registering an
 // ILiveExecutionRoute is the single act that opens the promotion ladder out of
@@ -365,6 +370,33 @@ app.MapGet("/api/audit", async (IAuditQueryService queryService, CancellationTok
 app.MapGet("/api/backtests/results", async (
     ClaimsPrincipal principal,
     BacktestResultsQueryService queryService,
+    int? page,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var requestedPage = page.GetValueOrDefault();
+    if (requestedPage < 0 || requestedPage > 10_000)
+    {
+        return Results.BadRequest(new { error = "The requested report page is outside the supported range." });
+    }
+
+    var reports = await queryService
+        .ListAsync(userId.Value, requestedPage, cancellationToken)
+        .ConfigureAwait(false);
+    return Results.Ok(reports);
+}).RequireAuthorization();
+
+// Completed optimization research is a supplied, read-only projection. Its
+// owner is derived solely from the authenticated principal; this endpoint has
+// no execution, dataset, or strategy-control inputs.
+app.MapGet("/api/optimization/results", async (
+    ClaimsPrincipal principal,
+    OptimizationResultsQueryService queryService,
     int? page,
     CancellationToken cancellationToken) =>
 {
@@ -804,9 +836,43 @@ app.MapPost("/api/optimization/validate-plan", (OptimizationPlanDto request) =>
         executionBlockedReason = result.ExecutionBlockedReason,
         disclaimer = OptimizationRunResult.NoGuaranteeDisclaimer
     });
-});
+}).RequireAuthorization();
 
 app.MapGet("/optimization", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/optimization-results.js"></script>
+      <title>Optimization research reports</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Optimization research reports</h1>
+        <p class="lede">Read-only reporting for completed, supplied hypothetical research evidence.</p>
+        <div class="notice">
+          <strong>Hypothetical research only.</strong> Candidate rankings use validation data only.
+          A holdout is locked, may be recorded once after selection is final, and is never used to
+          rank candidates. This is not financial advice, not a profit guarantee, not an actionable
+          signal, and does not represent an order, exchange action, or strategy execution.
+        </div>
+        <div class="notice">
+          This page cannot start, run, or execute an optimization. If no durable report source is
+          available, it truthfully shows no completed research report.
+        </div>
+        <div id="status" class="notice">Loading completed optimization research reports.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/optimization/plan-validation", () => Results.Content(
     """
     <!DOCTYPE html>
     <html lang="en">
