@@ -9,7 +9,8 @@ public enum ScanCriterionKind
     None = 0,
     MinimumClosedCandleCount = 1,
     MinimumCandleVolume = 2,
-    MaximumCandleRangePercent = 3
+    MaximumCandleRangePercent = 3,
+    CloseAboveSimpleMovingAverage = 4
 }
 
 /// <summary>
@@ -35,6 +36,14 @@ public sealed class ScanCriterion : IEquatable<ScanCriterion>
             throw new ArgumentOutOfRangeException(
                 nameof(threshold),
                 "The closed-candle count must be a whole number no greater than 10,000.");
+        }
+
+        if (kind == ScanCriterionKind.CloseAboveSimpleMovingAverage &&
+            (decimal.Truncate(threshold) != threshold || threshold > 10_000m))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(threshold),
+                "The simple moving average period must be a whole number no greater than 10,000.");
         }
 
         if (kind == ScanCriterionKind.MaximumCandleRangePercent && threshold > 100m)
