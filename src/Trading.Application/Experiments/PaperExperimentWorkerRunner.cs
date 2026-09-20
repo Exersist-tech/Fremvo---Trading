@@ -6,6 +6,7 @@ using Trading.Domain.Experiments;
 using Trading.Domain.Market;
 using Trading.MarketData.Experiments;
 using Trading.Strategies.Approvals;
+using Trading.Indicators;
 
 namespace Trading.Application.Experiments;
 
@@ -181,22 +182,89 @@ internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentA
 internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperimentAdapter
 {
     public DonchianBreakoutEnsembleExperimentAdapter() : base("platform.donchian-breakout-ensemble", "donchian-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 21)
+            return ExperimentAnalysisResult.Blocked("Donchian breakout requires 21 exact closed signal candles.");
+        var priorHigh = series.Candles.TakeLast(21).Take(20).Max(candle => candle.High);
+        return series.Candles[^1].Close > priorHigh
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Donchian breakout is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle Donchian breakout is not bullish.");
+    }
 }
 internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimentAdapter
 {
     public BollingerMeanReversionExperimentAdapter() : base("platform.bollinger-mean-reversion", "bollinger-mean-reversion-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        var bands = new BollingerBandsCalculator(20).Calculate(series.Candles);
+        if (!bands.IsReady || bands.Value is null)
+            return ExperimentAnalysisResult.Blocked("Bollinger mean reversion requires 20 exact closed signal candles.");
+        var current = series.Candles[^1];
+        return current.Close <= bands.Value.Value.Lower && current.Close > current.Open
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Bollinger reversal is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle Bollinger reversal is not bullish.");
+    }
 }
 internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
 {
     public RsiPullbackExperimentAdapter() : base("platform.rsi-pullback", "rsi-pullback-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles);
+        if (!rsi.IsReady || rsi.Value is null)
+            return ExperimentAnalysisResult.Blocked("RSI pullback requires 15 exact closed signal candles.");
+        return rsi.Value.Value <= 30m && series.Candles[^1].Close > series.Candles[^2].Close
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle RSI pullback is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle RSI pullback is not bullish.");
+    }
 }
 internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimentAdapter
 {
     public MacdVolumeAccelerationExperimentAdapter() : base("platform.macd-volume", "macd-volume-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 26)
+            return ExperimentAnalysisResult.Blocked("MACD volume acceleration requires 26 exact closed signal candles.");
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles);
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles);
+        if (!fast.IsReady || !slow.IsReady || fast.Value is null || slow.Value is null)
+            return ExperimentAnalysisResult.Blocked("MACD inputs are unavailable from the exact closed candle series.");
+        var lastTwentyVolumes = series.Candles.TakeLast(21).Take(20).Select(candle => candle.Volume).ToArray();
+        return fast.Value.Value > slow.Value.Value && series.Candles[^1].Volume > lastTwentyVolumes.Average()
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle MACD-volume acceleration is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle MACD-volume acceleration is not bullish.");
+    }
 }
 internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BExperimentAdapter
 {
     public VolatilityCompressionBreakoutExperimentAdapter() : base("platform.volatility-compression-breakout", "volatility-compression-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 21)
+            return ExperimentAnalysisResult.Blocked("Volatility compression breakout requires 21 exact closed signal candles.");
+        var recentRanges = series.Candles.TakeLast(5).Select(candle => candle.High - candle.Low).ToArray();
+        var priorRanges = series.Candles.TakeLast(21).Take(16).Select(candle => candle.High - candle.Low).ToArray();
+        var priorHigh = series.Candles.TakeLast(21).Take(20).Max(candle => candle.High);
+        return recentRanges.Average() < priorRanges.Average() && series.Candles[^1].Close > priorHigh
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle volatility compression breakout is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle volatility compression breakout is not bullish.");
+    }
 }
 internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase5BExperimentAdapter
 {

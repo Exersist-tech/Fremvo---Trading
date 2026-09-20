@@ -141,7 +141,7 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
                 new StrategyParameterSchemaReference(definition.ParameterSchemaId, definition.ParameterSchemaVersion, definition.ParameterSchemaFingerprint),
                 definition.ContentFingerprint, now), StrategyApprovalActor.Human(Guid.NewGuid()), now,
             new StrategyApprovalRequirements(new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, s_instrument) },
-                3, 1m, 1m, 1m, TimeSpan.FromHours(1), new[] { CandleInterval.OneHour },
+                30, 1m, 1m, 1m, TimeSpan.FromHours(1), new[] { CandleInterval.OneHour },
                 new[] { TradingProductType.Spot }, new[] { StrategyApprovalMode.Paper },
                 new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.OneHour, CandleInterval.OneHour)));
         approval = approval.TransitionTo(StrategyApprovalState.UnderReview, approval.CreatedBy, now)
