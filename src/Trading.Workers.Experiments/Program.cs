@@ -2,7 +2,9 @@ using Trading.Application.Experiments;
 using Trading.Domain.Experiments;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Experiments;
+using Trading.Infrastructure.Data.MarketData;
 using Trading.MarketData.Experiments;
+using Trading.MarketData;
 using Microsoft.EntityFrameworkCore;
 using Trading.Workers.Experiments;
 
@@ -43,6 +45,15 @@ if (paperTrainingEnabled)
     builder.Services.AddScoped<IPaperTrainingActivationSource>(provider =>
         provider.GetRequiredService<EfPaperTrainingActivationRepository>());
     builder.Services.AddSingleton<IPaperTrainingActivationSource, ScopedPaperTrainingActivationSource>();
+    builder.Services.AddScoped<ICandleRepository, EfCandleRepository>();
+    builder.Services.AddScoped<EfExperimentDecisionLedger>();
+    builder.Services.AddSingleton<IExperimentCandleSeriesSource, ScopedDurableCandleSource>();
+    builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+    builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, PaperTrainingConfigurationSource>();
+    builder.Services.AddSingleton<IExperimentDecisionLedger, ScopedDecisionLedger>();
+    builder.Services.AddSingleton<PaperExperimentWorkerRunner>();
+    builder.Services.AddSingleton<ExperimentDecisionPolicy>();
+    builder.Services.AddSingleton<IExperimentWorkerRunner, PaperTrainingObservationRunner>();
 }
 
 // Protective exits have an independent, explicitly disabled schedule. This inert evaluator is

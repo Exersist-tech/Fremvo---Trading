@@ -18,5 +18,7 @@
     <ProjectReference Include="..\Trading.Domain\Trading.Domain.csproj" />
     <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
     <ProjectReference Include="..\Trading.Infrastructure.Data\Trading.Infrastructure.Data.csproj" />
+    <ProjectReference Include="..\Trading.Strategies\Trading.Strategies.csproj" />
+    <ProjectReference Include="..\Trading.Backtesting\Trading.Backtesting.csproj" />
   </ItemGroup>
 </Project>

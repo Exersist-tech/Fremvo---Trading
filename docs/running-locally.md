@@ -77,9 +77,10 @@ Run `dotnet run --project src/Trading.Workers.Experiments`. The owner requests
 one to ten fixed catalog slots at `/experiments`; a different Administrator or
 RiskOfficer must approve with a nonempty reference through
 `POST /api/paper-training/{ownerId}/approve`. Use the disable or emergency-stop
-endpoints to stop it. This host intentionally remains a no-op until durable
-paper-only runner sources are supplied; it never substitutes live, futures,
-credential, or network components.
+endpoints to stop it. With persisted closed candles available, the worker creates
+the fixed catalog workers, evaluates only their approved paper/spot evidence,
+and writes attested neutral or blocked decisions to the durable decision ledger.
+It never substitutes live, futures, credential, or network components.
 
 ## Opt-in Kraken Live Proving profile
 
