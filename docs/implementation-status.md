@@ -178,7 +178,7 @@ See `docs/strategy-research-plan.md`. These are falsifiable research templates, 
 ## Phase 11 — Kraken Futures demo-environment trading
 | Task | Status | Notes |
 |---|---|---|
-| 11.1 IFuturesOrderGateway Kraken Futures demo implementation | Not started | |
+| 11.1 IFuturesOrderGateway Kraken Futures demo implementation | Done | 2026-09-20 — Added a separate exchange-neutral futures order port and a Kraken connector structurally restricted to `https://demo-futures.kraken.com/derivatives/api/v3`. The connector exposes only send-order, cancel-order and open-order query, requires an explicit replay-test route, and is otherwise disabled; it is not registered with live execution routes. It supports decimal-only limit/market request encoding, explicit reduce-only semantics, client order IDs, validate-only defaults, and distinct accepted/rejected/indeterminate results. Production endpoints, execution adapters, DI registration, UI, account activation, credential flows, positions/risk, transfers, funding, withdrawals and leverage changes are out of scope. |
 | 11.2 KrakenFuturesExecutionAdapter | Not started | |
 | 11.3 Futures position tracking | Not started | |
 | 11.4 Futures-specific risk limits | Not started | |
