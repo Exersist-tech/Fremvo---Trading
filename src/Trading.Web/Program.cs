@@ -1077,6 +1077,86 @@ app.MapPost("/api/experiments", async (
     }
 }).RequireAuthorization();
 
+// This is a read-only research evidence projection. It neither schedules workers nor exposes
+// an execution, promotion, or strategy-control surface.
+app.MapGet("/api/experiment-results", async (
+    ClaimsPrincipal principal,
+    IExperimentResultLedger ledger,
+    int? page,
+    int? pageSize,
+    CancellationToken cancellationToken) =>
+{
+    var owner = CurrentUser.TryGetUserId(principal);
+    if (owner is null) return Results.Unauthorized();
+    try
+    {
+        var resultPage = await ledger.ListAsync(owner.Value, page ?? 0, pageSize ?? 25, cancellationToken).ConfigureAwait(false);
+        return Results.Ok(new
+        {
+            researchOnly = true,
+            disclaimer = "Research-only comparison. Display order is not a recommendation, selection, promotion, or profit-based decision.",
+            resultPage.Page,
+            resultPage.PageSize,
+            resultPage.HasMore,
+            results = resultPage.Items.Select(result => new
+            {
+                result.SnapshotKey,
+                result.EvaluatedAtUtc,
+                workerId = result.Provenance.WorkerId,
+                result.Provenance.Group,
+                result.Provenance.StrategyId,
+                result.Provenance.StrategyVersion,
+                result.Provenance.ParametersFingerprint,
+                result.Provenance.DatasetFingerprint,
+                result.Provenance.ClassifierVersion,
+                result.Provenance.GateEvidenceFingerprint,
+                result.Provenance.Seed,
+                result.Provenance.ReproducibilityIdentity,
+                result.Equity,
+                result.Cash,
+                result.PositionQuantity,
+                result.RealizedProfitAndLoss,
+                result.UnrealizedProfitAndLoss,
+                result.MaximumDrawdown,
+                result.Fees,
+                result.Slippage,
+                result.RejectedFillCount,
+                result.RejectedActionCount,
+                result.Exposure,
+                result.GateFailureCount
+            })
+        });
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+        return Results.BadRequest(new { error = "The requested result page is outside the supported range." });
+    }
+}).RequireAuthorization();
+
+app.MapGet("/experiment-results", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/experiment-results.js"></script>
+      <title>Experiment research results — Exersist Trading</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Experiment research results</h1>
+        <p class="lede">Immutable snapshots from isolated paper workers. This page is read-only.</p>
+        <div class="notice"><strong>Research-only comparison.</strong> Sorting is for inspection only; it does not identify a winner, recommend a strategy, select or promote anything, or initiate execution.</div>
+        <div id="status" class="notice">Loading immutable experiment snapshots.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """, "text/html")).RequireAuthorization();
+
 app.MapGet("/experiments", () => Results.Content(
     """
     <!DOCTYPE html>

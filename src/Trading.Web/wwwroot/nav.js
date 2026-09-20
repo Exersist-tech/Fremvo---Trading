@@ -15,6 +15,7 @@
     { href: '/positions', label: 'Positions' },
     { href: '/orders', label: 'Orders' },
     { href: '/experiments', label: 'Experiments' },
+    { href: '/experiment-results', label: 'Experiment results' },
     { href: '/optimization', label: 'Optimization' },
     { href: '/admin/universe', label: 'Universe' },
     { href: '/admin/risk', label: 'Risk' },

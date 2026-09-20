@@ -42,6 +42,7 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedHistoricalDataset> HistoricalDatasets => Set<PersistedHistoricalDataset>();
     public DbSet<PersistedExperimentDecisionRecord> ExperimentDecisionRecords => Set<PersistedExperimentDecisionRecord>();
     public DbSet<PersistedExperimentPaperExecutionAssociation> ExperimentPaperExecutionAssociations => Set<PersistedExperimentPaperExecutionAssociation>();
+    public DbSet<PersistedExperimentResultSnapshot> ExperimentResultSnapshots => Set<PersistedExperimentResultSnapshot>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -244,6 +245,30 @@ public sealed class TradingDbContext : DbContext
             entity.Property(x => x.CorrelationId).HasMaxLength(128).IsRequired();
             entity.Property(x => x.Detail).HasMaxLength(1024).IsRequired(false);
             entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
+        });
+
+        modelBuilder.Entity<PersistedExperimentResultSnapshot>(entity =>
+        {
+            entity.ToTable("ExperimentResultSnapshots");
+            entity.HasKey(x => new { x.OwnerUserId, x.SnapshotKey });
+            entity.Property(x => x.SnapshotKey).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.Group).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.ParametersFingerprint).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.DatasetFingerprint).HasMaxLength(256).IsRequired();
+            entity.Property(x => x.ClassifierVersion).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.GateEvidenceFingerprint).HasMaxLength(1024).IsRequired();
+            entity.Property(x => x.ReproducibilityIdentity).HasMaxLength(512).IsRequired();
+            entity.Property(x => x.Equity).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Cash).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.PositionQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.RealizedProfitAndLoss).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.UnrealizedProfitAndLoss).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.MaximumDrawdown).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Fees).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Slippage).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Exposure).HasColumnType(MoneyColumnType);
+            entity.HasIndex(x => new { x.OwnerUserId, x.EvaluatedAtUtc });
         });
 
         modelBuilder.Entity<Order>(entity =>
