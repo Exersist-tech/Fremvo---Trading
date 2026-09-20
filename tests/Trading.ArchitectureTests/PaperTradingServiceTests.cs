@@ -8,6 +8,7 @@ using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Exchanges.Abstractions;
 using Trading.MarketData;
+using Trading.Risk;
 
 namespace Trading.ArchitectureTests;
 
@@ -21,7 +22,10 @@ public sealed class PaperTradingServiceTests
 
     private sealed class Harness
     {
-        public Harness(IReadOnlyList<Candle> candles, bool exchangeConnected = true)
+        public Harness(
+            IReadOnlyList<Candle> candles,
+            bool exchangeConnected = true,
+            RiskLimitHierarchy? riskLimits = null)
         {
             Candles = new StubCandleSource(candles);
             Orders = new InMemoryOrderRepository();
@@ -43,7 +47,9 @@ public sealed class PaperTradingServiceTests
                 Halts,
                 Audit,
                 ExchangeAccounts,
-                new FixedTimeProvider(Now));
+                new FixedTimeProvider(Now),
+                new RiskEngine(),
+                riskLimits ?? new RiskLimitHierarchy(1_000_000m, 1_000_000m));
         }
 
         public StubCandleSource Candles { get; }
@@ -161,6 +167,20 @@ public sealed class PaperTradingServiceTests
         // never be assembled by reading rows that merely happen to be there.
         Assert.Equal(TradingMode.Paper, result.Order!.Mode);
         Assert.Equal(TradingMode.Paper, result.Position!.Mode);
+    }
+
+    [Fact]
+    public async Task PaperRiskCeilingBlocksBeforeOrderPersistence()
+    {
+        var harness = new Harness(
+            [ClosedCandle(Now.AddMinutes(-1), 30000m)],
+            riskLimits: new RiskLimitHierarchy(platformMaxExposure: 10m, platformMaxPositionSize: 1m));
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.001m, null);
+
+        Assert.Equal(PaperTradeOutcome.Rejected, result.Outcome);
+        Assert.Contains("exposure", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
     }
 
     [Fact]

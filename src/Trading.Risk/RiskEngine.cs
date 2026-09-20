@@ -163,12 +163,30 @@ public sealed class RiskEngine
         RiskLimitHierarchy? riskLimitHierarchy = null,
         DateTimeOffset? lastDataUpdateUtc = null,
         DateTimeOffset? nowUtc = null,
-        ProvingRestriction? provingRestriction = null)
+        ProvingRestriction? provingRestriction = null,
+        decimal? proposedQuantity = null)
     {
         var active = new List<RiskLimit>();
 
-        var effectiveMaxPositionSize = riskLimitHierarchy is null ? maxPositionSize : Math.Min(maxPositionSize, riskLimitHierarchy.EffectiveMaxPositionSize);
-        var effectiveMaxExposure = riskLimitHierarchy is null ? maxNotional : Math.Min(maxNotional, riskLimitHierarchy.EffectiveMaxExposure);
+        if (proposedExposure < 0m || currentExposure < 0m || maxPositionSize <= 0m || maxNotional <= 0m
+            || openOrders < 0 || openPositions < 0 || proposedQuantity is <= 0m)
+        {
+            active.Add(new RiskLimit(RiskLimitType.MaxExposure, 0m, "Risk evaluation input is invalid."));
+            return new RiskEvaluationResult(false, "Risk evaluation input is invalid.", active);
+        }
+
+        if (riskLimitHierarchy is not null && !proposedQuantity.HasValue)
+        {
+            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, 0m, "Order quantity is required for hierarchy evaluation."));
+            return new RiskEvaluationResult(false, "Order quantity is required for hierarchy evaluation.", active);
+        }
+
+        var effectiveMaxPositionSize = riskLimitHierarchy is null
+            ? maxPositionSize
+            : Math.Min(maxPositionSize, riskLimitHierarchy.EffectiveMaxPositionSize);
+        var effectiveMaxExposure = riskLimitHierarchy is null
+            ? maxNotional
+            : Math.Min(maxNotional, riskLimitHierarchy.EffectiveMaxExposure);
 
         var effectiveEmergencyStop = emergencyStop || (tradingMode?.EmergencyStop ?? false);
         var effectiveMarketHalt = marketHalt || (tradingMode?.MarketHalt ?? false) || (haltSwitch?.Scope == HaltScope.Market && haltSwitch.IsEnabled);
@@ -215,19 +233,14 @@ public sealed class RiskEngine
 
         var proposedTotal = currentExposure + proposedExposure;
 
-        if (proposedExposure < 0m)
+        var quantityToCheck = proposedQuantity ?? proposedExposure;
+        if (quantityToCheck > effectiveMaxPositionSize)
         {
-            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, 0m, "Negative exposure is not allowed for new orders."));
-            return new RiskEvaluationResult(false, "Negative exposure is not allowed.", active);
+            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, effectiveMaxPositionSize, "Proposed quantity exceeds the configured maximum position size."));
+            return new RiskEvaluationResult(false, "Proposed quantity exceeds maximum position size.", active);
         }
 
-        if (effectiveMaxPositionSize > 0m && proposedExposure > effectiveMaxPositionSize)
-        {
-            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, effectiveMaxPositionSize, "Proposed exposure exceeds the configured maximum position size."));
-            return new RiskEvaluationResult(false, "Proposed exposure exceeds maximum position size.", active);
-        }
-
-        if (effectiveMaxExposure > 0m && proposedTotal > effectiveMaxExposure)
+        if (proposedTotal > effectiveMaxExposure)
         {
             active.Add(new RiskLimit(RiskLimitType.MaxExposure, effectiveMaxExposure, "Combined exposure exceeds the maximum notional."));
             return new RiskEvaluationResult(false, "Exposure exceeds maximum notional.", active);

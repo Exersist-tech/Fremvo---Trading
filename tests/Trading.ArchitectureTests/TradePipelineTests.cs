@@ -203,6 +203,51 @@ public sealed class TradePipelineTests
     }
 
     [Fact]
+    public async Task PlatformCeilingBlocksBeforeExecutionEvenWhenChildrenAreHigher()
+    {
+        var harness = new Harness();
+        var pipeline = harness.Build(new TradePipelineOptions
+        {
+            OrderQuantity = 1m,
+            MaxPositionSize = 100m,
+            MaxNotional = 1_000m,
+            PlatformRiskLimits = new RiskLimitHierarchy(
+                platformMaxExposure: 4m,
+                platformMaxPositionSize: 10m,
+                accountMaxExposure: 500m,
+                userMaxExposure: 400m,
+                strategyMaxExposure: 300m)
+        });
+        var adapter = new UnknownStatusAdapter();
+
+        var result = await pipeline.ProcessAsync(
+            Event(), Context(), new FixedStrategy(SignalDirection.Buy), Portfolio(), adapter);
+
+        Assert.False(result.Executed);
+        Assert.Equal(PipelineStage.RiskEvaluation, result.ReachedStage);
+        Assert.Contains("exposure", result.BlockedReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, adapter.Calls);
+        Assert.Empty(await harness.Commands.ListForUserAsync(UserId));
+    }
+
+    [Fact]
+    public async Task MissingPlatformCeilingsFailClosedBeforeExecution()
+    {
+        var harness = new Harness();
+        var pipeline = harness.Build(new TradePipelineOptions { PlatformRiskLimits = null });
+        var adapter = new UnknownStatusAdapter();
+
+        var result = await pipeline.ProcessAsync(
+            Event(), Context(), new FixedStrategy(SignalDirection.Buy), Portfolio(), adapter);
+
+        Assert.False(result.Executed);
+        Assert.Equal(PipelineStage.RiskEvaluation, result.ReachedStage);
+        Assert.Contains("unavailable", result.BlockedReason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, adapter.Calls);
+        Assert.Empty(await harness.Commands.ListForUserAsync(UserId));
+    }
+
+    [Fact]
     public async Task HoldSignalDoesNotCreateATradeIntent()
     {
         var harness = new Harness();

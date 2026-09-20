@@ -237,4 +237,25 @@ public sealed class RiskEngineTests
         Assert.False(expired.IsAllowed);
         Assert.Contains("stale", expired.Reason ?? string.Empty, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void HierarchyUsesDecimalBoundariesWithoutMixingQuantityAndNotional()
+    {
+        var engine = new RiskEngine();
+        var hierarchy = new RiskLimitHierarchy(
+            platformMaxExposure: 0.3m,
+            platformMaxPositionSize: 0.1m);
+
+        var allowed = engine.Evaluate(
+            0.3m, 0m, 0m, 0, 0, 0.1m, 0.3m, false, false, false,
+            false, false, false, false, false, false,
+            riskLimitHierarchy: hierarchy, proposedQuantity: 0.1m);
+        var rejected = engine.Evaluate(
+            0.3000000000000000000000000001m, 0m, 0m, 0, 0, 0.1m, 0.3m, false, false, false,
+            false, false, false, false, false, false,
+            riskLimitHierarchy: hierarchy, proposedQuantity: 0.1m);
+
+        Assert.True(allowed.IsAllowed);
+        Assert.False(rejected.IsAllowed);
+    }
 }

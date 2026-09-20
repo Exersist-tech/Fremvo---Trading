@@ -117,6 +117,8 @@ public sealed class PaperTradingService : IPaperTradingService
     private readonly IAuditEventWriter _auditWriter;
     private readonly IExchangeAccountRepository _exchangeAccounts;
     private readonly TimeProvider _timeProvider;
+    private readonly RiskEngine _riskEngine;
+    private readonly RiskLimitHierarchy _riskLimits;
 
     public PaperTradingService(
         IHistoricalCandleSource candles,
@@ -126,6 +128,29 @@ public sealed class PaperTradingService : IPaperTradingService
         IAuditEventWriter auditWriter,
         IExchangeAccountRepository exchangeAccounts,
         TimeProvider timeProvider)
+        : this(
+            candles,
+            orders,
+            positions,
+            haltState,
+            auditWriter,
+            exchangeAccounts,
+            timeProvider,
+            new RiskEngine(),
+            new RiskLimitHierarchy(platformMaxExposure: 1_000_000m, platformMaxPositionSize: 1_000_000m))
+    {
+    }
+
+    public PaperTradingService(
+        IHistoricalCandleSource candles,
+        IOrderRepository orders,
+        IPositionRepository positions,
+        ITradingHaltState haltState,
+        IAuditEventWriter auditWriter,
+        IExchangeAccountRepository exchangeAccounts,
+        TimeProvider timeProvider,
+        RiskEngine riskEngine,
+        RiskLimitHierarchy riskLimits)
     {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
@@ -134,6 +159,8 @@ public sealed class PaperTradingService : IPaperTradingService
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
         _exchangeAccounts = exchangeAccounts ?? throw new ArgumentNullException(nameof(exchangeAccounts));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _riskEngine = riskEngine ?? throw new ArgumentNullException(nameof(riskEngine));
+        _riskLimits = riskLimits ?? throw new ArgumentNullException(nameof(riskLimits));
     }
 
     public async Task<PaperTradeResult> SubmitAsync(
@@ -240,6 +267,32 @@ public sealed class PaperTradingService : IPaperTradingService
         }
 
         var fillPrice = price.Price;
+        var risk = _riskEngine.Evaluate(
+            proposedExposure: quantity * fillPrice,
+            currentExposure: 0m,
+            dailyPnL: 0m,
+            openOrders: 0,
+            openPositions: 0,
+            maxPositionSize: _riskLimits.EffectiveMaxPositionSize,
+            maxNotional: _riskLimits.EffectiveMaxExposure,
+            dataIsStale: false,
+            accountIsHalted: false,
+            strategyIsHalted: false,
+            closeOnlyMode: false,
+            reduceOnlyMode: false,
+            duplicateOrderDetected: false,
+            orderIdempotencyConflict: false,
+            marketHalt: false,
+            emergencyStop: false,
+            riskLimitHierarchy: _riskLimits,
+            proposedQuantity: quantity);
+
+        if (!risk.IsAllowed)
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                risk.Reason ?? "A risk limit blocked this simulated order.");
+        }
 
         if (existing is not null && !isReducing)
         {

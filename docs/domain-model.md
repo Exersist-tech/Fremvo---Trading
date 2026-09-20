@@ -263,9 +263,13 @@ Rules:
 
 - `RiskLimit` (scope: Platform/User/Account/Strategy; max position size,
   max leverage, max daily loss, max order rate, max open positions).
-- `RiskLimitHierarchy` — platform ceilings always win; user-configured
-  limits may only be equal to or stricter than the platform ceiling for
-  their scope.
+- `RiskLimitHierarchy` — immutable decimal ceilings resolve in the fixed
+  order Platform → Account → User → Strategy. Every configured child can
+  only lower the effective value; a missing child is not a disabled platform
+  ceiling. Required platform ceilings must be positive and unavailable policy
+  fails closed before an adapter or order persistence is reached. Quantity and
+  notional are separate dimensions, and an over-limit request is rejected,
+  never resized.
 - `HaltSwitch` (scope: Global/User/Account/Strategy; states:
   `Active`/`Halted`; reason, actor, timestamp).
 - `TradingModeFlags` — `CloseOnly`, `ReduceOnly`, `LiveTradingEnabled`,

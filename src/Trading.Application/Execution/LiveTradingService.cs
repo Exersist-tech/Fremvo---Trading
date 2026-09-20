@@ -342,30 +342,35 @@ public sealed class LiveTradingService : ILiveTradingService
 
         var notional = limitPrice * quantity;
 
-        var risk = _riskEngine.Evaluate(
-            proposedExposure: notional,
-            currentExposure: 0m,
-            dailyPnL: 0m,
-            openOrders: 0,
-            openPositions: 0,
-            maxPositionSize: _options.MaxOrderNotional,
-            maxNotional: _options.MaxOrderNotional,
-            dataIsStale: false,
-            accountIsHalted: false,
-            strategyIsHalted: false,
-            closeOnlyMode: false,
-            reduceOnlyMode: false,
-            duplicateOrderDetected: false,
-            orderIdempotencyConflict: false,
-            marketHalt: false,
-            emergencyStop: false,
-            provingRestriction: account.Stage == TradingStage.Proving
-                ? new ProvingRestriction(
-                    trimmedSymbol,
-                    notional,
-                    account.ProvingNotionalCeiling,
-                    _options.ProvingSymbols)
-                : null);
+        var riskLimits = _options.PlatformRiskLimits;
+        var risk = riskLimits is null
+            ? new RiskEvaluationResult(false, "Mandatory platform risk limits are unavailable.")
+            : _riskEngine.Evaluate(
+                proposedExposure: notional,
+                currentExposure: 0m,
+                dailyPnL: 0m,
+                openOrders: 0,
+                openPositions: 0,
+                maxPositionSize: riskLimits.EffectiveMaxPositionSize,
+                maxNotional: Math.Min(_options.MaxOrderNotional, riskLimits.EffectiveMaxExposure),
+                dataIsStale: false,
+                accountIsHalted: false,
+                strategyIsHalted: false,
+                closeOnlyMode: false,
+                reduceOnlyMode: false,
+                duplicateOrderDetected: false,
+                orderIdempotencyConflict: false,
+                marketHalt: false,
+                emergencyStop: false,
+                riskLimitHierarchy: riskLimits,
+                provingRestriction: account.Stage == TradingStage.Proving
+                    ? new ProvingRestriction(
+                        trimmedSymbol,
+                        notional,
+                        account.ProvingNotionalCeiling,
+                        _options.ProvingSymbols)
+                    : null,
+                proposedQuantity: quantity);
 
         if (!risk.IsAllowed)
         {

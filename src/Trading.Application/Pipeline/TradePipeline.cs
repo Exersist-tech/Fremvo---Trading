@@ -73,6 +73,13 @@ public sealed class TradePipelineOptions
 
     public decimal MaxNotional { get; init; } = 1_000m;
 
+    /// <summary>
+    /// Mandatory immutable platform ceilings. Null means risk policy is
+    /// unavailable and the pipeline fails closed.
+    /// </summary>
+    public RiskLimitHierarchy? PlatformRiskLimits { get; init; } =
+        new(platformMaxExposure: 1_000m, platformMaxPositionSize: 100m);
+
     public TimeSpan MaxDataAge { get; init; } = TimeSpan.FromMinutes(5);
 
     public decimal OrderQuantity { get; init; } = 1m;
@@ -271,26 +278,31 @@ public sealed class TradePipeline
         var reducesExposure = intent.Direction == TradeDirection.Sell
             && portfolio.PositionQuantity > 0m;
 
-        var riskResult = _riskEngine.Evaluate(
-            proposedExposure: proposedExposure,
-            currentExposure: portfolio.CurrentExposure,
-            dailyPnL: portfolio.DailyPnL,
-            openOrders: portfolio.OpenOrders,
-            openPositions: portfolio.OpenPositions,
-            maxPositionSize: _options.MaxPositionSize,
-            maxNotional: _options.MaxNotional,
-            dataIsStale: false,
-            accountIsHalted: flags.AccountHalted,
-            strategyIsHalted: flags.StrategyHalted,
-            closeOnlyMode: flags.CloseOnlyMode && !reducesExposure,
-            reduceOnlyMode: flags.ReduceOnlyMode && !reducesExposure,
-            duplicateOrderDetected: idempotency.IsDuplicate,
-            orderIdempotencyConflict: idempotency.IsConflict,
-            marketHalt: flags.MarketHalt,
-            emergencyStop: flags.EmergencyStop,
-            stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
-            lastDataUpdateUtc: portfolio.LastUpdatedUtc,
-            nowUtc: now);
+        var riskLimits = BuildEffectiveRiskLimits(_options.PlatformRiskLimits);
+        var riskResult = riskLimits is null
+            ? new RiskEvaluationResult(false, "Mandatory platform risk limits are unavailable.")
+            : _riskEngine.Evaluate(
+                proposedExposure: proposedExposure,
+                currentExposure: portfolio.CurrentExposure,
+                dailyPnL: portfolio.DailyPnL,
+                openOrders: portfolio.OpenOrders,
+                openPositions: portfolio.OpenPositions,
+                maxPositionSize: riskLimits.EffectiveMaxPositionSize,
+                maxNotional: riskLimits.EffectiveMaxExposure,
+                dataIsStale: false,
+                accountIsHalted: flags.AccountHalted,
+                strategyIsHalted: flags.StrategyHalted,
+                closeOnlyMode: flags.CloseOnlyMode && !reducesExposure,
+                reduceOnlyMode: flags.ReduceOnlyMode && !reducesExposure,
+                duplicateOrderDetected: idempotency.IsDuplicate,
+                orderIdempotencyConflict: idempotency.IsConflict,
+                marketHalt: flags.MarketHalt,
+                emergencyStop: flags.EmergencyStop,
+                stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
+                riskLimitHierarchy: riskLimits,
+                lastDataUpdateUtc: portfolio.LastUpdatedUtc,
+                nowUtc: now,
+                proposedQuantity: intent.Quantity);
 
         var riskEvaluation = new RiskEvaluation(
             Guid.NewGuid(),
@@ -417,6 +429,27 @@ public sealed class TradePipeline
 
     private static string BuildClientOrderId(PipelineContext context, TradeIntent intent) =>
         $"{(context.Mode == TradingMode.Paper ? "paper" : "live")}-{intent.Id:N}";
+
+    private RiskLimitHierarchy? BuildEffectiveRiskLimits(RiskLimitHierarchy? platformLimits)
+    {
+        if (platformLimits is null)
+        {
+            return null;
+        }
+
+        return new RiskLimitHierarchy(
+            platformLimits.PlatformMaxExposure,
+            platformLimits.PlatformMaxPositionSize,
+            accountMaxExposure: MoreRestrictive(platformLimits.AccountMaxExposure, _options.MaxNotional),
+            accountMaxPositionSize: MoreRestrictive(platformLimits.AccountMaxPositionSize, _options.MaxPositionSize),
+            userMaxExposure: platformLimits.UserMaxExposure,
+            userMaxPositionSize: platformLimits.UserMaxPositionSize,
+            strategyMaxExposure: platformLimits.StrategyMaxExposure,
+            strategyMaxPositionSize: platformLimits.StrategyMaxPositionSize);
+    }
+
+    private static decimal? MoreRestrictive(decimal? first, decimal second) =>
+        first.HasValue ? Math.Min(first.Value, second) : second;
 
     private async Task<TradePipelineResult> BlockAsync(
         PipelineContext context,
