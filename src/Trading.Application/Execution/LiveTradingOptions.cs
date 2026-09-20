@@ -1,5 +1,7 @@
 namespace Trading.Application.Execution;
 
+using Trading.Risk;
+
 /// <summary>
 /// The operator-controlled bounds on live trading.
 /// </summary>
@@ -19,6 +21,13 @@ namespace Trading.Application.Execution;
 public sealed class LiveTradingOptions
 {
     private decimal _maxOrderNotional = 100m;
+
+    /// <summary>
+    /// Required immutable platform ceilings for every live order. A missing
+    /// hierarchy blocks an order rather than falling back to a user setting.
+    /// </summary>
+    public RiskLimitHierarchy? PlatformRiskLimits { get; init; } =
+        new(platformMaxExposure: 100m, platformMaxPositionSize: 100m);
 
     /// <summary>
     /// The largest notional, in the instrument's quote currency, that any live

@@ -15,8 +15,9 @@ public sealed class BacktestingModelsTests
                 new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
                 50,
                 10000m,
-                0.001m,
-                0.0005m));
+                FeeModel.Zero,
+                SlippageModel.Zero,
+                new ExchangeFilter(0m, 0m, 0.01m, 0.01m)));
 
         Assert.Equal("toUtc", ex.ParamName);
     }
@@ -26,12 +27,15 @@ public sealed class BacktestingModelsTests
     {
         var dataset = new HistoricalDataset(
             "dataset-1",
+            "public-market-archive",
             "ETHUSDT",
             "15m",
             new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 1, 15, 0, 0, 0, TimeSpan.Zero),
             1000,
-            isImmutable: true);
+            new string('a', 64),
+            "archive-v1",
+            new DateTimeOffset(2026, 1, 16, 0, 0, 0, TimeSpan.Zero));
 
         var result = new BacktestResult(
             "strategy-1",
@@ -46,7 +50,8 @@ public sealed class BacktestingModelsTests
             18);
 
         Assert.Equal("ETHUSDT", dataset.Symbol);
-        Assert.True(dataset.IsImmutable);
+        Assert.True(dataset.ContainsOnlyClosedCandles);
+        Assert.Equal(64, dataset.VersionIdentity.Length);
         Assert.Equal(44m, result.TotalFees);
         Assert.Equal(18, result.TradeCount);
     }

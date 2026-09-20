@@ -1,37 +1,26 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed class SimpleMovingAverageCalculator : IIndicatorCalculator
+public sealed class SimpleMovingAverageCalculator
 {
     public SimpleMovingAverageCalculator(int period)
     {
-        if (period <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(period), "Period must be positive.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(period);
         Period = period;
-        Definition = new IndicatorDefinition(
-            "SMA",
-            "Simple moving average of the last n values.",
-            "Close prices",
-            "Average price across the selected window.");
     }
-
-    public string Name => "SMA";
-
-    public IndicatorDefinition Definition { get; }
 
     public int Period { get; }
 
-    public decimal Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<decimal> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count < Period)
+        ClosedCandleSeries.Validate(candles);
+        if (candles.Count < Period)
         {
-            throw new InvalidOperationException("Insufficient values for requested SMA period.");
+            return IndicatorResults.InsufficientHistory<decimal>(Period, candles.Count);
         }
 
-        return values.Take(Period).Average();
+        var closes = candles.Skip(candles.Count - Period).Select(candle => candle.Close).ToArray();
+        return IndicatorResults.Ready(ClosedCandleSeries.Average(closes), Period, candles.Count);
     }
 }

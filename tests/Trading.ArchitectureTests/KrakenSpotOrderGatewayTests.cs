@@ -48,6 +48,16 @@ public sealed class KrakenSpotOrderGatewayTests
         Assert.Contains("cl_ord_id=" + ClientOrderId, body, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("6d1b345e-2821-30e2-ad83-4ecb18a06876")]
+    [InlineData("live-6d1b345e282140e2ad834ecb18a06876")]
+    [InlineData("6d1b345e-2821-50e2-ad83-4ecb18a06876")]
+    public void KrakenClientOrderIdMustBeACanonicalUuidV4(string clientOrderId)
+    {
+        Assert.False(KrakenSpotOrderGateway.IsValidClientOrderId(clientOrderId));
+        Assert.True(KrakenSpotOrderGateway.IsValidClientOrderId(ClientOrderId));
+    }
+
     [Fact]
     public void AnOrderBodyFormatsNumbersWithTheInvariantCulture()
     {

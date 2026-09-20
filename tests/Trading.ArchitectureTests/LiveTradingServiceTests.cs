@@ -47,6 +47,20 @@ public sealed class LiveTradingServiceTests
     }
 
     [Fact]
+    public async Task AGeneratedLiveClientOrderIdFitsTheDurableColumn()
+    {
+        var harness = new Harness(TradingStage.Live);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, clientOrderId: null);
+
+        Assert.Equal(LiveTradeOutcome.Accepted, result.Outcome);
+        Assert.True(result.Order!.ClientOrderId.Length <= Order.MaximumClientOrderIdLength);
+        Assert.True(Guid.TryParseExact(result.Order.ClientOrderId, "D", out _));
+        Assert.Equal('4', result.Order.ClientOrderId[14]);
+    }
+
+    [Fact]
     public async Task ALiveOrderIsAlwaysALimitOrder()
     {
         var harness = new Harness(TradingStage.Live);
@@ -126,6 +140,21 @@ public sealed class LiveTradingServiceTests
             UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-5");
 
         Assert.Equal(LiveTradeOutcome.PriceUnavailable, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task FuturePriceDataBlocksALiveOrderBeforePersistenceOrAdapterSubmission()
+    {
+        var harness = new Harness(
+            TradingStage.Live,
+            candles: [ClosedCandle(Now.AddMinutes(1), 30000m)]);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-future-price");
+
+        Assert.Equal(LiveTradeOutcome.PriceUnavailable, result.Outcome);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
         Assert.Equal(0, harness.Adapter.Calls);
     }
 

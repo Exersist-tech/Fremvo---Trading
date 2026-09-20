@@ -21,11 +21,14 @@
   var ENTRY_SHORT = '#ff9f43';
   var STOP = '#ff5f56';
   var TARGET = '#3fbf6f';
+  var SMA = '#63b3ed';
+  var EMA = '#f6ad55';
 
   var state = {
     candles: [],
     positions: [],
     orders: [],
+    indicators: [],
     pairs: [],
     symbol: '',
     interval: '',
@@ -38,6 +41,8 @@
   var MIN_BARS = 12;
   var pairSearchTimer = null;
   var pairSearchGeneration = 0;
+  var chartRefreshTimer = null;
+  var chartRefreshInFlight = false;
 
   function $(id) { return document.getElementById(id); }
 
@@ -128,6 +133,19 @@
       maxVolume = Math.max(maxVolume, Number(c.volume));
     });
 
+    var visibleOpenTimes = {};
+    visible.forEach(function (c) { visibleOpenTimes[c.openTimeUtc] = true; });
+    state.indicators.filter(function (indicator) {
+      return indicator.status === 'Ready';
+    }).forEach(function (indicator) {
+      indicator.points.forEach(function (point) {
+        if (visibleOpenTimes[point.openTimeUtc]) {
+          high = Math.max(high, Number(point.value));
+          low = Math.min(low, Number(point.value));
+        }
+      });
+    });
+
     // Entry lines must stay on screen, otherwise a position can look absent.
     relevantEntries().forEach(function (entry) {
       high = Math.max(high, entry.price);
@@ -209,6 +227,44 @@
       }
     });
 
+    // Overlay values are calculated as decimals on the server from safe closed
+    // candles. This loop only translates those returned values into pixels.
+    state.indicators.filter(function (indicator) {
+      return indicator.status === 'Ready';
+    }).forEach(function (indicator) {
+      var valuesByOpenTime = {};
+      indicator.points.forEach(function (point) {
+        valuesByOpenTime[point.openTimeUtc] = point.value;
+      });
+
+      var colour = indicator.name === 'sma' ? SMA : EMA;
+      var drawing = false;
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = 1.5;
+      // Draw below candle bodies and wicks so an overlay never hides price.
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath();
+      visible.forEach(function (c, index) {
+        var value = valuesByOpenTime[c.openTimeUtc];
+        if (value === undefined || value === null) {
+          drawing = false;
+          return;
+        }
+
+        var cx = padLeft + slot * index + slot / 2;
+        if (!drawing) {
+          ctx.moveTo(cx, y(value));
+          drawing = true;
+        } else {
+          ctx.lineTo(cx, y(value));
+        }
+      });
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    });
+
     // Entry and position levels.
     relevantEntries().forEach(function (entry) {
       var py = y(entry.price);
@@ -245,12 +301,6 @@
       ctx.fillText(formatTime(c.openTimeUtc), Math.min(Math.max(cx, padLeft), padLeft + plotWidth), cssHeight - 6);
     });
 
-    var formingCount = visible.filter(function (c) { return !c.isClosed; }).length;
-    $('legend').textContent =
-      'Showing bars ' + (end - visible.length + 1) + '\u2013' + end + ' of ' + candles.length + '. ' +
-      (formingCount
-        ? formingCount + ' bar still forming, drawn dashed. It is not a finished candle and no closed-candle signal uses it.'
-        : 'All bars shown are closed.');
   }
 
   function isShort(direction) {
@@ -571,12 +621,83 @@
     host.appendChild(note);
   }
 
+  function renderActiveOrderTable() {
+    var host = $('activeOrders');
+    host.textContent = '';
+
+    var activeOrders = state.orders.filter(function (order) {
+      if (String(order.symbol).toUpperCase() !== state.symbol.toUpperCase()) {
+        return false;
+      }
+
+      return order.state !== 'Filled'
+        && order.state !== 'Cancelled'
+        && order.state !== 'Rejected';
+    });
+
+    if (!activeOrders.length) {
+      var empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'No active ' + tradingMode.toLowerCase() + ' orders on ' + state.symbol + '.';
+      host.appendChild(empty);
+      return;
+    }
+
+    var table = document.createElement('table');
+    var header = document.createElement('tr');
+    ['State', 'Side', 'Quantity', 'Filled', 'Limit price', 'Submitted', 'Reconciliation']
+      .forEach(function (title) {
+        var th = document.createElement('th');
+        th.textContent = title;
+        header.appendChild(th);
+      });
+    table.appendChild(header);
+
+    activeOrders.forEach(function (order) {
+      var row = document.createElement('tr');
+      var stateLabel = order.state === 'Accepted'
+        ? 'Accepted - working'
+        : order.state;
+      var values = [
+        stateLabel,
+        order.side,
+        order.quantity,
+        order.filledQuantity || 0,
+        order.price === null || order.price === undefined ? 'unavailable' : formatPrice(order.price),
+        order.createdAtUtc ? formatTime(order.createdAtUtc) : 'unknown',
+        order.requiresReconciliation ? 'Required - do not resubmit' : 'Current'
+      ];
+
+      values.forEach(function (value, index) {
+        var td = document.createElement('td');
+        td.textContent = String(value);
+        if (index >= 2 && index <= 4) {
+          td.className = 'numeric';
+        }
+        if (index === 0 && order.state === 'Failed') {
+          td.style.color = '#ffb4b4';
+        }
+        row.appendChild(td);
+      });
+      table.appendChild(row);
+    });
+
+    host.appendChild(table);
+
+    var note = document.createElement('p');
+    note.className = 'empty';
+    note.textContent = tradingMode === 'Live'
+      ? 'Accepted means Kraken accepted the order request. It is confirmed only when Kraken reports a fill and it appears above as a position.'
+      : 'Paper orders are simulated and appear as positions once their simulated fill is recorded.';
+    host.appendChild(note);
+  }
+
   async function loadPairs() {
     var select = $('symbol');
 
     try {
       var response = await fetch('/api/marketdata/pairs', { headers: { 'Accept': 'application/json' } });
-      var payload = await response.json();
+      var payload = await readJsonResponse(response);
 
       if (!response.ok) {
         setStatus(payload && payload.message ? payload.message : 'The pair list could not be loaded.', true);
@@ -846,6 +967,86 @@
     }, 250);
   }
 
+  function normalizeAsset(asset) {
+    var code = String(asset || '').toUpperCase();
+    if (code === 'XBT' || code === 'XXBT') { return 'BTC'; }
+    if (code === 'XDG') { return 'DOGE'; }
+    return code.length === 4 && (code.charAt(0) === 'X' || code.charAt(0) === 'Z')
+      ? code.slice(1) : code;
+  }
+
+  async function loadPairHolding() {
+    var host = $('pairHolding');
+    var pair = state.pairs.filter(function (item) { return item.symbol === state.symbol; })[0];
+    if (!pair) {
+      host.textContent = 'Current exchange holding is unavailable because the selected pair is unknown.';
+      host.className = 'pair-balance-value error';
+      return;
+    }
+
+    var target = normalizeAsset(pair.baseAsset);
+    host.textContent = 'Loading ' + target + ' balance.';
+    host.className = 'pair-balance-value';
+
+    try {
+      var response = await fetch('/api/portfolio', { headers: { 'Accept': 'application/json' } });
+      var payload = await readJsonResponse(response);
+      if (!response.ok) {
+        throw new Error('The current holding could not be read.');
+      }
+
+      host.textContent = '';
+      var hasUnavailableAccount = false;
+      (payload.accounts || []).forEach(function (account) {
+        var accountRow = document.createElement('div');
+        accountRow.className = 'pair-balance-account';
+        var accountName = document.createElement('strong');
+        accountName.textContent = account.displayName;
+        accountRow.appendChild(accountName);
+
+        if (account.error) {
+          hasUnavailableAccount = true;
+          var unavailable = document.createElement('span');
+          unavailable.textContent = 'Balance unavailable';
+          accountRow.appendChild(unavailable);
+          host.appendChild(accountRow);
+          return;
+        }
+
+        var balance = (account.balances || []).filter(function (item) {
+          return normalizeAsset(item.asset) === target;
+        })[0];
+        var total = balance ? balance.total : 0;
+        var available = balance ? balance.available : 0;
+        var held = balance ? balance.held : 0;
+        [
+          ['Total', total],
+          ['Available', available],
+          ['Held', held]
+        ].forEach(function (item) {
+          var row = document.createElement('div');
+          row.className = 'pair-balance-row';
+          var label = document.createElement('span');
+          label.textContent = item[0];
+          var value = document.createElement('strong');
+          value.textContent = item[1] + ' ' + target;
+          row.appendChild(label);
+          row.appendChild(value);
+          accountRow.appendChild(row);
+        });
+        host.appendChild(accountRow);
+      });
+
+      if (!host.childElementCount) {
+        host.textContent = 'No connected exchange account.';
+      }
+      host.className = hasUnavailableAccount ? 'pair-balance-value error' : 'pair-balance-value';
+    } catch (error) {
+      host.textContent = 'Current exchange holding could not be read. No previous balance is shown.';
+      host.className = 'pair-balance-value error';
+    }
+  }
+
   function renderPairFilters() {
     var host = $('pairFilters');
     var match = state.pairs.filter(function (p) { return p.symbol === state.symbol; });
@@ -862,22 +1063,95 @@
       '. These are the venue\u2019s own filters; an order breaking them would be rejected.';
   }
 
-  async function load() {
+  function intervalMilliseconds(interval) {
+    var minutes = {
+      OneMinute: 1,
+      FiveMinutes: 5,
+      TenMinutes: 10,
+      FifteenMinutes: 15,
+      ThirtyMinutes: 30,
+      OneHour: 60,
+      FourHours: 240,
+      OneDay: 1440
+    };
+    return minutes[interval] ? minutes[interval] * 60 * 1000 : null;
+  }
+
+  function selectedOverlayNames() {
+    return ['overlaySma', 'overlayEma'].filter(function (id) {
+      return $(id).checked;
+    }).map(function (id) {
+      return $(id).value;
+    });
+  }
+
+  function renderOverlayLegend() {
+    var host = $('overlayLegend');
+    var requested = selectedOverlayNames();
+    if (!requested.length) {
+      host.textContent = 'No overlays selected.';
+      return;
+    }
+
+    host.textContent = state.indicators.map(function (indicator) {
+      var label = indicator.name.toUpperCase() + '(' + indicator.period + ')';
+      if (indicator.status === 'Ready') {
+        return label + (indicator.name === 'sma' ? ' blue' : ' orange') + ', closed candles';
+      }
+      return label + ' unavailable: ' + (indicator.message || indicator.status);
+    }).join(' · ');
+  }
+
+  function scheduleChartRefresh() {
+    if (chartRefreshTimer !== null) {
+      window.clearTimeout(chartRefreshTimer);
+      chartRefreshTimer = null;
+    }
+
+    var interval = intervalMilliseconds($('interval').value);
+    if (!interval || !state.symbol) { return; }
+
+    // Allow the venue a short moment after the boundary to publish its new
+    // forming candle. This is a display refresh only; it never evaluates an
+    // exit or submits an order.
+    var delay = interval - (Date.now() % interval) + 1500;
+    chartRefreshTimer = window.setTimeout(async function () {
+      await load(true);
+      scheduleChartRefresh();
+    }, delay);
+  }
+
+  async function load(isAutomaticRefresh) {
+    if (isAutomaticRefresh && chartRefreshInFlight) {
+      return;
+    }
+
     var symbol = $('symbol').value.trim();
     var interval = $('interval').value;
+    var overlays = selectedOverlayNames();
+    var overlayPeriod = Number($('overlayPeriod').value);
 
     if (!symbol) {
       setStatus('Select a pair.', true);
       return;
     }
 
-    setStatus('Loading ' + symbol + ' ' + interval + '.', false);
-    $('load').disabled = true;
+    if (!isAutomaticRefresh) {
+      setStatus('Loading ' + symbol + ' ' + interval + '.', false);
+      $('load').disabled = true;
+    }
+    chartRefreshInFlight = true;
 
     try {
+      var url = '/api/marketdata/candles?symbol=' + encodeURIComponent(symbol) +
+        '&interval=' + encodeURIComponent(interval);
+      if (overlays.length) {
+        url += '&indicators=' + encodeURIComponent(overlays.join(',')) +
+          '&indicatorPeriod=' + encodeURIComponent(overlayPeriod);
+      }
+
       var response = await fetch(
-        '/api/marketdata/candles?symbol=' + encodeURIComponent(symbol) +
-        '&interval=' + encodeURIComponent(interval),
+        url,
         { headers: { 'Accept': 'application/json' } });
 
       var payload = await response.json();
@@ -885,23 +1159,32 @@
       if (!response.ok) {
         // The venue's reason is shown rather than an empty chart, because
         // "no data" and "the request failed" mean different things.
-        setStatus(payload && payload.message ? payload.message : 'Candles could not be loaded.', true);
-        state.candles = [];
-        draw();
+        if (!isAutomaticRefresh) {
+          setStatus(payload && payload.message ? payload.message : 'Candles could not be loaded.', true);
+          state.candles = [];
+          draw();
+        }
         return;
       }
 
-      var switchedPair = state.symbol !== symbol;
+      var switchedView = state.symbol !== symbol || state.interval !== interval;
 
-      state.candles = payload;
+      state.candles = Array.isArray(payload) ? payload : (payload.candles || []);
+      state.indicators = Array.isArray(payload) ? [] : (payload.indicators || []);
       state.symbol = symbol;
       state.interval = interval;
 
       // A new pair or interval starts at the most recent bars. Keeping the old
       // window would show a different market at a scroll position chosen for
       // the previous one.
-      if (switchedPair || state.interval !== interval) {
+      if (switchedView) {
         state.rightOffset = 0;
+      }
+
+      if (isAutomaticRefresh) {
+        draw();
+        renderOverlayLegend();
+        return;
       }
 
       // Positions come from the valuation route so the profit and loss figures
@@ -929,7 +1212,7 @@
       var orders = await fetch(ordersUrl, { headers: { 'Accept': 'application/json' } });
       state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
-      var message = tradingMode + ' trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
+      var message = tradingMode + ' trading. ' + state.candles.length + ' bars of ' + symbol + ' loaded from Kraken.';
 
       if (exits && exits.closed) {
         message += ' ' + exits.closed + ' position closed by a stop or target.';
@@ -944,12 +1227,21 @@
       setStatus(message, false);
 
       draw();
+      renderOverlayLegend();
       renderPositionTable();
+      renderActiveOrderTable();
       renderPairFilters();
+      await loadPairHolding();
     } catch (error) {
-      setStatus('Candles could not be loaded. ' + error.message, true);
+      if (!isAutomaticRefresh) {
+        setStatus('Candles could not be loaded. ' + error.message, true);
+      }
     } finally {
-      $('load').disabled = false;
+      chartRefreshInFlight = false;
+      if (!isAutomaticRefresh) {
+        $('load').disabled = false;
+      }
+      scheduleChartRefresh();
     }
   }
 
@@ -1296,6 +1588,9 @@
     $('load').addEventListener('click', load);
     $('interval').addEventListener('change', load);
     $('symbol').addEventListener('change', load);
+    $('overlaySma').addEventListener('change', load);
+    $('overlayEma').addEventListener('change', load);
+    $('overlayPeriod').addEventListener('change', load);
     $('pairSearch').addEventListener('focus', function () {
       renderPairSearch($('pairSearch').value);
     });

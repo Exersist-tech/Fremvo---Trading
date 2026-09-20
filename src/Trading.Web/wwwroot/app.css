@@ -71,6 +71,27 @@ a { color: var(--accent); }
 
 .app-nav .spacer { flex: 1; }
 
+.workspace-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.75rem 0 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace-tabs a {
+  color: var(--muted);
+  padding: 0.55rem 0.8rem;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.workspace-tabs a:hover { color: var(--text); }
+
+.workspace-tabs a.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .app-nav .mode-badge {
   font-size: 0.72rem;
   text-transform: uppercase;
@@ -82,10 +103,13 @@ a { color: var(--accent); }
 }
 
 main, .page {
-  max-width: 1120px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 1.75rem 1.5rem 4rem;
+  padding: 1.75rem clamp(1rem, 2.5vw, 2.5rem) 4rem;
 }
+
+.page-wide { max-width: 1680px; }
+.chart-page { max-width: 1800px; }
 
 h1 { font-size: 1.6rem; margin: 0 0 0.35rem; }
 h2 { font-size: 1.15rem; margin: 2rem 0 0.75rem; }
@@ -195,6 +219,133 @@ tbody tr:last-child td { border-bottom: none; }
   position: relative;
 }
 
+.chart-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(17rem, 22rem);
+  align-items: start;
+  gap: 1rem;
+}
+
+.trade-panel {
+  position: sticky;
+  top: 4.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.trade-panel h2 {
+  margin: 0 0 0.75rem;
+}
+
+.pair-balance-card {
+  margin: -1rem -1rem 1rem;
+  padding: 0.9rem 1rem;
+  background: linear-gradient(135deg, rgba(63, 185, 80, 0.18), rgba(79, 156, 249, 0.10));
+  border-bottom: 1px solid rgba(63, 185, 80, 0.35);
+  border-radius: 10px 10px 0 0;
+}
+
+.pair-balance-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.pair-balance-value {
+  margin-top: 0.35rem;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+.pair-balance-value.error { color: #ffb4b4; }
+
+.pair-balance-account + .pair-balance-account {
+  border-top: 1px solid rgba(63, 185, 80, 0.25);
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+}
+
+.pair-balance-account > strong {
+  display: block;
+  font-size: 0.82rem;
+  margin-bottom: 0.25rem;
+}
+
+.pair-balance-account > span {
+  color: var(--bad);
+  font-size: 0.82rem;
+}
+
+.pair-balance-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.08rem 0;
+}
+
+.pair-balance-row span { color: var(--muted); }
+.pair-balance-row strong { font-weight: 600; text-align: right; }
+
+.chart-status {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.trade-panel .tabs {
+  margin-top: 0;
+}
+
+.trade-panel .notice {
+  margin-bottom: 1rem;
+}
+
+.trade-panel .toolbar {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.trade-panel .toolbar label {
+  margin: 0;
+}
+
+.trade-panel .toolbar input,
+.trade-panel .toolbar select,
+.trade-panel .toolbar button {
+  width: 100%;
+}
+
+.chart-column {
+  min-width: 0;
+}
+
+@media (min-width: 781px) {
+  .chart-workspace {
+    align-items: stretch;
+  }
+
+  .chart-column {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chart-column .chart-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .chart-column .chart-stage #chart {
+    height: 100% !important;
+  }
+}
+
 .chart-toolbar {
   display: flex;
   align-items: center;
@@ -213,6 +364,7 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .pair-selector {
+  position: relative;
   display: flex;
   align-items: stretch;
   flex-direction: column;
@@ -240,13 +392,42 @@ tbody tr:last-child td { border-bottom: none; }
   min-height: 2.2rem;
 }
 
+.chart-overlay-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.chart-overlay-controls input[type="number"] {
+  width: 4.5rem;
+  min-height: 2.2rem;
+}
+
+.chart-overlay-legend {
+  margin-left: auto;
+}
+
 .pair-results {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  z-index: 20;
   display: none;
   max-height: 14rem;
   overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
 }
 
 .pair-results.has-results {
@@ -277,10 +458,20 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .pair-search-empty {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  z-index: 20;
   display: none;
   margin: 0;
+  padding: 0.55rem 0.6rem;
   color: var(--muted);
   font-size: 0.82rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
 }
 
 .pair-search-empty.has-message {
@@ -332,6 +523,8 @@ button.danger {
 }
 
 @media (max-width: 780px) {
+  .chart-workspace { grid-template-columns: 1fr; }
+  .trade-panel { position: static; }
   .chart-toolbar { align-items: stretch; flex-direction: column; }
   .pair-selector { width: 100%; }
   .chart-actions { justify-content: flex-start; }
@@ -380,7 +573,7 @@ footer.app-footer {
   color: var(--muted);
   font-size: 0.8rem;
   padding: 1.25rem 1.5rem;
-  max-width: 1120px;
+  max-width: 1440px;
   margin: 0 auto;
 }
 
@@ -426,6 +619,92 @@ footer.app-footer {
 }
 
 .notice.ok { border-left-color: var(--ok); }
+
+/* Balances stay asset-denominated. A portfolio fiat value would need its own
+   market price and timestamp, so the UI never invents one. */
+.portfolio-page .lede { max-width: 84ch; }
+
+.portfolio-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.portfolio-action-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.portfolio-account {
+  overflow: hidden;
+  padding: 0;
+}
+
+.portfolio-account-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.25rem 0.9rem;
+  background: linear-gradient(100deg, var(--panel-2), var(--panel));
+  border-bottom: 1px solid var(--line);
+}
+
+.portfolio-account-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.portfolio-account-header p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.portfolio-reading {
+  flex: 0 0 auto;
+  color: var(--ok);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+.portfolio-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.portfolio-stat {
+  min-width: 0;
+  background: rgba(79, 156, 249, 0.06);
+  border: 1px solid rgba(79, 156, 249, 0.22);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+}
+
+.portfolio-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.portfolio-stat strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 1.1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.portfolio-table-wrap { overflow-x: auto; }
+.portfolio-table-wrap table { border: 0; border-radius: 0; }
+.portfolio-table-wrap th, .portfolio-table-wrap td { white-space: nowrap; }
 
 /* The sign-in page. It carries no navigation bar, because every link on it
    would lead somewhere the visitor cannot go. The product statement sits
@@ -559,6 +838,16 @@ button.wide { width: 100%; padding: 0.6rem 1rem; font-size: 0.95rem; }
     gap: 2rem;
     align-items: start;
     min-height: 0;
+  }
+
+  @media (max-width: 780px) {
+    .portfolio-actions,
+    .portfolio-account-header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .portfolio-reading { text-align: left; }
   }
 
   /* The form comes first when there is no room to show both side by side. */

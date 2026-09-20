@@ -13,6 +13,7 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.8" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.8" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
     <PackageReference Include="xunit" Version="2.5.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
@@ -31,6 +32,10 @@
     <ProjectReference Include="..\..\src\Trading.Risk\Trading.Risk.csproj" />
     <ProjectReference Include="..\..\src\Trading.Backtesting\Trading.Backtesting.csproj" />
     <ProjectReference Include="..\..\src\Trading.Optimization\Trading.Optimization.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Workers.MarketData\Trading.Workers.MarketData.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Workers.Scanner\Trading.Workers.Scanner.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Workers.Experiments\Trading.Workers.Experiments.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Web\Trading.Web.csproj" Aliases="WebApp" />
   </ItemGroup>
 
   <ItemGroup>

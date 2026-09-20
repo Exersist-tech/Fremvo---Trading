@@ -10,5 +10,6 @@ public enum CandleInterval
     ThirtyMinutes = 30,
     OneHour = 60,
     FourHours = 240,
-    OneDay = 1440
+    OneDay = 1440,
+    FourDays = 5760
 }

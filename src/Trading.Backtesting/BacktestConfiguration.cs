@@ -9,8 +9,9 @@ public sealed class BacktestConfiguration
         DateTimeOffset toUtc,
         int warmupCandles,
         decimal initialCapital,
-        decimal commissionRate,
-        decimal slippageRate,
+        FeeModel feeModel,
+        SlippageModel slippageModel,
+        ExchangeFilter exchangeFilter,
         string? datasetName = null)
     {
         if (string.IsNullOrWhiteSpace(strategyId))
@@ -38,20 +39,37 @@ public sealed class BacktestConfiguration
             throw new ArgumentOutOfRangeException(nameof(initialCapital), "Initial capital must be positive.");
         }
 
-        if (commissionRate < 0m || slippageRate < 0m)
-        {
-            throw new ArgumentOutOfRangeException(nameof(commissionRate), "Commission and slippage rates cannot be negative.");
-        }
-
         StrategyId = strategyId.Trim();
         Symbol = symbol.Trim();
         FromUtc = fromUtc;
         ToUtc = toUtc;
         WarmupCandles = warmupCandles;
         InitialCapital = initialCapital;
-        CommissionRate = commissionRate;
-        SlippageRate = slippageRate;
+        FeeModel = feeModel ?? throw new ArgumentNullException(nameof(feeModel));
+        SlippageModel = slippageModel ?? throw new ArgumentNullException(nameof(slippageModel));
+        ExchangeFilter = exchangeFilter ?? throw new ArgumentNullException(nameof(exchangeFilter));
         DatasetName = datasetName?.Trim();
+    }
+
+    [Obsolete("Use the constructor with explicit fee, slippage, and exchange-filter models.")]
+    public BacktestConfiguration(
+        string strategyId,
+        string symbol,
+        DateTimeOffset fromUtc,
+        DateTimeOffset toUtc,
+        int warmupCandles,
+        decimal initialCapital,
+        decimal commissionRate,
+        decimal slippageRate,
+        string? datasetName = null)
+        : this(
+            strategyId, symbol, fromUtc, toUtc, warmupCandles, initialCapital,
+            new FeeModel(commissionRate, commissionRate, 0m),
+            new SlippageModel(0m, slippageRate),
+            // Compatibility only: new backtests must explicitly name venue rules.
+            new ExchangeFilter(0m, 0m, 0.0000000000000000000000000001m, 0.0000000000000000000000000001m),
+            datasetName)
+    {
     }
 
     public string StrategyId { get; }
@@ -66,9 +84,17 @@ public sealed class BacktestConfiguration
 
     public decimal InitialCapital { get; }
 
-    public decimal CommissionRate { get; }
+    public FeeModel FeeModel { get; }
 
-    public decimal SlippageRate { get; }
+    public SlippageModel SlippageModel { get; }
+
+    public ExchangeFilter ExchangeFilter { get; }
+
+    [Obsolete("Use FeeModel instead.")]
+    public decimal CommissionRate => FeeModel.TakerFeeRate;
+
+    [Obsolete("Use SlippageModel instead.")]
+    public decimal SlippageRate => SlippageModel.PercentSlippage;
 
     public string? DatasetName { get; }
 }

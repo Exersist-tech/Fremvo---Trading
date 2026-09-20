@@ -1,5 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using Trading.Infrastructure.Data;
+using Trading.Infrastructure.Data.MarketData;
+using Trading.Infrastructure.Data.Scanner;
+using Trading.MarketData;
+using Trading.Application.Scanner;
+using Trading.Backtesting;
+using Trading.Infrastructure.Data.Backtesting;
+using Trading.Infrastructure.Data.Experiments;
+using Trading.Application.Experiments;
 
 namespace Trading.Web.Extensions;
 
@@ -19,6 +27,15 @@ internal static class ServiceCollectionExtensions
 
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlServer(connectionString));
+        services.AddScoped<ICandleRepository, EfCandleRepository>();
+        services.AddScoped<IHistoricalDatasetRepository, EfHistoricalDatasetRepository>();
+        services.AddScoped<IScanRequestRepository, EfScanRequestRepository>();
+        services.AddScoped<IScanResultRepository, EfScanResultRepository>();
+        services.AddScoped<ScannerResultsQueryService>();
+        services.AddScoped<IExperimentResultLedger, EfExperimentResultLedger>();
+        services.AddScoped<EfPaperTrainingActivationRepository>();
+        services.AddScoped<IPaperTrainingActivationRepository>(provider =>
+            provider.GetRequiredService<EfPaperTrainingActivationRepository>());
 
         return services;
     }

@@ -117,6 +117,8 @@ public sealed class PaperTradingService : IPaperTradingService
     private readonly IAuditEventWriter _auditWriter;
     private readonly IExchangeAccountRepository _exchangeAccounts;
     private readonly TimeProvider _timeProvider;
+    private readonly RiskEngine _riskEngine;
+    private readonly RiskLimitHierarchy _riskLimits;
 
     public PaperTradingService(
         IHistoricalCandleSource candles,
@@ -126,6 +128,29 @@ public sealed class PaperTradingService : IPaperTradingService
         IAuditEventWriter auditWriter,
         IExchangeAccountRepository exchangeAccounts,
         TimeProvider timeProvider)
+        : this(
+            candles,
+            orders,
+            positions,
+            haltState,
+            auditWriter,
+            exchangeAccounts,
+            timeProvider,
+            new RiskEngine(),
+            new RiskLimitHierarchy(platformMaxExposure: 1_000_000m, platformMaxPositionSize: 1_000_000m))
+    {
+    }
+
+    public PaperTradingService(
+        IHistoricalCandleSource candles,
+        IOrderRepository orders,
+        IPositionRepository positions,
+        ITradingHaltState haltState,
+        IAuditEventWriter auditWriter,
+        IExchangeAccountRepository exchangeAccounts,
+        TimeProvider timeProvider,
+        RiskEngine riskEngine,
+        RiskLimitHierarchy riskLimits)
     {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
@@ -134,6 +159,8 @@ public sealed class PaperTradingService : IPaperTradingService
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
         _exchangeAccounts = exchangeAccounts ?? throw new ArgumentNullException(nameof(exchangeAccounts));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _riskEngine = riskEngine ?? throw new ArgumentNullException(nameof(riskEngine));
+        _riskLimits = riskLimits ?? throw new ArgumentNullException(nameof(riskLimits));
     }
 
     public async Task<PaperTradeResult> SubmitAsync(
@@ -213,10 +240,15 @@ public sealed class PaperTradingService : IPaperTradingService
         // orders placed within the same millisecond are distinct intents and
         // must not collide into a false duplicate.
         var identifier = string.IsNullOrWhiteSpace(clientOrderId)
-            ? string.Create(
-                CultureInfo.InvariantCulture,
-                $"paper-{userId:N}-{now.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}")
+            ? $"paper-{Guid.NewGuid():N}"
             : clientOrderId.Trim();
+
+        if (identifier.Length > Order.MaximumClientOrderIdLength)
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                $"Client order id must be at most {Order.MaximumClientOrderIdLength} characters.");
+        }
 
         // Idempotency is checked against stored orders rather than an in-memory
         // guard, so a resubmitted identifier is refused even after a restart.
@@ -235,6 +267,32 @@ public sealed class PaperTradingService : IPaperTradingService
         }
 
         var fillPrice = price.Price;
+        var risk = _riskEngine.Evaluate(
+            proposedExposure: quantity * fillPrice,
+            currentExposure: 0m,
+            dailyPnL: 0m,
+            openOrders: 0,
+            openPositions: 0,
+            maxPositionSize: _riskLimits.EffectiveMaxPositionSize,
+            maxNotional: _riskLimits.EffectiveMaxExposure,
+            dataIsStale: false,
+            accountIsHalted: false,
+            strategyIsHalted: false,
+            closeOnlyMode: false,
+            reduceOnlyMode: false,
+            duplicateOrderDetected: false,
+            orderIdempotencyConflict: false,
+            marketHalt: false,
+            emergencyStop: false,
+            riskLimitHierarchy: _riskLimits,
+            proposedQuantity: quantity);
+
+        if (!risk.IsAllowed)
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                risk.Reason ?? "A risk limit blocked this simulated order.");
+        }
 
         if (existing is not null && !isReducing)
         {
@@ -376,12 +434,11 @@ public sealed class PaperTradingService : IPaperTradingService
                 $"No closed candle is available for {symbol}, so there is no settled price to fill against.");
         }
 
-        var age = now - latestClosed.CloseTimeUtc;
-        if (age > MaxPriceAge)
+        if (new StalenessPolicy(MaxPriceAge).IsStale(latestClosed.CloseTimeUtc, now))
         {
             return FillPrice.Unavailable(
                 PaperTradeOutcome.PriceStale,
-                $"The most recent closed candle for {symbol} is {Math.Round(age.TotalMinutes)} minutes old. Orders are blocked while market data is stale.");
+                "No current settled market price is available. Orders are blocked while market data is stale.");
         }
 
         if (latestClosed.Close <= 0m)

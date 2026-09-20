@@ -54,7 +54,8 @@ credential handle to the connector at call time.
 - `SymbolFilterSet` (price tick size, quantity step size, minimum notional,
   min/max quantity — exchange-neutral value object populated per exchange).
 - `CandleInterval` (enum: `OneMinute`, `FiveMinutes`, `TenMinutes`,
-  `FifteenMinutes`, `ThirtyMinutes`, `OneHour`, `FourHours`, `OneDay`).
+  `FifteenMinutes`, `ThirtyMinutes`, `OneHour`, `FourHours`, `OneDay`,
+  `FourDays`).
 - `Candle` (symbol, interval, open time UTC, close time UTC, OHLCV as
   `decimal`, `IsDerived` flag, `IsClosed` flag, source sequence/id for
   duplicate detection).
@@ -65,6 +66,11 @@ credential handle to the connector at call time.
 Derived candles (e.g. 10-minute from ten closed 1-minute candles) are
 always explicitly marked `IsDerived = true` and only built from `IsClosed`
 source candles.
+
+Four-day candles are derived only from four closed one-day candles. Their
+windows are anchored at Unix epoch day zero (1970-01-01T00:00:00Z): a window
+starts at UTC midnight when its whole-day offset from that date is divisible by
+four. This is independent of locale, calendar-week, and exchange time zones.
 
 ### 3.1 Candle sources
 
@@ -220,9 +226,12 @@ Full detail: `docs/strategy-research-plan.md`.
   account, symbol, market type Spot/Futures, side, type, quantity, price,
   reduce-only flag, status, timestamps UTC).
 - `OrderStatus` (state machine, §9).
-- `Position` (account, symbol, market type, side (for Futures: long/short),
-  quantity, average entry price, unrealized/realized P&L, margin info for
-  Futures, status).
+- `Position` (Spot account, symbol, side, quantity, average entry price,
+  unrealized/realized P&L, status).
+- `FuturesPosition` (separate exchange-neutral aggregate for a futures
+  contract, long/short side, decimal quantity, entry/mark/margin/liquidation
+  values, explicit funding, realized/unrealized P&L, fixed observed leverage,
+  margin mode, UTC valuation timestamp, and terminal status).
 - `PositionStatus` (state machine, §10).
 - `Fill` (order id, quantity, price, fee, fee asset, timestamp UTC).
 
@@ -252,8 +261,9 @@ Any -> Liquidated (Futures only, exchange-reported)
 ```
 
 Rules:
-- Futures positions additionally track `MarginMode`, `Leverage` (never
-  auto-increased), `LiquidationPrice`, `MarkPrice`, `FundingAccrued`.
+- `FuturesPosition` is never an extension of Spot `Position`. Its leverage is
+  fixed observation context and is never changed by position tracking;
+  funding is recorded only from an explicit observed event.
 - Increasing exposure is blocked whenever required market/account data is
   stale (see Risk engine).
 - `ReduceOnly`/`CloseOnly` modes constrain which transitions are legal
@@ -263,9 +273,13 @@ Rules:
 
 - `RiskLimit` (scope: Platform/User/Account/Strategy; max position size,
   max leverage, max daily loss, max order rate, max open positions).
-- `RiskLimitHierarchy` — platform ceilings always win; user-configured
-  limits may only be equal to or stricter than the platform ceiling for
-  their scope.
+- `RiskLimitHierarchy` — immutable decimal ceilings resolve in the fixed
+  order Platform → Account → User → Strategy. Every configured child can
+  only lower the effective value; a missing child is not a disabled platform
+  ceiling. Required platform ceilings must be positive and unavailable policy
+  fails closed before an adapter or order persistence is reached. Quantity and
+  notional are separate dimensions, and an over-limit request is rejected,
+  never resized.
 - `HaltSwitch` (scope: Global/User/Account/Strategy; states:
   `Active`/`Halted`; reason, actor, timestamp).
 - `TradingModeFlags` — `CloseOnly`, `ReduceOnly`, `LiveTradingEnabled`,

@@ -2,15 +2,20 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
 using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
+using Trading.Application.Scanner;
+using Trading.Application.Backtesting;
+using Trading.Application.Optimization;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
+using Trading.Application.UseCases.Portfolio;
 using Trading.Application.Universe;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
@@ -22,18 +27,22 @@ using Trading.Domain.Positions;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Abstractions.Account;
 using Trading.Exchanges.Abstractions.Execution;
 using Trading.Exchanges.Kraken;
+using Trading.Exchanges.Kraken.Account;
 using Trading.Exchanges.Kraken.Execution;
 using Trading.Exchanges.Kraken.MarketData;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
 using Trading.Infrastructure.Data.Execution;
 using Trading.Infrastructure.Data.ExchangeAccounts;
+using Trading.Infrastructure.Data.Experiments;
 using Trading.Infrastructure.Secrets;
 using Trading.MarketData;
 using Trading.Optimization;
 using Trading.Risk;
+using Trading.Web.Charting;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
@@ -85,12 +94,26 @@ builder.Services.AddSingleton<IPasswordHasher>(sp => sp.GetRequiredService<Pbkdf
 builder.Services.AddScoped<ITradingAuthenticationService, TradingAuthenticationService>();
 builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolicyService>();
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
+builder.Services.Configure<PaperTrainingPrerequisiteOptions>(
+    builder.Configuration.GetSection(PaperTrainingPrerequisiteOptions.SectionName));
+builder.Services.AddScoped<PaperTrainingActivationService>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
     new AuditQueryService(provider.GetRequiredService<TradingDbContext>().AuditEvents));
 
 builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
 builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
+builder.Services.AddScoped<IPortfolioQueryService, PortfolioQueryService>();
+builder.Services.AddSingleton<ChartIndicatorOverlayService>();
+// There is no durable completed-backtest store yet. This deliberately empty
+// source keeps the reporting surface read-only and prevents a page load from
+// running an in-memory backtest or inventing results.
+builder.Services.AddSingleton<IBacktestResultSource, UnavailableBacktestResultSource>();
+builder.Services.AddScoped<BacktestResultsQueryService>();
+// Research evidence is supplied only by a future trusted durable source. The
+// default intentionally reports nothing and never executes an optimization.
+builder.Services.AddSingleton<IOptimizationResearchReportSource, UnavailableOptimizationResearchReportSource>();
+builder.Services.AddScoped<OptimizationResultsQueryService>();
 
 // Whether this deployment can reach a real venue. Registering an
 // ILiveExecutionRoute is the single act that opens the promotion ladder out of
@@ -146,6 +169,14 @@ builder.Services.AddScoped<LiveOrderSyncService>();
 builder.Services.AddSingleton<IKrakenNonceSource, KrakenNonceSource>();
 
 builder.Services.AddHttpClient<IExchangePermissionProbe, KrakenPermissionProbe>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
+// Portfolio reading uses Kraken's private balance endpoint only. It has no
+// transfer, withdrawal, deposit, or order capability.
+builder.Services.AddHttpClient<IExchangeBalanceGateway, KrakenBalanceGateway>(client =>
 {
     client.BaseAddress = new Uri("https://api.kraken.com");
     client.Timeout = TimeSpan.FromSeconds(20);
@@ -337,6 +368,96 @@ app.MapGet("/api/audit", async (IAuditQueryService queryService, CancellationTok
         e.CorrelationId
     }));
 });
+
+// Completed backtest reports are a read-only projection. The signed-in user is
+// the only owner selector; platform-owned (ownerless) evidence is not a user
+// result and is excluded by the query service.
+app.MapGet("/api/backtests/results", async (
+    ClaimsPrincipal principal,
+    BacktestResultsQueryService queryService,
+    int? page,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var requestedPage = page.GetValueOrDefault();
+    if (requestedPage < 0 || requestedPage > 10_000)
+    {
+        return Results.BadRequest(new { error = "The requested report page is outside the supported range." });
+    }
+
+    var reports = await queryService
+        .ListAsync(userId.Value, requestedPage, cancellationToken)
+        .ConfigureAwait(false);
+    return Results.Ok(reports);
+}).RequireAuthorization();
+
+// Completed optimization research is a supplied, read-only projection. Its
+// owner is derived solely from the authenticated principal; this endpoint has
+// no execution, dataset, or strategy-control inputs.
+app.MapGet("/api/optimization/results", async (
+    ClaimsPrincipal principal,
+    OptimizationResultsQueryService queryService,
+    int? page,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var requestedPage = page.GetValueOrDefault();
+    if (requestedPage < 0 || requestedPage > 10_000)
+    {
+        return Results.BadRequest(new { error = "The requested report page is outside the supported range." });
+    }
+
+    var reports = await queryService
+        .ListAsync(userId.Value, requestedPage, cancellationToken)
+        .ConfigureAwait(false);
+    return Results.Ok(reports);
+}).RequireAuthorization();
+
+// Scanner evidence is read-only. Ownership comes exclusively from the signed-in
+// principal; identifiers only select a scan and run within that owner's records.
+app.MapGet("/api/scanner/results", async (
+    ClaimsPrincipal principal,
+    ScannerResultsQueryService scannerResults,
+    Guid scanRequestId,
+    Guid scanRunId,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (scanRequestId == Guid.Empty || scanRunId == Guid.Empty)
+    {
+        return Results.BadRequest(new { error = "A scanner result selection is required." });
+    }
+
+    try
+    {
+        var page = await scannerResults
+            .GetAsync(userId.Value, scanRequestId, scanRunId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return page is null ? Results.NotFound() : Results.Ok(page);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Scanner results are temporarily unavailable.");
+    }
+}).RequireAuthorization();
 
 app.MapPost("/api/audit", async (IAuditEventWriter writer, CancellationToken cancellationToken, AuditEvent request) =>
 {
@@ -720,9 +841,43 @@ app.MapPost("/api/optimization/validate-plan", (OptimizationPlanDto request) =>
         executionBlockedReason = result.ExecutionBlockedReason,
         disclaimer = OptimizationRunResult.NoGuaranteeDisclaimer
     });
-});
+}).RequireAuthorization();
 
 app.MapGet("/optimization", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/optimization-results.js"></script>
+      <title>Optimization research reports</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Optimization research reports</h1>
+        <p class="lede">Read-only reporting for completed, supplied hypothetical research evidence.</p>
+        <div class="notice">
+          <strong>Hypothetical research only.</strong> Candidate rankings use validation data only.
+          A holdout is locked, may be recorded once after selection is final, and is never used to
+          rank candidates. This is not financial advice, not a profit guarantee, not an actionable
+          signal, and does not represent an order, exchange action, or strategy execution.
+        </div>
+        <div class="notice">
+          This page cannot start, run, or execute an optimization. If no durable report source is
+          available, it truthfully shows no completed research report.
+        </div>
+        <div id="status" class="notice">Loading completed optimization research reports.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/optimization/plan-validation", () => Results.Content(
     """
     <!DOCTYPE html>
     <html lang="en">
@@ -846,6 +1001,94 @@ app.MapGet("/optimization", () => Results.Content(
     """,
     "text/html")).RequireAuthorization();
 
+// Paper-training configuration is deliberately separate from the legacy research-worker API:
+// the browser can request only a count from the fixed platform catalog, never trading inputs.
+app.MapGet("/api/paper-training", async (
+    ClaimsPrincipal principal,
+    IPaperTrainingActivationRepository repository,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var activation = await repository.GetAsync(ownerId.Value, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(PaperTrainingResponse.From(activation));
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training", async (
+    ClaimsPrincipal principal,
+    PaperTrainingRequest request,
+    PaperTrainingActivationService service,
+    IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.StartAsync(
+            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal), request.Slots,
+            prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
+        return Results.Created("/api/paper-training", PaperTrainingResponse.From(activation));
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingRequest request,
+    PaperTrainingActivationService service,
+    IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.StartAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal),
+            request.Slots, prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/{ownerId:guid}/disable", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.DisableAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/{ownerId:guid}/emergency-stop", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.EmergencyStopAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
 app.MapGet("/api/experiments", async (
     ClaimsPrincipal principal,
     IExperimentWorkerRepository repository,
@@ -889,43 +1132,92 @@ app.MapGet("/api/experiments", async (
     });
 }).RequireAuthorization();
 
-app.MapPost("/api/experiments", async (
+app.MapPost("/api/experiments", () => Results.StatusCode(StatusCodes.Status410Gone))
+    .RequireAuthorization();
+
+// This is a read-only research evidence projection. It neither schedules workers nor exposes
+// an execution, promotion, or strategy-control surface.
+app.MapGet("/api/experiment-results", async (
     ClaimsPrincipal principal,
-    ExperimentWorkerPool pool,
-    CreateExperimentWorkerRequest request,
+    IExperimentResultLedger ledger,
+    int? page,
+    int? pageSize,
     CancellationToken cancellationToken) =>
 {
-    ArgumentNullException.ThrowIfNull(request);
-
-    var userId = CurrentUser.TryGetUserId(principal);
-    if (userId is null)
-    {
-        return Results.Unauthorized();
-    }
-
+    var owner = CurrentUser.TryGetUserId(principal);
+    if (owner is null) return Results.Unauthorized();
     try
     {
-        var worker = await pool.CreateWorkerAsync(
-            userId.Value,
-            request.Name,
-            request.StrategyTemplateId,
-            request.MarketSymbol,
-            request.StartingCash,
-            DateTimeOffset.UtcNow,
-            request.RandomSeed,
-            cancellationToken).ConfigureAwait(false);
-
-        return Results.Ok(new { worker.Id, worker.Name, status = worker.Status.ToString() });
+        var resultPage = await ledger.ListAsync(owner.Value, page ?? 0, pageSize ?? 25, cancellationToken).ConfigureAwait(false);
+        return Results.Ok(new
+        {
+            researchOnly = true,
+            disclaimer = "Research-only comparison. Display order is not a recommendation, selection, promotion, or profit-based decision.",
+            resultPage.Page,
+            resultPage.PageSize,
+            resultPage.HasMore,
+            results = resultPage.Items.Select(result => new
+            {
+                result.SnapshotKey,
+                result.EvaluatedAtUtc,
+                workerId = result.Provenance.WorkerId,
+                result.Provenance.Group,
+                result.Provenance.StrategyId,
+                result.Provenance.StrategyVersion,
+                result.Provenance.ParametersFingerprint,
+                result.Provenance.DatasetFingerprint,
+                result.Provenance.ClassifierVersion,
+                result.Provenance.GateEvidenceFingerprint,
+                result.Provenance.Seed,
+                result.Provenance.ReproducibilityIdentity,
+                result.Equity,
+                result.Cash,
+                result.PositionQuantity,
+                result.RealizedProfitAndLoss,
+                result.UnrealizedProfitAndLoss,
+                result.MaximumDrawdown,
+                result.Fees,
+                result.Slippage,
+                result.RejectedFillCount,
+                result.RejectedActionCount,
+                result.Exposure,
+                result.GateFailureCount
+            })
+        });
     }
-    catch (ArgumentException ex)
+    catch (ArgumentOutOfRangeException)
     {
-        return Results.BadRequest(new { error = ex.Message });
-    }
-    catch (InvalidOperationException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
+        return Results.BadRequest(new { error = "The requested result page is outside the supported range." });
     }
 }).RequireAuthorization();
+
+app.MapGet("/experiment-results", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/experiment-results.js"></script>
+      <title>Experiment research results — Exersist Trading</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Experiment research results</h1>
+        <nav class="workspace-tabs" aria-label="Experiment sections">
+          <a href="/experiments">Workers</a>
+          <a class="active" href="/experiment-results" aria-current="page">Results</a>
+        </nav>
+        <p class="lede">Immutable snapshots from isolated paper workers. This page is read-only.</p>
+        <div class="notice"><strong>Research-only comparison.</strong> Sorting is for inspection only; it does not identify a winner, recommend a strategy, select or promote anything, or initiate execution.</div>
+        <div id="status" class="notice">Loading immutable experiment snapshots.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """, "text/html")).RequireAuthorization();
 
 app.MapGet("/experiments", () => Results.Content(
     """
@@ -956,20 +1248,26 @@ app.MapGet("/experiments", () => Results.Content(
     <body>
       <div class="container">
         <h1>Experiment workers <span class="badge">Paper only</span></h1>
+        <nav class="workspace-tabs" aria-label="Experiment sections">
+          <a class="active" href="/experiments" aria-current="page">Workers</a>
+          <a href="/experiment-results">Results</a>
+        </nav>
         <p class="muted">
-          Up to ten isolated workers per user. Each worker keeps its own balance, position,
-          strategy state, parameters, random seed, and results. Workers may read the same
-          immutable historical data but never share mutable state, and a worker that fails does
-          not stop the others.
+          Start one to ten fixed, platform-approved paper-training slots immediately after all
+          paper-only prerequisites pass.
         </p>
 
         <div class="notice">
-          Experiment workers trade with fake funds only. They cannot place an order on a real
-          exchange. Past or simulated results do not indicate future results, and no strategy is
-          guaranteed to be profitable.
+          Paper only: workers use fake funds and cannot place an order on a real exchange.
+          Live account stages are untouched. Disable or emergency stop ends paper training.
         </div>
 
         <div id="state"></div>
+        <form id="request-form">
+          <label for="slots">Fixed paper-training slots (1–10)</label>
+          <input id="slots" type="number" min="1" max="10" value="1" required />
+          <button type="submit">Start paper training</button>
+        </form>
         <table id="grid" hidden>
           <thead>
             <tr>
@@ -985,25 +1283,26 @@ app.MapGet("/experiments", () => Results.Content(
         const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
         (async () => {
           const state = document.getElementById('state');
-          const res = await fetch('/api/experiments');
+          const res = await fetch('/api/paper-training');
           if (res.status === 401) {
-            state.innerHTML = '<p class="muted">Sign in to view your experiment workers.</p>';
+            state.innerHTML = '<p class="muted">Sign in to view paper-training status.</p>';
             return;
           }
           const data = await res.json();
-          state.innerHTML = '<p class="muted">Using ' + data.used + ' of ' + data.maxWorkers + ' workers.</p>';
-          if (data.workers.length === 0) {
-            state.innerHTML += '<p class="muted">No experiment workers yet.</p>';
-            return;
-          }
-          const grid = document.getElementById('grid');
-          grid.hidden = false;
-          grid.querySelector('tbody').innerHTML = data.workers.map(w =>
-            '<tr><td>' + w.name + '</td><td>' + w.marketSymbol + '</td><td>' + w.status +
-            '</td><td>' + w.randomSeed + '</td><td>' + n(w.cashBalance) + '</td><td>' +
-            n(w.positionQuantity) + '</td><td>' + n(w.realizedProfitAndLoss) + '</td><td>' +
-            w.tradeCount + '</td></tr>').join('');
+          state.innerHTML = '<p class="muted">Paper-training status: <strong>' + data.state +
+            '</strong>. Fixed slots started: ' + data.slots + ' of 10.</p><p class="muted">' +
+            data.notice + '</p>';
         })();
+        document.getElementById('request-form').addEventListener('submit', async event => {
+          event.preventDefault();
+          const response = await fetch('/api/paper-training', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slots: Number(document.getElementById('slots').value) })
+          });
+          if (response.ok) location.reload();
+          else document.getElementById('state').innerHTML =
+            '<p class="notice">Paper training was not started. All deployment prerequisites must be configured.</p>';
+        });
       </script>
     </body>
     </html>
@@ -1537,7 +1836,7 @@ app.MapGet("/orders", () => Results.Content(
       <title>Orders and reconciliation</title>
     </head>
     <body>
-      <main>
+      <main class="page-wide chart-page">
         <h1>Orders and reconciliation</h1>
         <p class="lede">
           Every order placed on your behalf, together with any order whose exchange outcome could
@@ -1732,6 +2031,44 @@ app.MapGet("/api/exchange/accounts", async (
 }).RequireAuthorization();
 
 // ---------------------------------------------------------------------------
+// Portfolio balances are a fresh, read-only exchange reading. Secrets are
+// resolved server-side only after account ownership is established by the
+// query service; neither credential nor its storage reference is projected.
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/portfolio", async (
+    ClaimsPrincipal principal,
+    IPortfolioQueryService portfolio,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var readings = await portfolio.ReadAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new
+    {
+        accounts = readings.Select(reading => new
+        {
+            id = reading.AccountId,
+            displayName = reading.DisplayName,
+            exchange = reading.Exchange.ToString(),
+            retrievedAtUtc = reading.RetrievedAtUtc,
+            error = reading.Error,
+            balances = reading.Balances.Select(balance => new
+            {
+                asset = balance.Asset,
+                total = balance.Total,
+                available = balance.Available,
+                held = balance.Held
+            })
+        })
+    });
+}).RequireAuthorization();
+
+// ---------------------------------------------------------------------------
 // Market data (Phase 3.2). Candles are read from the venue's public endpoint,
 // so this route involves no credential and no user-owned exchange account.
 // Every candle reports whether it is closed, because a bar still forming must
@@ -1741,7 +2078,10 @@ app.MapGet("/api/exchange/accounts", async (
 app.MapGet("/api/marketdata/candles", async (
     string symbol,
     string interval,
+    string? indicators,
+    int? indicatorPeriod,
     IHistoricalCandleSource candleSource,
+    ChartIndicatorOverlayService overlayService,
     CancellationToken cancellationToken) =>
 {
     if (!Enum.TryParse<CandleInterval>(interval, ignoreCase: true, out var parsedInterval)
@@ -1750,13 +2090,34 @@ app.MapGet("/api/marketdata/candles", async (
         return Results.BadRequest(new { error = "UnknownInterval", message = "Supported intervals: OneMinute, FiveMinutes, TenMinutes, FifteenMinutes, ThirtyMinutes, OneHour, FourHours, OneDay." });
     }
 
+    var requestedIndicators = (indicators ?? string.Empty)
+        .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Select(name => name.ToUpperInvariant() switch
+        {
+            "SMA" => "sma",
+            "EMA" => "ema",
+            _ => name,
+        })
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+    if (requestedIndicators.Any(name => name is not ("sma" or "ema")))
+    {
+        return Results.BadRequest(new { error = "UnknownIndicator", message = "Supported chart overlays: sma, ema." });
+    }
+
+    var period = indicatorPeriod ?? 20;
+    if (period is < 1 or > 200)
+    {
+        return Results.BadRequest(new { error = "InvalidIndicatorPeriod", message = "Indicator period must be between 1 and 200." });
+    }
+
     try
     {
         var candles = await candleSource
             .FetchAsync(symbol, parsedInterval, DateTimeOffset.UnixEpoch, cancellationToken)
             .ConfigureAwait(false);
 
-        return Results.Ok(candles.Select(candle => new
+        var responseCandles = candles.Select(candle => new
         {
             openTimeUtc = candle.OpenTimeUtc,
             closeTimeUtc = candle.CloseTimeUtc,
@@ -1767,7 +2128,21 @@ app.MapGet("/api/marketdata/candles", async (
             volume = candle.Volume,
             isClosed = candle.IsClosed,
             isDerived = candle.IsDerived
-        }));
+        }).ToArray();
+
+        // Retain the original array response when no overlay was requested.
+        // The chart asks for overlays explicitly, keeping existing read-only
+        // consumers compatible while calculating values from this same fetch.
+        if (requestedIndicators.Length == 0)
+        {
+            return Results.Ok(responseCandles);
+        }
+
+        return Results.Ok(new
+        {
+            candles = responseCandles,
+            indicators = overlayService.Calculate(candles, requestedIndicators, period)
+        });
     }
     catch (MarketDataIntervalNotSupportedException exception)
     {
@@ -2193,6 +2568,7 @@ app.MapPost("/api/live/orders", async (
     SubmitLiveOrderRequest request,
     ClaimsPrincipal principal,
     ILiveTradingService liveTrading,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     var userId = CurrentUser.TryGetUserId(principal);
@@ -2208,16 +2584,37 @@ app.MapPost("/api/live/orders", async (
         return Results.BadRequest(new { error = "InvalidSide", message = "Side must be Buy or Sell." });
     }
 
-    var result = await liveTrading
-        .SubmitAsync(
-            userId.Value,
-            request.ExchangeAccountId,
-            request.Symbol,
-            side,
-            request.Quantity,
-            request.ClientOrderId,
-            cancellationToken)
-        .ConfigureAwait(false);
+    LiveTradeResult result;
+    try
+    {
+        result = await liveTrading
+            .SubmitAsync(
+                userId.Value,
+                request.ExchangeAccountId,
+                request.Symbol,
+                side,
+                request.Quantity,
+                request.ClientOrderId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+    catch (DbUpdateException exception)
+    {
+        // A durable-record failure may occur before or after the exchange
+        // call. The browser cannot establish which, so it must not retry;
+        // this is treated as an unknown outcome and logged for an operator.
+        Trading.Web.LiveOrderEndpointLog.PersistenceFailure(
+            loggerFactory.CreateLogger("Trading.Web.LiveOrderEndpoint"),
+            exception);
+        return Results.Json(
+            new
+            {
+                error = "Unknown",
+                message = "The live order could not be recorded reliably. It may or may not exist at Kraken. Do not submit it again; check Orders and reconcile it first.",
+                action = "Do not resubmit this order."
+            },
+            statusCode: StatusCodes.Status202Accepted);
+    }
 
     if (result.Outcome == LiveTradeOutcome.Unknown)
     {
@@ -2539,6 +2936,80 @@ app.MapGet("/positions", () => Results.Content(
     """,
     "text/html")).RequireAuthorization();
 
+app.MapGet("/backtests", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/backtest-results.js"></script>
+      <title>Backtest results</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Backtest results</h1>
+        <p class="lede">Read-only reporting for completed, reproducible historical analysis.</p>
+
+        <div class="notice">
+          <strong>Hypothetical historical results.</strong> These results include model assumptions
+          and do not guarantee profitability or provide advice. They do not represent an order or
+          a live or paper execution. Results are analysis and research only.
+        </div>
+
+        <div id="status" class="notice">Loading completed backtest reports.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/scanner", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/scanner-results.js"></script>
+      <title>Scanner results</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Scanner results</h1>
+        <p class="lede">
+          Read-only closed-candle evidence from a completed scanner run. Presentation preserves
+          the server's recorded ranking and does not calculate any market values in the browser.
+        </p>
+
+        <div class="notice">
+          <strong>Historical and technical analysis only.</strong>
+          Scanner output is not financial advice and does not submit trades.
+        </div>
+
+        <div id="status" class="notice">Loading scanner evidence.</div>
+
+        <section class="card" aria-label="Scanner scope">
+          <h2 id="scanName">Scanner scope</h2>
+          <p><strong>Symbols:</strong> <span id="scope">Not loaded.</span></p>
+          <p><strong>Interval:</strong> <span id="interval">Not loaded.</span></p>
+        </section>
+
+        <section>
+          <h2>Recorded results</h2>
+          <div id="results"><p class="empty">No scanner run selected.</p></div>
+        </section>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
 app.MapGet("/chart", () => Results.Content(
     """
     <!DOCTYPE html>
@@ -2552,104 +3023,142 @@ app.MapGet("/chart", () => Results.Content(
       <title>Chart</title>
     </head>
     <body>
-      <main>
+      <main class="page-wide chart-page">
         <h1>Chart</h1>
-        <p class="lede">
-          Price history from Kraken with your open positions and working orders marked on it.
-          Orders placed here are paper orders filled with fake funds against the last closed
-          candle. Nothing on this page can reach an exchange.
-        </p>
 
-        <div class="notice">
-          <strong>The bar still forming is drawn dashed.</strong>
-          A partial bar looks like a finished one on most charts, which invites reading a signal
-          off a candle that has not closed. Strategies here only act on closed candles, and the
-          chart shows the same distinction.
-        </div>
+        <div class="chart-workspace">
+          <div class="chart-column">
+            <div class="chart-toolbar">
+              <div class="pair-selector">
+                <label for="pairSearch">Search pairs</label>
+                <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
+                       aria-autocomplete="list" aria-controls="pairResults" />
+                <!-- The select remains the canonical selected value for the chart
+                     and order ticket. Pair search only chooses from its active
+                     Kraken-backed options; it never accepts arbitrary symbols. -->
+                <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
+                <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
+                <p id="pairSearchEmpty" class="pair-search-empty" aria-live="polite"></p>
+              </div>
 
-        <div id="status" class="notice">Loading.</div>
+              <div class="chart-actions">
+                <label for="interval">Interval</label>
+                <select id="interval">
+                  <option value="OneMinute">1 minute</option>
+                  <option value="FiveMinutes">5 minutes</option>
+                  <option value="TenMinutes">10 minutes</option>
+                  <option value="FifteenMinutes">15 minutes</option>
+                  <option value="ThirtyMinutes">30 minutes</option>
+                  <option value="OneHour" selected>1 hour</option>
+                  <option value="FourHours">4 hours</option>
+                  <option value="OneDay">1 day</option>
+                </select>
 
-        <div class="chart-toolbar">
-          <div class="pair-selector">
-            <label for="pairSearch">Search pairs</label>
-            <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
-                   aria-autocomplete="list" aria-controls="pairResults" />
-            <!-- The select remains the canonical selected value for the chart
-                 and order ticket. Pair search only chooses from its active
-                 Kraken-backed options; it never accepts arbitrary symbols. -->
-            <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
-            <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
-            <p id="pairSearchEmpty" class="pair-search-empty" aria-live="polite"></p>
+                <button id="load" type="button">Load</button>
+                <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
+                <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
+                <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
+              </div>
+            </div>
+
+            <div class="chart-overlay-controls" aria-label="Chart overlays">
+              <span>Overlays (closed candles only)</span>
+              <label><input id="overlaySma" type="checkbox" value="sma" /> SMA</label>
+              <label><input id="overlayEma" type="checkbox" value="ema" /> EMA</label>
+              <label for="overlayPeriod">Period</label>
+              <input id="overlayPeriod" type="number" min="1" max="200" value="20" inputmode="numeric" />
+              <span id="overlayLegend" class="chart-overlay-legend" aria-live="polite">No overlays selected.</span>
+            </div>
+
+            <div class="chart-stage">
+              <canvas id="chart" width="1100" height="460"
+                      style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
+            </div>
           </div>
 
-          <div class="chart-actions">
-            <label for="interval">Interval</label>
-            <select id="interval">
-              <option value="OneMinute">1 minute</option>
-              <option value="FiveMinutes">5 minutes</option>
-              <option value="TenMinutes">10 minutes</option>
-              <option value="FifteenMinutes">15 minutes</option>
-              <option value="ThirtyMinutes">30 minutes</option>
-              <option value="OneHour" selected>1 hour</option>
-              <option value="FourHours">4 hours</option>
-              <option value="OneDay">1 day</option>
-            </select>
+          <aside class="trade-panel" aria-label="Trade ticket">
+            <section class="pair-balance-card" aria-live="polite">
+              <span class="pair-balance-label">Exchange balance for this pair</span>
+              <div id="pairHolding" class="pair-balance-value">Loading current exchange holding.</div>
+            </section>
+            <h2>Trade</h2>
 
-            <button id="load" type="button">Load</button>
-            <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
-            <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
-            <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
-          </div>
+            <!-- The chart is shared. Only the book and ticket change with the
+                 tab, because the market data is the same in either mode. -->
+            <div class="tabs" role="tablist">
+              <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
+              <button id="modeLive" class="tab" type="button" role="tab">Live</button>
+            </div>
+
+            <div id="modeNotice" class="notice">
+              <strong>Fake funds. No exchange is contacted.</strong>
+              The fill is priced at the close of the last closed candle. It does not model spread,
+              slippage, fees or partial fills, so a paper result is an upper bound on what the
+              same decision would have returned live.
+            </div>
+
+            <div class="toolbar" id="tradeTicket">
+              <label for="tradeSide">Side</label>
+              <select id="tradeSide">
+                <option value="Buy">Buy</option>
+                <option value="Sell">Sell</option>
+              </select>
+
+              <label for="tradeQuantity">Quantity</label>
+              <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
+
+              <button id="submitTrade" type="button">Submit paper order</button>
+            </div>
+
+            <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
+          </aside>
         </div>
 
-        <div class="chart-stage">
-          <canvas id="chart" width="1100" height="460"
-                  style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
-        </div>
-        <p id="legend" class="empty"></p>
-        <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
-
-        <h2>Position on this pair</h2>
+        <div id="status" class="notice chart-status">Loading.</div>
+        <h2>Confirmed position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
+        <h2>Active orders on this pair</h2>
+        <div id="activeOrders"><p class="empty">Loading.</p></div>
         <p id="pairFilters" class="empty"></p>
-
-        <h2>Trade</h2>
-
-        <!-- The chart above is shared. Only the book and the ticket change
-             with the tab, because the market data is the same market data
-             whichever book you are trading into. -->
-        <div class="tabs" role="tablist">
-          <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
-          <button id="modeLive" class="tab" type="button" role="tab">Live</button>
-        </div>
-
-        <div id="modeNotice" class="notice">
-          <strong>Fake funds. No exchange is contacted.</strong>
-          The fill is priced at the close of the last closed candle, so it reflects a price that
-          actually settled. It does not model spread, slippage, fees or partial fills, so a paper
-          result is an upper bound on what the same decision would have returned live.
-        </div>
-
-        <div class="toolbar" id="tradeTicket">
-          <label for="tradeSide">Side</label>
-          <select id="tradeSide">
-            <option value="Buy">Buy</option>
-            <option value="Sell">Sell</option>
-          </select>
-
-          <label for="tradeQuantity">Quantity</label>
-          <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
-
-          <button id="submitTrade" type="button">Submit paper order</button>
-        </div>
-
-        <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
 
         <p class="empty">
           Kraken serves no ten-minute candle. That interval is refused rather than answered with a
           different size; a ten-minute bar is built from ten closed one-minute bars and marked as
           derived.
         </p>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/portfolio", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/portfolio.js"></script>
+      <title>Portfolio</title>
+    </head>
+    <body>
+      <main class="page-wide portfolio-page">
+        <h1>Portfolio</h1>
+        <p class="lede">Read-only balances from your connected exchange accounts, separated by available and held amounts.</p>
+        <div class="notice">
+          <strong>Fresh reading only.</strong> Balances are requested from the exchange when this
+          page loads. A failed request is shown as an error; no previous balance is reused.
+          This page cannot transfer, withdraw, deposit, or place orders.
+        </div>
+        <div class="portfolio-actions">
+          <button id="refresh" type="button">Refresh balances</button>
+          <span class="portfolio-action-note">No portfolio value is estimated: exchange balances are shown in their native assets.</span>
+        </div>
+        <div id="status" class="notice">Loading current balances.</div>
+        <div id="portfolio"><p class="empty">Loading.</p></div>
       </main>
     </body>
     </html>
@@ -3270,6 +3779,8 @@ app.MapGet("/account", () => Results.Content(
 
 await app.RunAsync().ConfigureAwait(false);
 
+public partial class Program;
+
 /// <summary>
 /// A request to connect an exchange account.
 /// </summary>
@@ -3295,6 +3806,37 @@ internal sealed record CreateExperimentWorkerRequest(
     string MarketSymbol,
     decimal StartingCash,
     int RandomSeed);
+
+/// <summary>Paper training accepts only a fixed catalog slot count; ownership is from the principal.</summary>
+internal sealed record PaperTrainingRequest(int Slots);
+
+internal sealed record PaperTrainingResponse(
+    string State,
+    int Slots,
+    DateTimeOffset? ChangedAtUtc,
+    IReadOnlyList<object> Catalog,
+    string Notice)
+{
+    public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
+        new(
+            activation?.State.ToString() ?? "NotStarted",
+            activation?.Slots.Count ?? 0,
+            activation?.ChangedAtUtc,
+            PaperTrainingActivationService.ApprovedSlots.Select(slot => (object)new
+            {
+                slot.Slot, slot.Group, slot.StrategyId, slot.Symbol, slot.StartingCash,
+                slot.ParameterSetId, slot.ProvenanceId
+            }).ToArray(),
+            "Paper only: fake funds only. Starting requires every deployment prerequisite; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
+}
+
+internal static class PaperTrainingRole
+{
+    public static RoleType From(ClaimsPrincipal principal) =>
+        principal.IsInRole(nameof(RoleType.Administrator)) ? RoleType.Administrator :
+        principal.IsInRole(nameof(RoleType.RiskOfficer)) ? RoleType.RiskOfficer :
+        RoleType.User;
+}
 
 /// <summary>
 /// Halt change request. Every change requires a reason, which is written to the audit trail.

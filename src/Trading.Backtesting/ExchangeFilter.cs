@@ -6,8 +6,7 @@ public sealed class ExchangeFilter
         decimal minNotional,
         decimal minQty,
         decimal tickSize,
-        decimal stepSize,
-        bool allowPartialFills = true)
+        decimal stepSize)
     {
         if (minNotional < 0m)
         {
@@ -33,7 +32,6 @@ public sealed class ExchangeFilter
         MinQty = minQty;
         TickSize = tickSize;
         StepSize = stepSize;
-        AllowPartialFills = allowPartialFills;
     }
 
     public decimal MinNotional { get; }
@@ -44,9 +42,10 @@ public sealed class ExchangeFilter
 
     public decimal StepSize { get; }
 
-    public bool AllowPartialFills { get; }
-
     public bool IsOrderAllowed(decimal quantity, decimal price)
+        => GetRejectionReason(quantity, price) is null;
+
+    public string? GetRejectionReason(decimal quantity, decimal price)
     {
         if (quantity < 0m)
         {
@@ -58,10 +57,24 @@ public sealed class ExchangeFilter
             throw new ArgumentOutOfRangeException(nameof(price), "Price must be positive.");
         }
 
+        if (price % TickSize != 0m)
+        {
+            return $"Execution price {price} does not conform to the configured price tick {TickSize}.";
+        }
+
+        if (quantity % StepSize != 0m)
+        {
+            return $"Execution quantity {quantity} does not conform to the configured quantity step {StepSize}.";
+        }
+
+        if (quantity < MinQty)
+        {
+            return $"Execution quantity {quantity} is below the configured minimum quantity {MinQty}.";
+        }
+
         var notional = quantity * price;
-        return quantity >= MinQty
-            && notional >= MinNotional
-            && quantity % StepSize == 0m
-            && price % TickSize == 0m;
+        return notional < MinNotional
+            ? $"Execution notional {notional} is below the configured minimum notional {MinNotional}."
+            : null;
     }
 }

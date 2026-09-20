@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace Trading.Backtesting;
 
 public sealed class BacktestResult
@@ -13,6 +15,25 @@ public sealed class BacktestResult
         decimal totalFees,
         decimal totalSlippage,
         int tradeCount)
+        : this(strategyId, symbol, fromUtc, toUtc, initialCapital, finalPortfolioValue, netPnL,
+            totalFees, totalSlippage, tradeCount, null, Array.Empty<BacktestEvent>(), Array.Empty<BacktestEquitySnapshot>())
+    {
+    }
+
+    public BacktestResult(
+        string strategyId,
+        string symbol,
+        DateTimeOffset fromUtc,
+        DateTimeOffset toUtc,
+        decimal initialCapital,
+        decimal finalPortfolioValue,
+        decimal netPnL,
+        decimal totalFees,
+        decimal totalSlippage,
+        int tradeCount,
+        string? datasetVersionIdentity,
+        IReadOnlyList<BacktestEvent> events,
+        IReadOnlyList<BacktestEquitySnapshot> equitySnapshots)
     {
         if (string.IsNullOrWhiteSpace(strategyId))
         {
@@ -44,6 +65,9 @@ public sealed class BacktestResult
         TotalFees = totalFees;
         TotalSlippage = totalSlippage;
         TradeCount = tradeCount;
+        DatasetVersionIdentity = datasetVersionIdentity;
+        Events = new ReadOnlyCollection<BacktestEvent>((events ?? throw new ArgumentNullException(nameof(events))).ToArray());
+        EquitySnapshots = new ReadOnlyCollection<BacktestEquitySnapshot>((equitySnapshots ?? throw new ArgumentNullException(nameof(equitySnapshots))).ToArray());
     }
 
     public string StrategyId { get; }
@@ -65,4 +89,10 @@ public sealed class BacktestResult
     public decimal TotalSlippage { get; }
 
     public int TradeCount { get; }
+
+    public string? DatasetVersionIdentity { get; }
+
+    public IReadOnlyList<BacktestEvent> Events { get; }
+
+    public IReadOnlyList<BacktestEquitySnapshot> EquitySnapshots { get; }
 }

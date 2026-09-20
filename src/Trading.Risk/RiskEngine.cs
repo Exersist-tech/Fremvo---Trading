@@ -122,11 +122,23 @@ public sealed class StalenessPolicy
 
     public bool IsStale(DateTimeOffset? lastUpdatedUtc, DateTimeOffset nowUtc)
     {
-        if (!RequiresFreshData || !lastUpdatedUtc.HasValue)
+        if (!RequiresFreshData)
         {
-            return RequiresFreshData && !lastUpdatedUtc.HasValue;
+            return false;
         }
 
+        // Values named *Utc must actually be UTC. Treat a malformed or
+        // future timestamp as unusable rather than trusting it as fresh.
+        if (!lastUpdatedUtc.HasValue
+            || lastUpdatedUtc.Value.Offset != TimeSpan.Zero
+            || nowUtc.Offset != TimeSpan.Zero
+            || lastUpdatedUtc.Value > nowUtc)
+        {
+            return true;
+        }
+
+        // The precise boundary is fresh: a source remains usable through its
+        // configured maximum age and becomes stale only after it.
         return nowUtc - lastUpdatedUtc.Value > MaxAge;
     }
 }
@@ -134,10 +146,14 @@ public sealed class StalenessPolicy
 public sealed class RiskEngine
 {
     private readonly IReadOnlyCollection<RiskLimit> _mandatoryLimits;
+    private readonly TimeProvider _timeProvider;
 
-    public RiskEngine(IEnumerable<RiskLimit>? mandatoryLimits = null)
+    public RiskEngine(
+        IEnumerable<RiskLimit>? mandatoryLimits = null,
+        TimeProvider? timeProvider = null)
     {
         _mandatoryLimits = mandatoryLimits?.ToArray() ?? Array.Empty<RiskLimit>();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public RiskEvaluationResult Evaluate(
@@ -163,12 +179,33 @@ public sealed class RiskEngine
         RiskLimitHierarchy? riskLimitHierarchy = null,
         DateTimeOffset? lastDataUpdateUtc = null,
         DateTimeOffset? nowUtc = null,
-        ProvingRestriction? provingRestriction = null)
+        ProvingRestriction? provingRestriction = null,
+        decimal? proposedQuantity = null,
+        bool exposureIsIncreasing = true,
+        DateTimeOffset? lastMarketDataUpdateUtc = null,
+        DateTimeOffset? lastAccountDataUpdateUtc = null)
     {
         var active = new List<RiskLimit>();
 
-        var effectiveMaxPositionSize = riskLimitHierarchy is null ? maxPositionSize : Math.Min(maxPositionSize, riskLimitHierarchy.EffectiveMaxPositionSize);
-        var effectiveMaxExposure = riskLimitHierarchy is null ? maxNotional : Math.Min(maxNotional, riskLimitHierarchy.EffectiveMaxExposure);
+        if (proposedExposure < 0m || currentExposure < 0m || maxPositionSize <= 0m || maxNotional <= 0m
+            || openOrders < 0 || openPositions < 0 || proposedQuantity is <= 0m)
+        {
+            active.Add(new RiskLimit(RiskLimitType.MaxExposure, 0m, "Risk evaluation input is invalid."));
+            return new RiskEvaluationResult(false, "Risk evaluation input is invalid.", active);
+        }
+
+        if (riskLimitHierarchy is not null && !proposedQuantity.HasValue)
+        {
+            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, 0m, "Order quantity is required for hierarchy evaluation."));
+            return new RiskEvaluationResult(false, "Order quantity is required for hierarchy evaluation.", active);
+        }
+
+        var effectiveMaxPositionSize = riskLimitHierarchy is null
+            ? maxPositionSize
+            : Math.Min(maxPositionSize, riskLimitHierarchy.EffectiveMaxPositionSize);
+        var effectiveMaxExposure = riskLimitHierarchy is null
+            ? maxNotional
+            : Math.Min(maxNotional, riskLimitHierarchy.EffectiveMaxExposure);
 
         var effectiveEmergencyStop = emergencyStop || (tradingMode?.EmergencyStop ?? false);
         var effectiveMarketHalt = marketHalt || (tradingMode?.MarketHalt ?? false) || (haltSwitch?.Scope == HaltScope.Market && haltSwitch.IsEnabled);
@@ -183,11 +220,23 @@ public sealed class RiskEngine
             return new RiskEvaluationResult(false, "Trading is currently halted.", active);
         }
 
-        // Evaluate the policy against the actual data age. A missing timestamp is treated as
-        // stale by StalenessPolicy, so the fail-safe is to block rather than to trade blind.
-        var effectiveDataIsStale = dataIsStale
-            || (stalenessPolicy is not null
-                && stalenessPolicy.IsStale(lastDataUpdateUtc, nowUtc ?? DateTimeOffset.UtcNow));
+        // A safety exit can proceed without the fresh data needed to open or
+        // enlarge a position. New and increasing exposure cannot: every
+        // relevant timestamp must be present, UTC, non-future, and in policy.
+        // lastDataUpdateUtc remains for existing callers with one combined
+        // snapshot; new callers pass market and account timestamps separately.
+        var evaluationTime = nowUtc ?? _timeProvider.GetUtcNow();
+        var hasSeparateDataTimestamps =
+            lastMarketDataUpdateUtc.HasValue || lastAccountDataUpdateUtc.HasValue;
+        var marketDataIsStale = stalenessPolicy is not null
+            && (hasSeparateDataTimestamps
+                ? stalenessPolicy.IsStale(lastMarketDataUpdateUtc, evaluationTime)
+                : stalenessPolicy.IsStale(lastDataUpdateUtc, evaluationTime));
+        var accountDataIsStale = exposureIsIncreasing
+            && hasSeparateDataTimestamps
+            && stalenessPolicy is not null
+            && stalenessPolicy.IsStale(lastAccountDataUpdateUtc, evaluationTime);
+        var effectiveDataIsStale = dataIsStale || marketDataIsStale || accountDataIsStale;
 
         if (effectiveDataIsStale)
         {
@@ -215,19 +264,14 @@ public sealed class RiskEngine
 
         var proposedTotal = currentExposure + proposedExposure;
 
-        if (proposedExposure < 0m)
+        var quantityToCheck = proposedQuantity ?? proposedExposure;
+        if (quantityToCheck > effectiveMaxPositionSize)
         {
-            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, 0m, "Negative exposure is not allowed for new orders."));
-            return new RiskEvaluationResult(false, "Negative exposure is not allowed.", active);
+            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, effectiveMaxPositionSize, "Proposed quantity exceeds the configured maximum position size."));
+            return new RiskEvaluationResult(false, "Proposed quantity exceeds maximum position size.", active);
         }
 
-        if (effectiveMaxPositionSize > 0m && proposedExposure > effectiveMaxPositionSize)
-        {
-            active.Add(new RiskLimit(RiskLimitType.MaxPositionSize, effectiveMaxPositionSize, "Proposed exposure exceeds the configured maximum position size."));
-            return new RiskEvaluationResult(false, "Proposed exposure exceeds maximum position size.", active);
-        }
-
-        if (effectiveMaxExposure > 0m && proposedTotal > effectiveMaxExposure)
+        if (proposedTotal > effectiveMaxExposure)
         {
             active.Add(new RiskLimit(RiskLimitType.MaxExposure, effectiveMaxExposure, "Combined exposure exceeds the maximum notional."));
             return new RiskEvaluationResult(false, "Exposure exceeds maximum notional.", active);

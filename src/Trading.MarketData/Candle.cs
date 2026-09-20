@@ -4,6 +4,9 @@ namespace Trading.MarketData;
 
 public sealed class Candle
 {
+    private static readonly IReadOnlyCollection<DataQualityIssue> s_emptyQualityFlags =
+        Array.AsReadOnly(Array.Empty<DataQualityIssue>());
+
     public Candle(
         string symbol,
         CandleInterval interval,
@@ -50,8 +53,8 @@ public sealed class Candle
 
         Symbol = symbol.Trim();
         Interval = interval;
-        OpenTimeUtc = openTimeUtc;
-        CloseTimeUtc = closeTimeUtc;
+        OpenTimeUtc = openTimeUtc.ToUniversalTime();
+        CloseTimeUtc = closeTimeUtc.ToUniversalTime();
         Open = open;
         High = high;
         Low = low;
@@ -59,7 +62,15 @@ public sealed class Candle
         Volume = volume;
         IsClosed = isClosed;
         IsDerived = isDerived;
-        QualityFlags = qualityFlags ?? Array.Empty<DataQualityIssue>();
+        QualityFlags = Array.AsReadOnly(
+            (qualityFlags ?? s_emptyQualityFlags)
+                .Where(issue => issue != DataQualityIssue.None)
+                .Append(isClosed ? DataQualityIssue.None : DataQualityIssue.Incomplete)
+                .Append(isDerived ? DataQualityIssue.Derived : DataQualityIssue.None)
+                .Where(issue => issue != DataQualityIssue.None)
+                .Distinct()
+                .OrderBy(issue => (int)issue)
+                .ToArray());
     }
 
     public string Symbol { get; }
@@ -86,5 +97,6 @@ public sealed class Candle
 
     public IReadOnlyCollection<DataQualityIssue> QualityFlags { get; }
 
-    public bool CanBeUsedForClosedCandleSignal => IsClosed && !QualityFlags.Contains(DataQualityIssue.Incomplete) && !QualityFlags.Contains(DataQualityIssue.Stale);
+    public bool CanBeUsedForClosedCandleSignal =>
+        IsClosed && QualityFlags.All(issue => issue == DataQualityIssue.Derived);
 }

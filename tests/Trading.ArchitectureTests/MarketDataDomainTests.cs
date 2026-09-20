@@ -19,7 +19,7 @@ public sealed class MarketDataDomainTests
     [Fact]
     public void CandleRejectsUnclosedAndIncompleteInputs()
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
         var candle = new Candle(
             "BTCUSDT",
             CandleInterval.OneMinute,

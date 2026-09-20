@@ -97,13 +97,19 @@ public sealed class OptimizationRun
             throw new ArgumentException("A holdout split is required.", nameof(holdout));
         }
 
-        if (training.Symbol != validation.Symbol || training.Symbol != holdout.Symbol)
+        training.ValidateNoFutureLeakage(validation);
+        try
         {
-            throw new ArgumentException("All splits in an optimization run must target the same symbol.", nameof(holdout));
+            training.ValidateNoFutureLeakage(holdout);
+        }
+        catch (ArgumentException ex) when (ex.ParamName == "other")
+        {
+            throw new ArgumentException(
+                "All splits in an optimization run must use the same immutable dataset version.",
+                nameof(holdout),
+                ex);
         }
 
-        training.ValidateNoFutureLeakage(validation);
-        training.ValidateNoFutureLeakage(holdout);
         validation.ValidateNoFutureLeakage(holdout);
 
         if (!validation.IsTimeOrderedAfter(training))
@@ -169,9 +175,11 @@ public sealed class OptimizationRun
 
         // Selection scores are produced on validation data only; the holdout is untouched here.
         var ranked = ParameterSearchEngine.Search(
+            new ParameterSearchSelection(Training, Validation),
             _definitions,
-            parameters => Score(objective, parameters, Validation),
-            gridPointsPerParameter);
+            (_, parameters) => Score(objective, parameters, Validation),
+            gridPointsPerParameter,
+            ParameterSearchEngine.MaximumCandidateCount);
 
         var best = ranked[0];
         var trainingScore = Score(objective, best.Parameters, Training);

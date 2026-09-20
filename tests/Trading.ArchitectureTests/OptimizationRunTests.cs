@@ -14,7 +14,7 @@ public sealed class OptimizationRunTests
         new(
             id,
             type,
-            symbol,
+            DatasetSplitTestFactory.Create(symbol),
             new DateTimeOffset(2024, 1, startDay, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2024, 1, endDay, 0, 0, 0, TimeSpan.Zero),
             100);

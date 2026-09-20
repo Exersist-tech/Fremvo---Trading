@@ -31,6 +31,7 @@
         "Trading__LiveExecution__AllowedUserIds__0": "8dd8e906-4ae0-4190-9082-64ec755c2913",
         "Trading__LiveExecution__ProvingSymbols__0": "SOLUSD",
         "Trading__LiveExecution__ProvingSymbols__1": "XBTUSD",
+        "Trading__LiveExecution__ProvingSymbols__2": "SOLEUR",
         "Trading__LiveExecution__MaxOrderNotional": "25",
         "Trading__LiveExecution__DefaultProvingNotionalCeiling": "10"
       }

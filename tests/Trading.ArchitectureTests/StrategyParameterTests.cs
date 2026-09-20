@@ -14,7 +14,7 @@ public sealed class StrategyParameterTests
     }
 
     [Fact]
-    public void StrategyParameterSetValidatesRangeAndStoreValues()
+    public void StrategyParameterSetValidatesRangeAndStoresImmutableValues()
     {
         var definitions = new[]
         {
@@ -24,12 +24,21 @@ public sealed class StrategyParameterTests
 
         var set = new StrategyParameterSet(definitions);
 
-        Assert.Equal(12m, set.Get("fastPeriod"));
+        Assert.Equal(12m, set.GetDecimal("fastPeriod"));
 
-        set.Set("slowPeriod", 45m);
-        Assert.Equal(45m, set.Get("slowPeriod"));
+        var configured = new StrategyParameterSet(
+            definitions,
+            new Dictionary<string, StrategyParameterValue>
+            {
+                ["slowPeriod"] = StrategyParameterValue.FromNumeric(45m)
+            });
 
-        var invalid = Assert.Throws<ArgumentOutOfRangeException>(() => set.Set("fastPeriod", 40m));
-        Assert.Equal("value", invalid.ParamName);
+        Assert.Equal(45m, configured.GetDecimal("slowPeriod"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new StrategyParameterSet(
+            definitions,
+            new Dictionary<string, StrategyParameterValue>
+            {
+                ["fastPeriod"] = StrategyParameterValue.FromNumeric(40m)
+            }));
     }
 }

@@ -10,5 +10,18 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trading.Exchanges.Kraken\Trading.Exchanges.Kraken.csproj" />
+    <ProjectReference Include="..\Trading.Infrastructure.Data\Trading.Infrastructure.Data.csproj" />
+    <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Trading.ArchitectureTests</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 </Project>

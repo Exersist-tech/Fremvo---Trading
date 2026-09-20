@@ -26,6 +26,84 @@ cd src/Trading.Web
 dotnet run --launch-profile https
 ```
 
+## Opt-in public Kraken candle stream
+
+`Trading.Workers.MarketData` is inert by default. To start its public OHLC v2
+stream, configure a database connection named `TradingDb` and explicitly set
+the symbols and native Kraken intervals, for example:
+
+```json
+"MarketDataStreaming": {
+  "Enabled": true,
+  "Symbols": [ "BTC/USD", "ETH/USD", "SOL/USD", "XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR" ],
+  "Intervals": [ "OneMinute", "FiveMinutes" ],
+  "MaximumReconnectDelaySeconds": 30
+}
+```
+
+Run it with `dotnet run --project src/Trading.Workers.MarketData`. This uses
+only Kraken's public WebSocket endpoint; do not configure credentials, API
+keys, or authorization headers. A candle is persisted only after a subsequent
+interval proves it is closed.
+
+## Opt-in paper-training worker
+
+Paper training is disabled by default. It uses fake funds only, has no live or
+futures route, and does not read exchange credentials. After preparing the
+durable closed-candle, approved-group, risk, fill, ledger, and protective
+scheduler prerequisites, configure the worker explicitly:
+
+```json
+{
+  "ConnectionStrings": { "TradingDb": "Server=(localdb)\\MSSQLLocalDB;Database=Trading;Trusted_Connection=True;TrustServerCertificate=True" },
+  "Experiments": {
+    "EnabledUserIds": [ "PUT-THE-OWNER-GUID-HERE" ],
+    "PaperTraining": {
+      "Enabled": true,
+      "Prerequisites": {
+        "DurableClosedCandleSource": true,
+        "ApprovedResearchGroupsAndGates": true,
+        "WorkerRiskPolicy": true,
+        "PaperFillPolicy": true,
+        "OutputLedger": true,
+        "ProtectiveScheduler": true
+      }
+    },
+    "ProtectiveExits": {
+      "Enabled": true,
+      "EnabledUserIds": [ "PUT-THE-SAME-OWNER-GUID-HERE" ]
+    }
+  }
+}
+```
+
+Run `dotnet run --project src/Trading.Workers.Experiments`. The owner starts
+one to ten fixed catalog slots at `/experiments` immediately after the configured
+paper-only prerequisites pass. An Administrator or RiskOfficer may instead start
+slots for an owner through `POST /api/paper-training/{ownerId}/start`; an ordinary
+user is limited to their own owner id. Use the disable or emergency-stop endpoints
+to stop it. With persisted closed candles available, the worker creates
+the fixed catalog workers, re-fetches and revalidates exactly fourteen
+chronological closed candles for plan geometry from the strategy's safe
+chronological evidence set (currently at least thirty one-hour candles), and writes
+decisions, execution claims, workers, and simulated paper ledger entries to
+the database. The platform-owned strategy-to-plan mapping, exchange filters,
+sizing ceilings, and risk evidence are constants; configuration and browser
+input cannot select an adapter, quantity, or route. A simulated fill changes a
+worker only after the mandatory paper pipeline has completed. Re-reading a
+worker replays its immutable ledger, so balances and positions are
+deterministic across restarts. It never registers a live/futures adapter,
+exchange client, credentials, or network dependency.
+
+Protective exits remain independently disabled unless `ProtectiveExits:Enabled`
+is set. When it is enabled alongside paper training, the scheduler intersects
+its configured owners with the durable active-training approvals. It reads an
+open replayed paper worker and its immutable approved-plan stop/target evidence,
+then only submits an exact closed-candle trigger through the durable
+decision-claim and paper pipeline. Missing, stale, malformed, or unapproved
+evidence is a no-op; a completed close is appended to the worker's durable
+paper ledger, so its balance and position replay correctly after restart.
+
 ## Opt-in Kraken Live Proving profile
 
 The normal `https` profile cannot send a real order. To exercise the
@@ -37,8 +115,9 @@ dotnet run --launch-profile "Live Proving (Kraken)"
 ```
 
 This profile is deliberately separate from the default and permits only the
-development administrator, `SOLUSD` or `XBTUSD`, a maximum order notional of
-25, and a proving ceiling of 10. It is still a real Kraken route: connect only
+development administrator, `SOLUSD`, `SOLEUR`, or `XBTUSD`, a maximum order
+notional of 25 in the pair's quote currency, and a proving ceiling of 10. It is
+still a real Kraken route: connect only
 a read-and-trade key with withdrawal permission disabled, start at Proving,
 and submit a small order you are prepared to place. Wait for an observed,
 reconciled fill before promoting the account to Live. The seeded

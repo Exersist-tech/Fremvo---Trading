@@ -1,187 +1,335 @@
+using System.Security.Cryptography;
+using System.Text;
 using Trading.Application.Experiments;
-using Trading.Application.Pipeline;
-using Trading.Domain.Execution;
+using Trading.Backtesting;
 using Trading.Domain.Experiments;
 using Trading.Domain.Market;
-using Trading.Risk;
+using Trading.Domain.Strategies;
+using Trading.Domain.Universe;
+using Trading.MarketData;
+using Trading.MarketData.Experiments;
+using Trading.Strategies;
+using Trading.Strategies.Approvals;
 
 namespace Trading.ArchitectureTests;
 
 public sealed class PaperExperimentWorkerRunnerTests
 {
-    // The pipeline stamps records with the real UTC clock, so the test clock must track it;
-    // otherwise every event reads as stale and nothing reaches execution.
-    private static readonly DateTimeOffset Now = DateTimeOffset.UtcNow;
+    private static readonly DateTimeOffset Now = new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+    private static readonly Guid InstrumentId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private static readonly string[] ExpectedPhase5BFamilies =
+    [
+        "platform.ema-trend-continuation",
+        "platform.donchian-breakout-ensemble",
+        "platform.bollinger-mean-reversion",
+        "platform.rsi-pullback",
+        "platform.macd-volume",
+        "platform.volatility-compression-breakout",
+        "platform.cross-sectional-momentum-rotation",
+        "platform.relative-strength-pullback-rotation",
+        "platform.session-conditioned-breakout",
+        "platform.regime-switching-ensemble"
+    ];
 
-    private sealed class SingleEventFeed : IExperimentMarketFeed
+    private sealed class FixedCandleSource : IExperimentCandleSeriesSource
     {
-        private readonly MarketEvent? _marketEvent;
-        private bool _served;
+        private readonly ExperimentCandleSeriesResult _result;
 
-        public SingleEventFeed(MarketEvent? marketEvent) => _marketEvent = marketEvent;
+        public FixedCandleSource(ExperimentCandleSeriesResult result) => _result = result;
 
-        public Task<MarketEvent?> TryGetNextClosedEventAsync(Guid workerId, string symbol, CancellationToken cancellationToken)
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request,
+            CancellationToken cancellationToken = default) => Task.FromResult(_result);
+    }
+
+    [Fact]
+    public async Task EveryPhase5BFamilyResolvesDeterministicallyWithoutChangingWorkerState()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
+
+        Assert.Equal(ExpectedPhase5BFamilies.OrderBy(value => value), registry.Definitions.Select(value => value.FamilyId).OrderBy(value => value));
+        foreach (var definition in registry.Definitions)
         {
-            if (_served)
-            {
-                return Task.FromResult<MarketEvent?>(null);
-            }
+            var worker = Worker("{}", definition.FamilyId);
+            var configuration = Configuration(worker, definition);
+            var first = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
+            var second = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
 
-            _served = true;
-            return Task.FromResult(_marketEvent);
+            Assert.Equal(first.Outcome, second.Outcome);
+            Assert.Equal(first.Reason, second.Reason);
+            Assert.True(first.Outcome is ExperimentAnalysisOutcome.Analyzed or ExperimentAnalysisOutcome.Blocked or ExperimentAnalysisOutcome.NoCondition);
+            if (first.Outcome == ExperimentAnalysisOutcome.Analyzed)
+                Assert.NotNull(first.Evidence);
+            else if (first.Outcome == ExperimentAnalysisOutcome.Blocked)
+                Assert.Contains(definition.FamilyId, first.Reason, StringComparison.Ordinal);
+            Assert.Equal(0m, worker.PositionQuantity);
+            Assert.Empty(worker.Ledger);
         }
     }
 
-    private sealed class FixedTemplateFactory : IApprovedStrategyTemplateFactory
+    [Fact]
+    public async Task UnknownFamilyAndVersionOrParameterMismatchAreExplicitlyBlocked()
     {
-        private readonly IPipelineStrategy? _strategy;
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.First();
+        var unknownWorker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", "not-platform-owned", "BTC/USD", 1_000m, Now, 1);
+        unknownWorker.UpdateStrategyParameters("""{"fastPeriod":2,"slowPeriod":3}""");
+        unknownWorker.Start();
+        var unknown = Configuration(unknownWorker, definition, familyId: "not-platform-owned");
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
 
-        public FixedTemplateFactory(IPipelineStrategy? strategy) => _strategy = strategy;
+        var unknownResult = await runner.AnalyzeAsync(unknownWorker, unknown, unknown.Assignments.Single(), Now);
+        var worker = Worker("{}", definition.FamilyId);
+        var matching = Configuration(worker, definition);
+        worker.UpdateStrategyParameters("""{"fastPeriod":3,"slowPeriod":4}""");
+        var mismatchResult = await runner.AnalyzeAsync(worker, matching, matching.Assignments.Single(), Now);
 
-        public IPipelineStrategy? TryCreate(string strategyTemplateId, string parametersJson) => _strategy;
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, unknownResult.Outcome);
+        Assert.Contains("family/version", unknownResult.Reason, StringComparison.Ordinal);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, mismatchResult.Outcome);
+        Assert.Contains("fingerprint", mismatchResult.Reason, StringComparison.Ordinal);
     }
 
-    private sealed class FixedStrategy : IPipelineStrategy
+    [Fact]
+    public async Task RejectedGateAndForeignGroupAreExplicitlyBlocked()
     {
-        private readonly SignalDirection _direction;
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var rejected = Configuration(worker, definition, acceptedGate: false);
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
 
-        public FixedStrategy(SignalDirection direction) => _direction = direction;
+        var rejectedResult = await runner.AnalyzeAsync(worker, rejected, rejected.Assignments.Single(), Now);
+        var otherWorker = Worker("{}", definition.FamilyId);
+        var foreignResult = await runner.AnalyzeAsync(otherWorker, rejected, rejected.Assignments.Single(), Now);
 
-        public Guid StrategyId { get; } = Guid.NewGuid();
-
-        public StrategyDecision? Evaluate(MarketEvent marketEvent) => new(
-            Guid.NewGuid(),
-            StrategyId,
-            marketEvent.Symbol,
-            _direction,
-            0.9m,
-            marketEvent.EventTimeUtc,
-            "test");
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, rejectedResult.Outcome);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, foreignResult.Outcome);
+        Assert.Empty(worker.Ledger);
+        Assert.Empty(otherWorker.Ledger);
     }
 
-    private static MarketEvent Candle(bool isClosed = true) => new(
-        Guid.NewGuid(),
-        "BTCUSDT",
-        CandleInterval.OneMinute,
-        Now,
-        lastPrice: 100m,
-        volume: 10m,
-        isClosed: isClosed);
-
-    private static PaperExperimentWorkerRunner Runner(
-        MarketEvent? marketEvent,
-        IPipelineStrategy? strategy,
-        IExperimentWorkerRepository repository)
+    [Fact]
+    public void RegistryExposesNoRuntimeRegistrationOrSuppliedCodeSurface()
     {
-        var pipeline = new TradePipeline(
-            new InMemoryMarketEventRepository(),
-            new InMemoryStrategyDecisionRepository(),
-            new InMemoryTradeIntentRepository(),
-            new InMemoryRiskEvaluationRepository(),
-            new InMemoryExecutionCommandRepository(),
-            new InMemoryPortfolioUpdateRepository(),
-            new InMemoryAuditEventWriter(),
-            new RiskEngine(),
-            new InMemoryTradingHaltState(),
-            new OrderIdempotencyGuard(),
-            new TradePipelineOptions { MaxDataAge = TimeSpan.FromHours(24) });
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
 
-        return new PaperExperimentWorkerRunner(
-            pipeline,
-            new SingleEventFeed(marketEvent),
-            new FixedTemplateFactory(strategy),
-            new PaperExecutionAdapter(),
-            repository,
-            new FakeTimeProvider(Now));
+        Assert.Equal(10, registry.Definitions.Count);
+        Assert.DoesNotContain(typeof(ApprovedExperimentStrategyRegistry).GetMethods(), method =>
+            method.Name.Contains("Register", StringComparison.OrdinalIgnoreCase)
+            || method.GetParameters().Any(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));
     }
+
+    [Fact]
+    public async Task AttestedObservationsMapDeterministicallyAndNeverAddExposure()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(worker, definition);
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
+        var analysis = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
+        var series = AvailableSeries().Series!;
+        var candle = series.Candles[^1];
+        var identity = new ExperimentClosedCandleIdentity(candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc, Now);
+        var ledger = new InMemoryExperimentDecisionLedger();
+        var policy = new ExperimentDecisionPolicy(ledger, new FakeTimeProvider(Now));
+        var snapshot = new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, Now);
+
+        var first = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
+        var repeated = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
+        var existingExposure = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis,
+            snapshot with { PositionQuantity = 1m }, identity);
+
+        Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
+        Assert.Equal(first, repeated);
+        Assert.Equal(ExperimentProposalAction.Neutral, existingExposure.Proposal.Action);
+        Assert.DoesNotContain(Enum.GetNames<ExperimentProposalAction>(), action => action.Equals("Add", StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(worker.Ledger);
+    }
+
+    [Fact]
+    public async Task NoConditionIsNeutralAndUnattestedOrMismatchedEvidenceIsRejected()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(worker, definition);
+        var now = Now;
+        var flat = new Candle("BTC/USD", CandleInterval.OneHour, now.AddHours(-1), now, 100m, 100m, 100m, 100m, 1m, true, false);
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(ExperimentCandleSeriesResult.Available(
+            new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, now, new[] { flat }))), registry);
+        var result = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), now);
+        var policy = new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(now));
+        var snapshot = new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, now);
+        var identity = new ExperimentClosedCandleIdentity(flat.Symbol, flat.Interval, flat.OpenTimeUtc, flat.CloseTimeUtc, now);
+
+        var neutral = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), result, snapshot, identity);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, result.Outcome);
+        Assert.Equal(ExperimentProposalAction.Neutral, neutral.Proposal.Action);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            ExperimentAnalysisResult.Analyzed("forged", 1m), snapshot, identity));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            result, snapshot with { WorkerId = Guid.NewGuid() }, identity));
+    }
+
+    [Fact]
+    public async Task SupplementalProviderEvaluatesEachFixedFamilyAndBlocksAnIncompleteUniverse()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var series = FixedUniverseSeries();
+        var source = new FixedUniverseCandleSource(series);
+        var provider = new PlatformSupplementalExperimentEvidenceProvider(source);
+
+        foreach (var family in ExpectedPhase5BFamilies.Skip(6))
+        {
+            var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
+            var worker = Worker("{}", family);
+            var configuration = Configuration(worker, definition);
+            var result = await provider.EvaluateAsync(
+                family, series["BTC/USD"].Series!, configuration.Assignments.Single().Provenance);
+
+            Assert.NotNull(result);
+            Assert.True(result!.Outcome is ExperimentAnalysisOutcome.Analyzed
+                or ExperimentAnalysisOutcome.NoCondition or ExperimentAnalysisOutcome.Blocked);
+        }
+
+        var missing = new PlatformSupplementalExperimentEvidenceProvider(
+            new FixedUniverseCandleSource(new Dictionary<string, ExperimentCandleSeriesResult>
+            {
+                ["BTC/USD"] = series["BTC/USD"],
+                ["ETH/USD"] = series["ETH/USD"]
+            }));
+        var crossDefinition = registry.Definitions.Single(candidate => candidate.FamilyId == "platform.cross-sectional-momentum-rotation");
+        var crossWorker = Worker("{}", crossDefinition.FamilyId);
+        var crossConfiguration = Configuration(crossWorker, crossDefinition);
+        var runner = new PaperExperimentWorkerRunner(source, registry, provider);
+        var analyzed = await runner.AnalyzeAsync(crossWorker, crossConfiguration,
+            crossConfiguration.Assignments.Single(), Now);
+        Assert.NotEqual(ExperimentAnalysisOutcome.Blocked, analyzed.Outcome);
+
+        var blocked = await missing.EvaluateAsync(crossDefinition.FamilyId, series["BTC/USD"].Series!,
+            crossConfiguration.Assignments.Single().Provenance);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, blocked!.Outcome);
+        Assert.Contains("SOL/USD", blocked.Reason, StringComparison.Ordinal);
+
+        var stale = new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, Now,
+            series["BTC/USD"].Series!.Candles.Take(90).ToArray());
+        foreach (var family in new[]
+                 {
+                     "platform.session-conditioned-breakout",
+                     "platform.regime-switching-ensemble"
+                 })
+        {
+            var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
+            var worker = Worker("{}", family);
+            var configuration = Configuration(worker, definition);
+            var staleResult = await provider.EvaluateAsync(family, stale, configuration.Assignments.Single().Provenance);
+            Assert.Equal(ExperimentAnalysisOutcome.Blocked, staleResult!.Outcome);
+            Assert.Contains("exactly", staleResult.Reason, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed class FixedUniverseCandleSource : IExperimentCandleSeriesSource
+    {
+        private readonly IReadOnlyDictionary<string, ExperimentCandleSeriesResult> _series;
+        public FixedUniverseCandleSource(IReadOnlyDictionary<string, ExperimentCandleSeriesResult> series) => _series = series;
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_series.TryGetValue(request.Symbol, out var result)
+                ? result
+                : ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.NoData));
+    }
+
+    private static Dictionary<string, ExperimentCandleSeriesResult> FixedUniverseSeries() =>
+        new[]
+            {
+                ("BTC/USD", 100m), ("ETH/USD", 90m), ("SOL/USD", 80m),
+                ("XRP/EUR", 70m), ("TRX/EUR", 60m), ("DOGE/EUR", 50m), ("ADA/EUR", 40m)
+            }
+            .ToDictionary(pair => pair.Item1, pair =>
+            {
+                var candles = Enumerable.Range(0, 91).Select(index =>
+                {
+                    var open = Now.AddHours(-91 + index);
+                    var close = pair.Item2 + index;
+                    return new Candle(pair.Item1, CandleInterval.OneHour, open, open.AddHours(1),
+                        close - 1m, close + 1m, close - 2m, close, 1m, true, false);
+                }).ToArray();
+                return ExperimentCandleSeriesResult.Available(
+                    new ExperimentCandleSeries(pair.Item1, CandleInterval.OneHour, Now, candles));
+            });
 
     private sealed class FakeTimeProvider : TimeProvider
     {
         private readonly DateTimeOffset _now;
-
         public FakeTimeProvider(DateTimeOffset now) => _now = now;
-
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
-    private static async Task<ExperimentWorker> RunningWorkerAsync(InMemoryExperimentWorkerRepository repository)
+    private static ExperimentWorker Worker(string parameters, string strategyId = "platform.ema-trend-continuation")
     {
-        var worker = new ExperimentWorker(
-            Guid.NewGuid(), Guid.NewGuid(), "w", "template-sma", "BTCUSDT", 10_000m, Now, randomSeed: 7);
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", strategyId, "BTC/USD", 1_000m, Now, 1);
+        worker.UpdateStrategyParameters(parameters);
         worker.Start();
-        await repository.SaveAsync(worker);
         return worker;
     }
 
-    [Fact]
-    public async Task ABuySignalIsAppliedToTheWorkersOwnLedger()
+    private static ExperimentResearchGroupConfiguration Configuration(
+        ExperimentWorker worker,
+        ApprovedExperimentStrategyDefinition definition,
+        string? familyId = null,
+        bool acceptedGate = true)
     {
-        var repository = new InMemoryExperimentWorkerRepository();
-        var worker = await RunningWorkerAsync(repository);
-
-        var runner = Runner(Candle(), new FixedStrategy(SignalDirection.Buy), repository);
-        await runner.RunOnceAsync(worker, CancellationToken.None);
-
-        Assert.Equal(1m, worker.PositionQuantity);
-        Assert.Equal(100m, worker.AverageEntryPrice);
-        Assert.Single(worker.Ledger);
-        Assert.True(worker.CashBalance < 10_000m);
+        var approval = StrategyApproval.CreateDraft(
+            Guid.NewGuid(),
+            new StrategyVersion(
+                new StrategyTemplateVersionIdentity(familyId ?? definition.FamilyId, definition.Version),
+                new StrategyParameterSchemaReference(
+                    definition.ParameterSchemaId,
+                    definition.ParameterSchemaVersion,
+                    definition.ParameterSchemaFingerprint),
+                definition.ContentFingerprint,
+                Now),
+            StrategyApprovalActor.Human(Guid.NewGuid()),
+            Now,
+            new StrategyApprovalRequirements(
+                new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+                3, 1m, 1m, 1m, TimeSpan.FromHours(1),
+                new[] { CandleInterval.OneHour },
+                new[] { TradingProductType.Spot },
+                new[] { StrategyApprovalMode.Paper },
+                new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.OneHour, CandleInterval.OneHour)));
+        var actor = approval.CreatedBy;
+        approval = approval.TransitionTo(StrategyApprovalState.UnderReview, actor, Now)
+            .TransitionTo(StrategyApprovalState.Approved, actor, Now, actor);
+        var fingerprint = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+        var dataset = new HistoricalDataset("dataset", "research", worker.MarketSymbol, "1H", Now.AddDays(-1), Now.AddHours(-1), 3, fingerprint, "v1", Now);
+        var evidence = new StrategyResearchEvidence(
+            new ResearchEvidenceProvenance("research", fingerprint, Now),
+            new StrategyApprovalEvidence(InstrumentId, AssetClass.Cryptocurrency, 3, 10m, 0.1m, 0.01m, Now),
+            acceptedGate, 1m, 1m, true, 1m, 1m, 1m, fingerprint);
+        var gates = StrategyRejectionGateEngine.CreatePlatformDefault().Evaluate(
+            new StrategyRejectionGateEvaluationInput(approval, approval.Requirements?.TimeframeConfiguration, TradingProductType.Spot, StrategyApprovalMode.Paper, evidence, Now));
+        var provenance = new ExperimentResearchProvenance(
+            approval,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(worker.StrategyParameters.Trim()))),
+            dataset,
+            new ExperimentClassifierReference("platform-regime", 1, fingerprint),
+            evidence.Provenance,
+            gates);
+        return ExperimentResearchGroupConfiguration.Create(worker.UserId, 1, new[] { worker }, provenance);
     }
 
-    [Fact]
-    public async Task AnUnclosedCandleNeverProducesATrade()
+    private static ExperimentCandleSeriesResult AvailableSeries()
     {
-        var repository = new InMemoryExperimentWorkerRepository();
-        var worker = await RunningWorkerAsync(repository);
-
-        var runner = Runner(Candle(isClosed: false), new FixedStrategy(SignalDirection.Buy), repository);
-        await runner.RunOnceAsync(worker, CancellationToken.None);
-
-        Assert.Equal(0m, worker.PositionQuantity);
-        Assert.Empty(worker.Ledger);
-        Assert.Equal(10_000m, worker.CashBalance);
-    }
-
-    [Fact]
-    public async Task NoMarketDataLeavesTheWorkerIdleRatherThanFaulted()
-    {
-        var repository = new InMemoryExperimentWorkerRepository();
-        var worker = await RunningWorkerAsync(repository);
-
-        var runner = Runner(null, strategy: null, repository);
-        await runner.RunOnceAsync(worker, CancellationToken.None);
-
-        Assert.Equal(ExperimentWorkerStatus.Running, worker.Status);
-        Assert.Empty(worker.Ledger);
-    }
-
-    [Fact]
-    public async Task AnUnapprovedStrategyTemplateFaultsTheWorkerInsteadOfTrading()
-    {
-        var repository = new InMemoryExperimentWorkerRepository();
-        var worker = await RunningWorkerAsync(repository);
-
-        var runner = Runner(Candle(), strategy: null, repository);
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => runner.RunOnceAsync(worker, CancellationToken.None));
-
-        Assert.Contains("not approved", ex.Message, StringComparison.Ordinal);
-        Assert.Empty(worker.Ledger);
-    }
-
-    [Fact]
-    public async Task ASellSignalWithNoPositionDoesNotCreateAShortInAPaperExperiment()
-    {
-        var repository = new InMemoryExperimentWorkerRepository();
-        var worker = await RunningWorkerAsync(repository);
-
-        var runner = Runner(Candle(), new FixedStrategy(SignalDirection.Sell), repository);
-
-        // Spot paper experiments cannot go short; the worker refuses rather than inventing one.
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => runner.RunOnceAsync(worker, CancellationToken.None));
-
-        Assert.Equal(0m, worker.PositionQuantity);
+        var candles = Enumerable.Range(0, 3).Select(index =>
+        {
+            var open = Now.AddHours(-3 + index);
+            return new Candle("BTC/USD", CandleInterval.OneHour, open, open.AddHours(1), 100m + index, 101m + index, 99m + index, 101m + index, 1m, true, false);
+        }).ToArray();
+        return ExperimentCandleSeriesResult.Available(new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, Now, candles));
     }
 }

@@ -10,4 +10,11 @@
     <ProjectReference Include="..\Trading.Domain\Trading.Domain.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trading.Indicators\Trading.Indicators.csproj" />
+  </ItemGroup>
 </Project>

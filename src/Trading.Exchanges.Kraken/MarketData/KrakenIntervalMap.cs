@@ -9,9 +9,10 @@ namespace Trading.Exchanges.Kraken.MarketData;
 /// </summary>
 /// <remarks>
 /// Kraken accepts 1, 5, 15, 30, 60, 240, 1440, 10080 and 21600 minutes. It has
-/// no ten-minute candle, so <see cref="CandleInterval.TenMinutes"/> is refused
-/// rather than quietly answered with the nearest size. A ten-minute bar is
-/// built from ten closed one-minute bars and marked as derived.
+/// no ten-minute or four-day candle, so <see cref="CandleInterval.TenMinutes"/>
+/// and <see cref="CandleInterval.FourDays"/> are refused rather than quietly
+/// answered with the nearest size. Derived bars are built locally from their
+/// explicitly required closed constituents and marked as derived.
 /// </remarks>
 internal static class KrakenIntervalMap
 {
@@ -27,6 +28,7 @@ internal static class KrakenIntervalMap
         CandleInterval.FourHours => 240,
         CandleInterval.OneDay => 1440,
         CandleInterval.TenMinutes => throw new MarketDataIntervalNotSupportedException(interval, VenueName),
+        CandleInterval.FourDays => throw new MarketDataIntervalNotSupportedException(interval, VenueName),
         CandleInterval.None => throw new ArgumentOutOfRangeException(nameof(interval), "An interval is required."),
         _ => throw new ArgumentOutOfRangeException(nameof(interval), interval, "Unknown interval."),
     };

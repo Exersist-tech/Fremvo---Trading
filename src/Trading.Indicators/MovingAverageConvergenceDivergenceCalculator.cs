@@ -1,32 +1,26 @@
+using Trading.MarketData;
+
 namespace Trading.Indicators;
 
-public sealed class MovingAverageConvergenceDivergenceCalculator : IIndicatorCalculator
+public readonly record struct MacdValue(decimal Line, decimal Signal, decimal Histogram);
+
+/// <summary>MACD uses SMA-seeded EMAs; its signal line is an SMA-seeded EMA of completed MACD lines.</summary>
+public sealed class MovingAverageConvergenceDivergenceCalculator
 {
     public MovingAverageConvergenceDivergenceCalculator(int fastPeriod, int slowPeriod, int signalPeriod)
     {
-        if (fastPeriod <= 0 || slowPeriod <= 0 || signalPeriod <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(fastPeriod), "Indicator periods must be positive.");
-        }
-
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fastPeriod);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(slowPeriod);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(signalPeriod);
         if (fastPeriod >= slowPeriod)
         {
-            throw new ArgumentOutOfRangeException(nameof(slowPeriod), "The slow period must be greater than the fast period.");
+            throw new ArgumentOutOfRangeException(nameof(slowPeriod), "Slow period must be greater than fast period.");
         }
 
         FastPeriod = fastPeriod;
         SlowPeriod = slowPeriod;
         SignalPeriod = signalPeriod;
-        Definition = new IndicatorDefinition(
-            "MACD",
-            "MACD histogram using fast, slow, and signal moving averages.",
-            "Close prices",
-            "Difference between short and long EMAs, less the signal line.");
     }
-
-    public string Name => "MACD";
-
-    public IndicatorDefinition Definition { get; }
 
     public int FastPeriod { get; }
 
@@ -34,22 +28,27 @@ public sealed class MovingAverageConvergenceDivergenceCalculator : IIndicatorCal
 
     public int SignalPeriod { get; }
 
-    public decimal Calculate(IReadOnlyList<decimal> values)
+    public IndicatorResult<MacdValue> Calculate(IReadOnlyList<Candle> candles)
     {
-        ArgumentNullException.ThrowIfNull(values);
-
-        if (values.Count < SlowPeriod)
+        ClosedCandleSeries.Validate(candles);
+        var required = SlowPeriod + SignalPeriod - 1;
+        if (candles.Count < required)
         {
-            throw new InvalidOperationException("Insufficient values for the requested MACD window.");
+            return IndicatorResults.InsufficientHistory<MacdValue>(required, candles.Count);
         }
 
-        var fastEma = new ExponentialMovingAverageCalculator(FastPeriod);
-        var slowEma = new ExponentialMovingAverageCalculator(SlowPeriod);
+        var closes = candles.Select(candle => candle.Close).ToArray();
+        var lines = new decimal[candles.Count - SlowPeriod + 1];
+        for (var closeIndex = SlowPeriod - 1; closeIndex < closes.Length; closeIndex++)
+        {
+            var prefix = closes.Take(closeIndex + 1).ToArray();
+            lines[closeIndex - SlowPeriod + 1] =
+                ExponentialMovingAverageCalculator.CalculateSeeded(prefix, FastPeriod)
+                - ExponentialMovingAverageCalculator.CalculateSeeded(prefix, SlowPeriod);
+        }
 
-        var macd = fastEma.Calculate(values) - slowEma.Calculate(values);
-        var signalEma = new ExponentialMovingAverageCalculator(SignalPeriod);
-        var signal = signalEma.Calculate(values.TakeLast(Math.Min(values.Count, SignalPeriod)).ToArray());
-
-        return macd - signal;
+        var line = lines[^1];
+        var signal = ExponentialMovingAverageCalculator.CalculateSeeded(lines, SignalPeriod);
+        return IndicatorResults.Ready(new MacdValue(line, signal, line - signal), required, candles.Count);
     }
 }

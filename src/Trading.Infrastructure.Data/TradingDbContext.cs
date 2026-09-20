@@ -4,7 +4,11 @@ using Trading.Domain.Execution;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Domain.Users;
+using Trading.Infrastructure.Data.Backtesting;
 using Trading.Exchanges.Abstractions;
+using Trading.Infrastructure.Data.MarketData;
+using Trading.Infrastructure.Data.Scanner;
+using Trading.Infrastructure.Data.Experiments;
 
 namespace Trading.Infrastructure.Data;
 
@@ -28,6 +32,21 @@ public sealed class TradingDbContext : DbContext
     public DbSet<Position> Positions => Set<Position>();
 
     public DbSet<OrderReconciliationRecord> OrderReconciliations => Set<OrderReconciliationRecord>();
+
+    public DbSet<PersistedCandle> Candles => Set<PersistedCandle>();
+
+    public DbSet<PersistedScanRequest> ScanRequests => Set<PersistedScanRequest>();
+
+    public DbSet<PersistedScanResult> ScanResults => Set<PersistedScanResult>();
+
+    public DbSet<PersistedHistoricalDataset> HistoricalDatasets => Set<PersistedHistoricalDataset>();
+    public DbSet<PersistedExperimentDecisionRecord> ExperimentDecisionRecords => Set<PersistedExperimentDecisionRecord>();
+    public DbSet<PersistedExperimentPaperExecutionAssociation> ExperimentPaperExecutionAssociations => Set<PersistedExperimentPaperExecutionAssociation>();
+    public DbSet<PersistedExperimentPaperPlanEvidence> ExperimentPaperPlanEvidence => Set<PersistedExperimentPaperPlanEvidence>();
+    public DbSet<PersistedExperimentResultSnapshot> ExperimentResultSnapshots => Set<PersistedExperimentResultSnapshot>();
+    public DbSet<PersistedPaperTrainingActivation> PaperTrainingActivations => Set<PersistedPaperTrainingActivation>();
+    public DbSet<PersistedExperimentWorker> ExperimentWorkers => Set<PersistedExperimentWorker>();
+    public DbSet<PersistedPaperTradingLedgerEntry> PaperTradingLedgerEntries => Set<PersistedPaperTradingLedgerEntry>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -158,6 +177,48 @@ public sealed class TradingDbContext : DbContext
             entity.HasIndex(auditEvent => auditEvent.CorrelationId);
         });
 
+        modelBuilder.Entity<PersistedPaperTrainingActivation>(entity =>
+        {
+            entity.ToTable("PaperTrainingActivations");
+            entity.HasKey(value => value.OwnerUserId);
+            entity.Property(value => value.State).IsRequired();
+            entity.Property(value => value.SlotCount).IsRequired();
+            entity.Property(value => value.ChangedAtUtc).IsRequired();
+            entity.Property(value => value.ChangedBy).IsRequired();
+            entity.Property(value => value.RowVersion).IsRowVersion();
+        });
+
+        modelBuilder.Entity<PersistedExperimentWorker>(entity =>
+        {
+            entity.ToTable("ExperimentWorkers");
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Name).HasMaxLength(200).IsRequired();
+            entity.Property(value => value.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(value => value.MarketSymbol).HasMaxLength(64).IsRequired();
+            entity.Property(value => value.StrategyParameters).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(value => value.FailureReason).HasMaxLength(512);
+            entity.Property(value => value.StartingCash).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxTotalPurchasedQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxTotalPurchasedNotional).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxPositionQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxPositionNotional).HasColumnType(MoneyColumnType);
+            entity.HasIndex(value => new { value.UserId, value.Id }).IsUnique();
+            entity.HasIndex(value => new { value.UserId, value.Status });
+            entity.HasMany(value => value.LedgerEntries).WithOne().HasForeignKey(value => value.WorkerId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PersistedPaperTradingLedgerEntry>(entity =>
+        {
+            entity.ToTable("ExperimentPaperTradingLedgerEntries");
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(value => value.Direction).HasMaxLength(8).IsRequired();
+            entity.Property(value => value.Quantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.ExecutionPrice).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.Fee).HasColumnType(MoneyColumnType);
+            entity.HasIndex(value => new { value.UserId, value.WorkerId, value.OccurredAtUtc, value.Id });
+        });
+
         modelBuilder.Entity<ExchangeAccount>(entity =>
         {
             entity.ToTable("ExchangeAccounts");
@@ -206,6 +267,69 @@ public sealed class TradingDbContext : DbContext
                 .IsUnique(false);
         });
 
+        modelBuilder.Entity<PersistedExperimentDecisionRecord>(entity =>
+        {
+            entity.ToTable("ExperimentDecisionRecords");
+            entity.HasKey(x => new { x.UserId, x.WorkerId, x.GroupConfigurationVersion, x.Group, x.StrategyId, x.StrategyVersion,
+                x.StrategyFingerprint, x.Symbol, x.Interval, x.OpenTimeUtc, x.CloseTimeUtc, x.AsOfUtc });
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.StrategyFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Reason).HasMaxLength(512).IsRequired();
+            entity.Property(x => x.EvidenceFingerprint).HasMaxLength(1024).IsRequired();
+            entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
+        });
+
+        modelBuilder.Entity<PersistedExperimentPaperExecutionAssociation>(entity =>
+        {
+            entity.ToTable("ExperimentPaperExecutionAssociations");
+            entity.HasKey(x => new { x.UserId, x.WorkerId, x.GroupConfigurationVersion, x.Group, x.StrategyId, x.StrategyVersion,
+                x.StrategyFingerprint, x.Symbol, x.Interval, x.OpenTimeUtc, x.CloseTimeUtc, x.AsOfUtc });
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.StrategyFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.CorrelationId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.Detail).HasMaxLength(1024).IsRequired(false);
+            entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
+        });
+
+        modelBuilder.Entity<PersistedExperimentPaperPlanEvidence>(entity =>
+        {
+            entity.ToTable("ExperimentPaperPlanEvidence");
+            entity.HasKey(x => new { x.UserId, x.WorkerId, x.GroupConfigurationVersion, x.Group, x.StrategyId, x.StrategyVersion,
+                x.StrategyFingerprint, x.Symbol, x.Interval, x.OpenTimeUtc, x.CloseTimeUtc, x.AsOfUtc });
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.StrategyFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.ProtectiveStopPrice).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.ConservativeTargetPrice).HasColumnType(MoneyColumnType);
+            entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
+        });
+
+        modelBuilder.Entity<PersistedExperimentResultSnapshot>(entity =>
+        {
+            entity.ToTable("ExperimentResultSnapshots");
+            entity.HasKey(x => new { x.OwnerUserId, x.SnapshotKey });
+            entity.Property(x => x.SnapshotKey).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.Group).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.ParametersFingerprint).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.DatasetFingerprint).HasMaxLength(256).IsRequired();
+            entity.Property(x => x.ClassifierVersion).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.GateEvidenceFingerprint).HasMaxLength(1024).IsRequired();
+            entity.Property(x => x.ReproducibilityIdentity).HasMaxLength(512).IsRequired();
+            entity.Property(x => x.Equity).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Cash).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.PositionQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.RealizedProfitAndLoss).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.UnrealizedProfitAndLoss).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.MaximumDrawdown).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Fees).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Slippage).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.Exposure).HasColumnType(MoneyColumnType);
+            entity.HasIndex(x => new { x.OwnerUserId, x.EvaluatedAtUtc });
+        });
+
         modelBuilder.Entity<Order>(entity =>
         {
             entity.ToTable("Orders");
@@ -235,7 +359,7 @@ public sealed class TradingDbContext : DbContext
             entity.Property(order => order.LastTransitionAtUtc).IsRequired(false);
 
             entity.Property(order => order.ClientOrderId)
-                .HasMaxLength(64)
+                .HasMaxLength(Order.MaximumClientOrderIdLength)
                 .IsRequired();
 
             // Durable duplicate-order protection. An in-memory idempotency
@@ -327,6 +451,124 @@ public sealed class TradingDbContext : DbContext
             entity.HasIndex(record => record.ResolvedAtUtc);
         });
 
+        modelBuilder.Entity<PersistedCandle>(entity =>
+        {
+            entity.ToTable("Candles");
+            entity.HasKey(candle => new { candle.Symbol, candle.Interval, candle.OpenTimeUtc });
+
+            entity.Property(candle => candle.Symbol)
+                .HasMaxLength(32)
+                .IsRequired();
+
+            entity.Property(candle => candle.Interval)
+                .HasConversion<int>()
+                .IsRequired();
+
+            entity.Property(candle => candle.OpenTimeUtc).IsRequired();
+            entity.Property(candle => candle.CloseTimeUtc).IsRequired();
+            entity.Property(candle => candle.Open).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.High).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Low).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Close).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Volume).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.IsClosed).IsRequired();
+            entity.Property(candle => candle.IsDerived).IsRequired();
+            entity.Property(candle => candle.QualityFlags).HasColumnType("nvarchar(max)").IsRequired();
+
+            entity.HasIndex(candle => new { candle.Symbol, candle.Interval, candle.CloseTimeUtc, candle.OpenTimeUtc });
+        });
+
+        modelBuilder.Entity<PersistedScanRequest>(entity =>
+        {
+            entity.ToTable("ScanRequests");
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.OwnerId).IsRequired();
+            entity.Property(request => request.Name).HasMaxLength(200).IsRequired();
+            entity.Property(request => request.Symbols).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(request => request.Interval).HasConversion<int>().IsRequired();
+            entity.Property(request => request.Criteria).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(request => request.ResultLimit).IsRequired();
+            entity.Property(request => request.CreatedAtUtc).IsRequired();
+            entity.HasIndex(request => new { request.OwnerId, request.CreatedAtUtc, request.Id });
+        });
+
+        modelBuilder.Entity<PersistedScanResult>(entity =>
+        {
+            entity.ToTable("ScanResults");
+            // This identity is the durable idempotency boundary for a scan
+            // run: duplicate evidence is harmless, conflicting evidence is not
+            // silently allowed to replace the original observation.
+            entity.HasKey(result => new { result.ScanRequestId, result.ScanRunId, result.Symbol });
+            entity.Property(result => result.OwnerId).IsRequired();
+            entity.Property(result => result.Symbol).HasMaxLength(32).IsRequired();
+            entity.Property(result => result.Rank).IsRequired();
+            entity.Property(result => result.Score).HasColumnType("decimal(18,12)").IsRequired();
+            entity.Property(result => result.MatchedCriteria).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(result => result.EvidenceAsOfUtc).IsRequired();
+            entity.Property(result => result.EvaluatedAtUtc).IsRequired();
+            entity.HasIndex(result => new
+            {
+                result.OwnerId,
+                result.ScanRequestId,
+                result.ScanRunId,
+                result.Rank,
+                result.Score,
+                result.Symbol
+            });
+
+            modelBuilder.Entity<PersistedHistoricalDataset>(entity =>
+            {
+                entity.ToTable("HistoricalDatasets");
+                entity.HasKey(dataset => dataset.VersionIdentity);
+                entity.Property(dataset => dataset.VersionIdentity).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.Id).HasMaxLength(128).IsRequired();
+                entity.HasIndex(dataset => dataset.Id).IsUnique();
+                entity.Property(dataset => dataset.Source).HasMaxLength(128).IsRequired();
+                entity.Property(dataset => dataset.Symbol).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.Interval).HasMaxLength(8).IsRequired();
+                entity.Property(dataset => dataset.FromUtc).IsRequired();
+                entity.Property(dataset => dataset.ToUtc).IsRequired();
+                entity.Property(dataset => dataset.CandleCount).IsRequired();
+                entity.Property(dataset => dataset.ContentFingerprint).HasMaxLength(64).IsRequired();
+                entity.Property(dataset => dataset.SourceVersion).HasMaxLength(128).IsRequired();
+                entity.Property(dataset => dataset.CreatedAtUtc).IsRequired();
+                entity.Property(dataset => dataset.ContainsOnlyClosedCandles).IsRequired();
+                entity.HasIndex(dataset => new
+                {
+                    dataset.Symbol,
+                    dataset.Interval,
+                    dataset.FromUtc,
+                    dataset.ToUtc,
+                    dataset.CreatedAtUtc,
+                    dataset.VersionIdentity
+                });
+            });
+        });
+
         base.OnModelCreating(modelBuilder);
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        RejectHistoricalDatasetChanges();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        RejectHistoricalDatasetChanges();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void RejectHistoricalDatasetChanges()
+    {
+        ChangeTracker.DetectChanges();
+        if (ChangeTracker.Entries<PersistedHistoricalDataset>()
+            .Any(entry => entry.State is EntityState.Modified or EntityState.Deleted))
+        {
+            throw new InvalidOperationException("Historical dataset manifests are immutable and cannot be changed or deleted.");
+        }
     }
 }

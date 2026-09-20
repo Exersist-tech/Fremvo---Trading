@@ -18,6 +18,17 @@ public interface IPipelineStrategy
 }
 
 /// <summary>
+/// Optional platform-owned intent details. This is deliberately an internal pipeline extension:
+/// callers still cannot bypass the risk or execution stages.
+/// </summary>
+public interface IPipelineIntentDetailsStrategy
+{
+    PipelineIntentDetails GetIntentDetails(MarketEvent marketEvent, StrategyDecision decision);
+}
+
+public sealed record PipelineIntentDetails(decimal Quantity, bool ReduceOnly = false, bool CloseOnly = false);
+
+/// <summary>
 /// Portfolio state supplied to the risk gate before exposure may be increased.
 /// </summary>
 public sealed class PortfolioSnapshot
@@ -73,6 +84,13 @@ public sealed class TradePipelineOptions
 
     public decimal MaxNotional { get; init; } = 1_000m;
 
+    /// <summary>
+    /// Mandatory immutable platform ceilings. Null means risk policy is
+    /// unavailable and the pipeline fails closed.
+    /// </summary>
+    public RiskLimitHierarchy? PlatformRiskLimits { get; init; } =
+        new(platformMaxExposure: 1_000m, platformMaxPositionSize: 100m);
+
     public TimeSpan MaxDataAge { get; init; } = TimeSpan.FromMinutes(5);
 
     public decimal OrderQuantity { get; init; } = 1m;
@@ -85,13 +103,15 @@ public sealed class TradePipelineResult
         bool executed,
         string? blockedReason,
         PortfolioUpdate? portfolioUpdate,
-        bool requiresReconciliation)
+        bool requiresReconciliation,
+        Guid? executionCommandId = null)
     {
         ReachedStage = reachedStage;
         Executed = executed;
         BlockedReason = blockedReason;
         PortfolioUpdate = portfolioUpdate;
         RequiresReconciliation = requiresReconciliation;
+        ExecutionCommandId = executionCommandId;
     }
 
     /// <summary>The last stage the trade reached before stopping.</summary>
@@ -109,15 +129,16 @@ public sealed class TradePipelineResult
     /// resubmission; it must never be blindly retried.
     /// </summary>
     public bool RequiresReconciliation { get; }
+    public Guid? ExecutionCommandId { get; }
 
     internal static TradePipelineResult Blocked(PipelineStage stage, string reason) =>
         new(stage, false, reason, null, false);
 
-    internal static TradePipelineResult NeedsReconciliation(string reason) =>
-        new(PipelineStage.Reconciliation, false, reason, null, true);
+    internal static TradePipelineResult NeedsReconciliation(string reason, Guid executionCommandId) =>
+        new(PipelineStage.Reconciliation, false, reason, null, true, executionCommandId);
 
-    internal static TradePipelineResult Completed(PortfolioUpdate update) =>
-        new(PipelineStage.AuditEvent, true, null, update, false);
+    internal static TradePipelineResult Completed(PortfolioUpdate update, Guid executionCommandId) =>
+        new(PipelineStage.AuditEvent, true, null, update, false, executionCommandId);
 }
 
 /// <summary>
@@ -141,6 +162,7 @@ public sealed class TradePipeline
     private readonly OrderIdempotencyGuard _idempotencyGuard;
     private readonly IOrderReconciliationRepository? _reconciliations;
     private readonly TradePipelineOptions _options;
+    private readonly TimeProvider _timeProvider;
 
     public TradePipeline(
         IMarketEventRepository marketEvents,
@@ -154,7 +176,8 @@ public sealed class TradePipeline
         ITradingHaltState haltState,
         OrderIdempotencyGuard idempotencyGuard,
         TradePipelineOptions? options = null,
-        IOrderReconciliationRepository? reconciliations = null)
+        IOrderReconciliationRepository? reconciliations = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(marketEvents);
         ArgumentNullException.ThrowIfNull(decisions);
@@ -179,6 +202,7 @@ public sealed class TradePipeline
         _idempotencyGuard = idempotencyGuard;
         _reconciliations = reconciliations;
         _options = options ?? new TradePipelineOptions();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<TradePipelineResult> ProcessAsync(
@@ -195,7 +219,7 @@ public sealed class TradePipeline
         ArgumentNullException.ThrowIfNull(portfolio);
         ArgumentNullException.ThrowIfNull(executionAdapter);
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
 
         await _marketEvents.AddAsync(
             new PipelineRecord<MarketEvent>(Guid.NewGuid(), context, PipelineStage.MarketEvent, marketEvent, now),
@@ -238,14 +262,19 @@ public sealed class TradePipeline
             cancellationToken).ConfigureAwait(false);
 
         var direction = decision.Direction == SignalDirection.Buy ? TradeDirection.Buy : TradeDirection.Sell;
+        var details = strategy is IPipelineIntentDetailsStrategy detailedStrategy
+            ? detailedStrategy.GetIntentDetails(marketEvent, decision)
+            : new PipelineIntentDetails(_options.OrderQuantity);
         var intent = new TradeIntent(
             Guid.NewGuid(),
             strategy.StrategyId,
             marketEvent.Symbol,
             direction,
-            _options.OrderQuantity,
+            details.Quantity,
             marketEvent.LastPrice,
-            now);
+            now,
+            details.ReduceOnly,
+            details.CloseOnly);
 
         await _intents.AddAsync(
             new PipelineRecord<TradeIntent>(Guid.NewGuid(), context, PipelineStage.TradeIntent, intent, now),
@@ -267,30 +296,39 @@ public sealed class TradePipeline
         var idempotency = _idempotencyGuard.RegisterOrCheck(
             clientOrderId, intent.Symbol, intent.Quantity, intent.LimitPrice);
 
-        // A sell that does not shrink the position is an increase in exposure.
+        // Only a sell no larger than the current long position is a safety
+        // reduction. A larger sell can cross through zero and open a short,
+        // so it must retain every new-exposure control, including freshness.
         var reducesExposure = intent.Direction == TradeDirection.Sell
-            && portfolio.PositionQuantity > 0m;
+            && portfolio.PositionQuantity >= intent.Quantity;
 
-        var riskResult = _riskEngine.Evaluate(
-            proposedExposure: proposedExposure,
-            currentExposure: portfolio.CurrentExposure,
-            dailyPnL: portfolio.DailyPnL,
-            openOrders: portfolio.OpenOrders,
-            openPositions: portfolio.OpenPositions,
-            maxPositionSize: _options.MaxPositionSize,
-            maxNotional: _options.MaxNotional,
-            dataIsStale: false,
-            accountIsHalted: flags.AccountHalted,
-            strategyIsHalted: flags.StrategyHalted,
-            closeOnlyMode: flags.CloseOnlyMode && !reducesExposure,
-            reduceOnlyMode: flags.ReduceOnlyMode && !reducesExposure,
-            duplicateOrderDetected: idempotency.IsDuplicate,
-            orderIdempotencyConflict: idempotency.IsConflict,
-            marketHalt: flags.MarketHalt,
-            emergencyStop: flags.EmergencyStop,
-            stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
-            lastDataUpdateUtc: portfolio.LastUpdatedUtc,
-            nowUtc: now);
+        var riskLimits = BuildEffectiveRiskLimits(_options.PlatformRiskLimits);
+        var riskResult = riskLimits is null
+            ? new RiskEvaluationResult(false, "Mandatory platform risk limits are unavailable.")
+            : _riskEngine.Evaluate(
+                proposedExposure: proposedExposure,
+                currentExposure: portfolio.CurrentExposure,
+                dailyPnL: portfolio.DailyPnL,
+                openOrders: portfolio.OpenOrders,
+                openPositions: portfolio.OpenPositions,
+                maxPositionSize: riskLimits.EffectiveMaxPositionSize,
+                maxNotional: riskLimits.EffectiveMaxExposure,
+                dataIsStale: false,
+                accountIsHalted: flags.AccountHalted,
+                strategyIsHalted: flags.StrategyHalted,
+                closeOnlyMode: flags.CloseOnlyMode && !reducesExposure,
+                reduceOnlyMode: flags.ReduceOnlyMode && !reducesExposure,
+                duplicateOrderDetected: idempotency.IsDuplicate,
+                orderIdempotencyConflict: idempotency.IsConflict,
+                marketHalt: flags.MarketHalt,
+                emergencyStop: flags.EmergencyStop,
+                stalenessPolicy: new StalenessPolicy(_options.MaxDataAge),
+                riskLimitHierarchy: riskLimits,
+                nowUtc: now,
+                proposedQuantity: intent.Quantity,
+                exposureIsIncreasing: !reducesExposure,
+                lastMarketDataUpdateUtc: marketEvent.EventTimeUtc,
+                lastAccountDataUpdateUtc: portfolio.LastUpdatedUtc);
 
         var riskEvaluation = new RiskEvaluation(
             Guid.NewGuid(),
@@ -358,7 +396,7 @@ public sealed class TradePipeline
                 UnknownReason,
                 cancellationToken).ConfigureAwait(false);
 
-            return TradePipelineResult.NeedsReconciliation(UnknownReason);
+            return TradePipelineResult.NeedsReconciliation(UnknownReason, command.Id);
         }
 
         if (!execution.Success)
@@ -409,7 +447,7 @@ public sealed class TradePipeline
             $"Filled {execution.FilledQuantity} {command.Symbol} at {execution.AverageFillPrice}.",
             cancellationToken).ConfigureAwait(false);
 
-        return TradePipelineResult.Completed(portfolioUpdate);
+        return TradePipelineResult.Completed(portfolioUpdate, command.Id);
     }
 
     private static bool IsUnknownOutcome(ExecutionResult execution) =>
@@ -417,6 +455,27 @@ public sealed class TradePipeline
 
     private static string BuildClientOrderId(PipelineContext context, TradeIntent intent) =>
         $"{(context.Mode == TradingMode.Paper ? "paper" : "live")}-{intent.Id:N}";
+
+    private RiskLimitHierarchy? BuildEffectiveRiskLimits(RiskLimitHierarchy? platformLimits)
+    {
+        if (platformLimits is null)
+        {
+            return null;
+        }
+
+        return new RiskLimitHierarchy(
+            platformLimits.PlatformMaxExposure,
+            platformLimits.PlatformMaxPositionSize,
+            accountMaxExposure: MoreRestrictive(platformLimits.AccountMaxExposure, _options.MaxNotional),
+            accountMaxPositionSize: MoreRestrictive(platformLimits.AccountMaxPositionSize, _options.MaxPositionSize),
+            userMaxExposure: platformLimits.UserMaxExposure,
+            userMaxPositionSize: platformLimits.UserMaxPositionSize,
+            strategyMaxExposure: platformLimits.StrategyMaxExposure,
+            strategyMaxPositionSize: platformLimits.StrategyMaxPositionSize);
+    }
+
+    private static decimal? MoreRestrictive(decimal? first, decimal second) =>
+        first.HasValue ? Math.Min(first.Value, second) : second;
 
     private async Task<TradePipelineResult> BlockAsync(
         PipelineContext context,
@@ -443,7 +502,7 @@ public sealed class TradePipeline
             action,
             nameof(TradePipeline),
             targetId,
-            DateTimeOffset.UtcNow,
+            _timeProvider.GetUtcNow(),
             null,
             detail,
             context.CorrelationId);

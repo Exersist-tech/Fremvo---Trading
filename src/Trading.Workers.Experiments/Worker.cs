@@ -25,6 +25,8 @@ public sealed class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly ExperimentWorkerPool _pool;
     private readonly IExperimentWorkerRunner _runner;
+    private readonly IExperimentResearchGroupConfigurationSource _configurationSource;
+    private readonly IPaperTrainingActivationSource _activationSource;
     private readonly ExperimentHostOptions _options;
     private readonly TimeProvider _timeProvider;
 
@@ -32,6 +34,8 @@ public sealed class Worker : BackgroundService
         ILogger<Worker> logger,
         ExperimentWorkerPool pool,
         IExperimentWorkerRunner runner,
+        IExperimentResearchGroupConfigurationSource configurationSource,
+        IPaperTrainingActivationSource activationSource,
         IOptions<ExperimentHostOptions> options,
         TimeProvider timeProvider)
     {
@@ -40,6 +44,8 @@ public sealed class Worker : BackgroundService
         _logger = logger;
         _pool = pool;
         _runner = runner;
+        _configurationSource = configurationSource;
+        _activationSource = activationSource;
         _options = options.Value;
         _timeProvider = timeProvider;
     }
@@ -66,13 +72,15 @@ public sealed class Worker : BackgroundService
         var completed = 0;
         var faulted = 0;
 
-        foreach (var userId in _options.EnabledUserIds)
+        var activeOwners = await _activationSource.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var userId in _options.EnabledUserIds.Intersect(activeOwners))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             try
             {
-                var result = await _pool.RunAllAsync(userId, _runner, cancellationToken).ConfigureAwait(false);
+                var configuration = await _configurationSource.GetAsync(userId, cancellationToken).ConfigureAwait(false);
+                var result = await _pool.RunConfiguredAsync(userId, configuration, _runner, cancellationToken).ConfigureAwait(false);
                 completed += result.CompletedCount;
                 faulted += result.FaultedCount;
             }

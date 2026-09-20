@@ -22,21 +22,31 @@ public sealed class FeeSlippageFilterTests
         var model = new SlippageModel(0.05m, 0.0005m);
         var slippage = model.ComputeSlippage(100m, 2m);
 
-        Assert.Equal(0.05m + 0.10m, slippage);
+        Assert.Equal(0.20m, slippage);
     }
 
     [Fact]
-    public void ExchangeFilterRejectsOrdersNotMeetingClockAndQuantityRules()
+    public void SlippageModelMovesBuyUpAndSellDownUsingDecimals()
+    {
+        var model = new SlippageModel(0.005m, 0.001m);
+
+        Assert.Equal(10.015m, model.GetExecutionPrice(10m, isBuy: true));
+        Assert.Equal(9.985m, model.GetExecutionPrice(10m, isBuy: false));
+    }
+
+    [Fact]
+    public void ExchangeFilterRejectsOrdersNotMeetingTickQuantityAndNotionalRules()
     {
         var filter = new ExchangeFilter(
             minNotional: 10m,
             minQty: 0.1m,
             tickSize: 0.01m,
-            stepSize: 0.05m,
-            allowPartialFills: true);
+            stepSize: 0.05m);
 
         Assert.True(filter.IsOrderAllowed(1.00m, 11.00m));
         Assert.False(filter.IsOrderAllowed(0.03m, 11.00m));
         Assert.False(filter.IsOrderAllowed(1.00m, 10.975m));
+        Assert.False(filter.IsOrderAllowed(0.10m, 11.00m));
+        Assert.False(filter.IsOrderAllowed(1.03m, 11.00m));
     }
 }
