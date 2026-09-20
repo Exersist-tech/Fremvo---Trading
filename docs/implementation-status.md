@@ -74,7 +74,7 @@ See `docs/market-universe.md`. All 50 seed pairs are `Tracked` only; none is liv
 ## Phase 4 — Automatic market scanner
 | Task | Status | Notes |
 |---|---|---|
-| 4.1 ScanCriterion/ScanRequest/ScanResult domain | Not started | |
+| 4.1 ScanCriterion/ScanRequest/ScanResult domain | Done | 2026-09-20 — Added pure, immutable owner-scoped scan requests, platform-defined threshold criteria, and informational results that explicitly are not recommendations. EF maps `ScanRequests` and `ScanResults` with explicit `decimal(18,12)` score precision, UTC timestamps, owner/query indexes, and a composite (`ScanRequestId`, `ScanRunId`, `Symbol`) result identity that returns exact duplicates idempotently but rejects conflicting evidence. No EF migrations exist in this repository, so no migration artifact was added and no external database change was run. Release build and 699 architecture tests pass, including domain invariants, isolation, stable bounded ordering, cancellation, purity, and duplicate/conflict coverage. No evaluator, scheduled scanner worker, UI, strategy, order, exchange credential, live, or paper-trading behavior was introduced. |
 | 4.2 Criteria evaluation engine | Not started | |
 | 4.3 Scanner worker scheduling | Not started | |
 | 4.4 Blazor scanner results UI | Not started | |

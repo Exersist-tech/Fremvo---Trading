@@ -6,6 +6,7 @@ using Trading.Domain.Positions;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
 using Trading.Infrastructure.Data.MarketData;
+using Trading.Infrastructure.Data.Scanner;
 
 namespace Trading.Infrastructure.Data;
 
@@ -31,6 +32,10 @@ public sealed class TradingDbContext : DbContext
     public DbSet<OrderReconciliationRecord> OrderReconciliations => Set<OrderReconciliationRecord>();
 
     public DbSet<PersistedCandle> Candles => Set<PersistedCandle>();
+
+    public DbSet<PersistedScanRequest> ScanRequests => Set<PersistedScanRequest>();
+
+    public DbSet<PersistedScanResult> ScanResults => Set<PersistedScanResult>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -355,6 +360,45 @@ public sealed class TradingDbContext : DbContext
             entity.Property(candle => candle.QualityFlags).HasColumnType("nvarchar(max)").IsRequired();
 
             entity.HasIndex(candle => new { candle.Symbol, candle.Interval, candle.CloseTimeUtc, candle.OpenTimeUtc });
+        });
+
+        modelBuilder.Entity<PersistedScanRequest>(entity =>
+        {
+            entity.ToTable("ScanRequests");
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.OwnerId).IsRequired();
+            entity.Property(request => request.Name).HasMaxLength(200).IsRequired();
+            entity.Property(request => request.Symbols).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(request => request.Interval).HasConversion<int>().IsRequired();
+            entity.Property(request => request.Criteria).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(request => request.ResultLimit).IsRequired();
+            entity.Property(request => request.CreatedAtUtc).IsRequired();
+            entity.HasIndex(request => new { request.OwnerId, request.CreatedAtUtc, request.Id });
+        });
+
+        modelBuilder.Entity<PersistedScanResult>(entity =>
+        {
+            entity.ToTable("ScanResults");
+            // This identity is the durable idempotency boundary for a scan
+            // run: duplicate evidence is harmless, conflicting evidence is not
+            // silently allowed to replace the original observation.
+            entity.HasKey(result => new { result.ScanRequestId, result.ScanRunId, result.Symbol });
+            entity.Property(result => result.OwnerId).IsRequired();
+            entity.Property(result => result.Symbol).HasMaxLength(32).IsRequired();
+            entity.Property(result => result.Rank).IsRequired();
+            entity.Property(result => result.Score).HasColumnType("decimal(18,12)").IsRequired();
+            entity.Property(result => result.MatchedCriteria).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(result => result.EvidenceAsOfUtc).IsRequired();
+            entity.Property(result => result.EvaluatedAtUtc).IsRequired();
+            entity.HasIndex(result => new
+            {
+                result.OwnerId,
+                result.ScanRequestId,
+                result.ScanRunId,
+                result.Rank,
+                result.Score,
+                result.Symbol
+            });
         });
 
         base.OnModelCreating(modelBuilder);
