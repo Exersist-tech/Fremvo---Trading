@@ -12,6 +12,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Trading.ArchitectureTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The probe's internals are asserted directly by the architecture tests,
          in particular that the trade-permission check always carries Kraken's
          validate-only flag so it can never place a real order. -->

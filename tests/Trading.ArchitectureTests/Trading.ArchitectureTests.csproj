@@ -31,6 +31,7 @@
     <ProjectReference Include="..\..\src\Trading.Risk\Trading.Risk.csproj" />
     <ProjectReference Include="..\..\src\Trading.Backtesting\Trading.Backtesting.csproj" />
     <ProjectReference Include="..\..\src\Trading.Optimization\Trading.Optimization.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Workers.MarketData\Trading.Workers.MarketData.csproj" />
   </ItemGroup>
 
   <ItemGroup>

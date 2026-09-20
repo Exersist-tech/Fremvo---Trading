@@ -26,6 +26,26 @@ cd src/Trading.Web
 dotnet run --launch-profile https
 ```
 
+## Opt-in public Kraken candle stream
+
+`Trading.Workers.MarketData` is inert by default. To start its public OHLC v2
+stream, configure a database connection named `TradingDb` and explicitly set
+the symbols and native Kraken intervals, for example:
+
+```json
+"MarketDataStreaming": {
+  "Enabled": true,
+  "Symbols": [ "BTC/USD" ],
+  "Intervals": [ "OneMinute", "FiveMinutes" ],
+  "MaximumReconnectDelaySeconds": 30
+}
+```
+
+Run it with `dotnet run --project src/Trading.Workers.MarketData`. This uses
+only Kraken's public WebSocket endpoint; do not configure credentials, API
+keys, or authorization headers. A candle is persisted only after a subsequent
+interval proves it is closed.
+
 ## Opt-in Kraken Live Proving profile
 
 The normal `https` profile cannot send a real order. To exercise the
