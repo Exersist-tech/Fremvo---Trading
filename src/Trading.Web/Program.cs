@@ -11,6 +11,7 @@ using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
+using Trading.Application.UseCases.Portfolio;
 using Trading.Application.Universe;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
@@ -22,8 +23,10 @@ using Trading.Domain.Positions;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Abstractions.Account;
 using Trading.Exchanges.Abstractions.Execution;
 using Trading.Exchanges.Kraken;
+using Trading.Exchanges.Kraken.Account;
 using Trading.Exchanges.Kraken.Execution;
 using Trading.Exchanges.Kraken.MarketData;
 using Trading.Infrastructure.Data;
@@ -91,6 +94,7 @@ builder.Services.AddScoped<IAuditQueryService>(provider =>
 builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
 builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
+builder.Services.AddScoped<IPortfolioQueryService, PortfolioQueryService>();
 
 // Whether this deployment can reach a real venue. Registering an
 // ILiveExecutionRoute is the single act that opens the promotion ladder out of
@@ -146,6 +150,14 @@ builder.Services.AddScoped<LiveOrderSyncService>();
 builder.Services.AddSingleton<IKrakenNonceSource, KrakenNonceSource>();
 
 builder.Services.AddHttpClient<IExchangePermissionProbe, KrakenPermissionProbe>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
+// Portfolio reading uses Kraken's private balance endpoint only. It has no
+// transfer, withdrawal, deposit, or order capability.
+builder.Services.AddHttpClient<IExchangeBalanceGateway, KrakenBalanceGateway>(client =>
 {
     client.BaseAddress = new Uri("https://api.kraken.com");
     client.Timeout = TimeSpan.FromSeconds(20);
@@ -1732,6 +1744,44 @@ app.MapGet("/api/exchange/accounts", async (
 }).RequireAuthorization();
 
 // ---------------------------------------------------------------------------
+// Portfolio balances are a fresh, read-only exchange reading. Secrets are
+// resolved server-side only after account ownership is established by the
+// query service; neither credential nor its storage reference is projected.
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/portfolio", async (
+    ClaimsPrincipal principal,
+    IPortfolioQueryService portfolio,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var readings = await portfolio.ReadAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new
+    {
+        accounts = readings.Select(reading => new
+        {
+            id = reading.AccountId,
+            displayName = reading.DisplayName,
+            exchange = reading.Exchange.ToString(),
+            retrievedAtUtc = reading.RetrievedAtUtc,
+            error = reading.Error,
+            balances = reading.Balances.Select(balance => new
+            {
+                asset = balance.Asset,
+                total = balance.Total,
+                available = balance.Available,
+                held = balance.Held
+            })
+        })
+    });
+}).RequireAuthorization();
+
+// ---------------------------------------------------------------------------
 // Market data (Phase 3.2). Candles are read from the venue's public endpoint,
 // so this route involves no credential and no user-owned exchange account.
 // Every candle reports whether it is closed, because a bar still forming must
@@ -2592,39 +2642,6 @@ app.MapGet("/chart", () => Results.Content(
         <div id="status" class="notice">Loading.</div>
 
         <div class="chart-workspace">
-          <aside class="trade-panel" aria-label="Trade ticket">
-            <h2>Trade</h2>
-
-            <!-- The chart is shared. Only the book and ticket change with the
-                 tab, because the market data is the same in either mode. -->
-            <div class="tabs" role="tablist">
-              <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
-              <button id="modeLive" class="tab" type="button" role="tab">Live</button>
-            </div>
-
-            <div id="modeNotice" class="notice">
-              <strong>Fake funds. No exchange is contacted.</strong>
-              The fill is priced at the close of the last closed candle. It does not model spread,
-              slippage, fees or partial fills, so a paper result is an upper bound on what the
-              same decision would have returned live.
-            </div>
-
-            <div class="toolbar" id="tradeTicket">
-              <label for="tradeSide">Side</label>
-              <select id="tradeSide">
-                <option value="Buy">Buy</option>
-                <option value="Sell">Sell</option>
-              </select>
-
-              <label for="tradeQuantity">Quantity</label>
-              <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
-
-              <button id="submitTrade" type="button">Submit paper order</button>
-            </div>
-
-            <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
-          </aside>
-
           <div class="chart-column">
             <div class="chart-toolbar">
               <div class="pair-selector">
@@ -2664,11 +2681,45 @@ app.MapGet("/chart", () => Results.Content(
                       style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
             </div>
           </div>
+
+          <aside class="trade-panel" aria-label="Trade ticket">
+            <h2>Trade</h2>
+
+            <!-- The chart is shared. Only the book and ticket change with the
+                 tab, because the market data is the same in either mode. -->
+            <div class="tabs" role="tablist">
+              <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
+              <button id="modeLive" class="tab" type="button" role="tab">Live</button>
+            </div>
+
+            <div id="modeNotice" class="notice">
+              <strong>Fake funds. No exchange is contacted.</strong>
+              The fill is priced at the close of the last closed candle. It does not model spread,
+              slippage, fees or partial fills, so a paper result is an upper bound on what the
+              same decision would have returned live.
+            </div>
+
+            <div class="toolbar" id="tradeTicket">
+              <label for="tradeSide">Side</label>
+              <select id="tradeSide">
+                <option value="Buy">Buy</option>
+                <option value="Sell">Sell</option>
+              </select>
+
+              <label for="tradeQuantity">Quantity</label>
+              <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
+
+              <button id="submitTrade" type="button">Submit paper order</button>
+            </div>
+
+            <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
+          </aside>
         </div>
         <p id="legend" class="empty"></p>
         <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
 
         <h2>Position on this pair</h2>
+        <div id="pairHolding" class="notice">Loading current exchange holding.</div>
         <div id="positions"><p class="empty">Loading.</p></div>
         <p id="pairFilters" class="empty"></p>
 
@@ -2677,6 +2728,36 @@ app.MapGet("/chart", () => Results.Content(
           different size; a ten-minute bar is built from ten closed one-minute bars and marked as
           derived.
         </p>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/portfolio", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/portfolio.js"></script>
+      <title>Portfolio</title>
+    </head>
+    <body>
+      <main>
+        <h1>Portfolio</h1>
+        <p class="lede">Read-only balances from your connected exchange accounts.</p>
+        <div class="notice">
+          <strong>Fresh reading only.</strong> Balances are requested from the exchange when this
+          page loads. A failed request is shown as an error; no previous balance is reused.
+          This page cannot transfer, withdraw, deposit, or place orders.
+        </div>
+        <div class="toolbar"><button id="refresh" type="button">Refresh balances</button></div>
+        <div id="status" class="notice">Loading current balances.</div>
+        <div id="portfolio"><p class="empty">Loading.</p></div>
       </main>
     </body>
     </html>
