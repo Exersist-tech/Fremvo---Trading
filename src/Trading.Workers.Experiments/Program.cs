@@ -21,6 +21,14 @@ builder.Services.AddSingleton<IExperimentCandleSeriesSource, UnconfiguredExperim
 builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, UnconfiguredExperimentResearchGroupConfigurationSource>();
 builder.Services.AddSingleton<IExperimentWorkerRunner, UnconfiguredExperimentWorkerRunner>();
 
+// Protective exits have an independent, explicitly disabled schedule. This inert evaluator is
+// intentional: enabling the schedule alone cannot activate broader experiment training.
+builder.Services.Configure<ExperimentProtectiveExitWorkerOptions>(
+    builder.Configuration.GetSection(ExperimentProtectiveExitWorkerOptions.SectionName));
+builder.Services.AddSingleton<IExperimentProtectiveExitPositionSource, UnconfiguredExperimentProtectiveExitPositionSource>();
+builder.Services.AddSingleton<IExperimentProtectiveExitOwnerEvaluator, UnconfiguredExperimentProtectiveExitOwnerEvaluator>();
+builder.Services.AddHostedService<ProtectiveExitWorker>();
+
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();
