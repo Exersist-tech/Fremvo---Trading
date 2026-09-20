@@ -8,6 +8,7 @@ using Trading.Infrastructure.Data.Backtesting;
 using Trading.Exchanges.Abstractions;
 using Trading.Infrastructure.Data.MarketData;
 using Trading.Infrastructure.Data.Scanner;
+using Trading.Infrastructure.Data.Experiments;
 
 namespace Trading.Infrastructure.Data;
 
@@ -39,6 +40,7 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedScanResult> ScanResults => Set<PersistedScanResult>();
 
     public DbSet<PersistedHistoricalDataset> HistoricalDatasets => Set<PersistedHistoricalDataset>();
+    public DbSet<PersistedExperimentDecisionRecord> ExperimentDecisionRecords => Set<PersistedExperimentDecisionRecord>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -215,6 +217,19 @@ public sealed class TradingDbContext : DbContext
 
             entity.HasIndex(account => new { account.UserId, account.ExchangeKind })
                 .IsUnique(false);
+        });
+
+        modelBuilder.Entity<PersistedExperimentDecisionRecord>(entity =>
+        {
+            entity.ToTable("ExperimentDecisionRecords");
+            entity.HasKey(x => new { x.UserId, x.WorkerId, x.GroupConfigurationVersion, x.Group, x.StrategyId, x.StrategyVersion,
+                x.StrategyFingerprint, x.Symbol, x.Interval, x.OpenTimeUtc, x.CloseTimeUtc, x.AsOfUtc });
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.StrategyFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Reason).HasMaxLength(512).IsRequired();
+            entity.Property(x => x.EvidenceFingerprint).HasMaxLength(1024).IsRequired();
+            entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
         });
 
         modelBuilder.Entity<Order>(entity =>

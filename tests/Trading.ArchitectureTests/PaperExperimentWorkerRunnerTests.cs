@@ -101,6 +101,64 @@ public sealed class PaperExperimentWorkerRunnerTests
             || method.GetParameters().Any(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));
     }
 
+    [Fact]
+    public async Task AttestedObservationsMapDeterministicallyAndNeverAddExposure()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
+        var configuration = Configuration(worker, registry.Definitions.Single());
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
+        var analysis = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
+        var series = AvailableSeries().Series!;
+        var candle = series.Candles[^1];
+        var identity = new ExperimentClosedCandleIdentity(candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc, Now);
+        var ledger = new InMemoryExperimentDecisionLedger();
+        var policy = new ExperimentDecisionPolicy(ledger, new FakeTimeProvider(Now));
+        var snapshot = new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, Now);
+
+        var first = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
+        var repeated = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
+        var existingExposure = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis,
+            snapshot with { PositionQuantity = 1m }, identity);
+
+        Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
+        Assert.Equal(first, repeated);
+        Assert.Equal(ExperimentProposalAction.Neutral, existingExposure.Proposal.Action);
+        Assert.DoesNotContain(Enum.GetNames<ExperimentProposalAction>(), action => action.Equals("Add", StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(worker.Ledger);
+    }
+
+    [Fact]
+    public async Task NoConditionIsNeutralAndUnattestedOrMismatchedEvidenceIsRejected()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
+        var configuration = Configuration(worker, registry.Definitions.Single());
+        var now = Now;
+        var flat = new Candle("BTC/USD", CandleInterval.OneHour, now.AddHours(-1), now, 100m, 100m, 100m, 100m, 1m, true, false);
+        var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(ExperimentCandleSeriesResult.Available(
+            new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, now, new[] { flat }))), registry);
+        var result = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), now);
+        var policy = new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(now));
+        var snapshot = new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, now);
+        var identity = new ExperimentClosedCandleIdentity(flat.Symbol, flat.Interval, flat.OpenTimeUtc, flat.CloseTimeUtc, now);
+
+        var neutral = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), result, snapshot, identity);
+        Assert.Equal(ExperimentAnalysisOutcome.NoCondition, result.Outcome);
+        Assert.Equal(ExperimentProposalAction.Neutral, neutral.Proposal.Action);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            ExperimentAnalysisResult.Analyzed("forged", 1m), snapshot, identity));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            result, snapshot with { WorkerId = Guid.NewGuid() }, identity));
+    }
+
+    private sealed class FakeTimeProvider : TimeProvider
+    {
+        private readonly DateTimeOffset _now;
+        public FakeTimeProvider(DateTimeOffset now) => _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
+
     private static ExperimentWorker Worker(string parameters)
     {
         var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", "experiment-sma-trend", "BTC/USD", 1_000m, Now, 1);

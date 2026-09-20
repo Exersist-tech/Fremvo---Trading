@@ -21,20 +21,26 @@ public enum ExperimentAnalysisOutcome
 /// </summary>
 public sealed class ExperimentAnalysisResult
 {
-    private ExperimentAnalysisResult(ExperimentAnalysisOutcome outcome, string reason, decimal? value)
+    private ExperimentAnalysisResult(ExperimentAnalysisOutcome outcome, string reason, decimal? value, ExperimentDecisionEvidence? evidence = null)
     {
         Outcome = outcome;
         Reason = reason;
         Value = value;
+        Evidence = evidence;
     }
 
     public ExperimentAnalysisOutcome Outcome { get; }
     public string Reason { get; }
     public decimal? Value { get; }
+    /// <summary>Present only when this result was returned by the approved runner.</summary>
+    public ExperimentDecisionEvidence? Evidence { get; }
 
     public static ExperimentAnalysisResult Analyzed(string reason, decimal value) => new(ExperimentAnalysisOutcome.Analyzed, reason, value);
     public static ExperimentAnalysisResult NoCondition(string reason) => new(ExperimentAnalysisOutcome.NoCondition, reason, null);
     public static ExperimentAnalysisResult Blocked(string reason) => new(ExperimentAnalysisOutcome.Blocked, reason, null);
+
+    internal ExperimentAnalysisResult Attest(ExperimentDecisionEvidence evidence) =>
+        new(Outcome, Reason, Value, evidence);
 }
 
 /// <summary>Identifies one compiled, platform-owned research evaluator.</summary>
@@ -252,6 +258,21 @@ public sealed class PaperExperimentWorkerRunner
             return ExperimentAnalysisResult.Blocked($"Closed candle evidence is unavailable: {seriesResult.BlockReason}.");
         }
 
-        return evaluator.Evaluate(seriesResult.Series, worker.StrategyParameters);
+        var result = evaluator.Evaluate(seriesResult.Series, worker.StrategyParameters);
+        var candle = seriesResult.Series.Candles[^1];
+        return result.Attest(new ExperimentDecisionEvidence(
+            worker.UserId,
+            worker.Id,
+            configuration.Version,
+            assignment.Group,
+            approval.StrategyVersion.Identity.TemplateId,
+            approval.StrategyVersion.Identity.Version,
+            approval.StrategyVersion.ContentFingerprint,
+            assignment.Provenance.ParametersFingerprint,
+            seriesResult.Series.AsOfUtc,
+            candle.Symbol,
+            candle.Interval,
+            candle.OpenTimeUtc,
+            candle.CloseTimeUtc));
     }
 }
