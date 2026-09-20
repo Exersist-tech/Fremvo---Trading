@@ -82,21 +82,32 @@ public sealed class KrakenPermissionProbeTests
     [Fact]
     public void InterpretResponseTreatsAnEmptyErrorArrayAsPermissionHeld()
     {
-        Assert.True(KrakenPermissionProbe.InterpretResponse("""{"error":[],"result":{}}"""));
+        var answer = KrakenPermissionProbe.InterpretResponse("""{"error":[],"result":{}}""");
+
+        Assert.True(answer.Granted);
+        Assert.False(answer.Denied);
     }
 
     [Fact]
     public void InterpretResponseTreatsPermissionDeniedAsPermissionAbsent()
     {
-        Assert.False(KrakenPermissionProbe.InterpretResponse("""{"error":["EGeneral:Permission denied"]}"""));
+        var answer = KrakenPermissionProbe.InterpretResponse("""{"error":["EGeneral:Permission denied"]}""");
+
+        Assert.False(answer.Granted);
+        Assert.True(answer.Denied);
     }
 
     [Fact]
-    public void InterpretResponseTreatsAnUnknownErrorAsPermissionAbsent()
+    public void InterpretResponseTreatsAnUnknownErrorAsInconclusiveRatherThanAbsent()
     {
-        // Failing closed: an error the platform does not recognise must never be
-        // read as permission to act.
-        Assert.False(KrakenPermissionProbe.InterpretResponse("""{"error":["EService:Unavailable"]}"""));
+        // An error the platform does not recognise says nothing about the key.
+        // Reading a service outage as "permission absent" would tell the user
+        // to change a key setting that is already correct.
+        var answer = KrakenPermissionProbe.InterpretResponse("""{"error":["EService:Unavailable"]}""");
+
+        Assert.False(answer.Granted);
+        Assert.False(answer.Denied);
+        Assert.Contains("EService:Unavailable", answer.Errors);
     }
 
     [Theory]

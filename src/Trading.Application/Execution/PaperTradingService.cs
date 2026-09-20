@@ -6,6 +6,7 @@ using Trading.Domain.Execution;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
+using Trading.Exchanges.Abstractions;
 using Trading.MarketData;
 using Trading.Risk;
 
@@ -30,6 +31,12 @@ public enum PaperTradeOutcome
 
     /// <summary>The order was refused for a reason specific to the request.</summary>
     Rejected,
+
+    /// <summary>
+    /// The user has no connected and validated exchange account, so there is no
+    /// venue whose rules the simulated order could be judged against.
+    /// </summary>
+    NoConnectedExchange,
 }
 
 public sealed class PaperTradeResult
@@ -108,6 +115,7 @@ public sealed class PaperTradingService : IPaperTradingService
     private readonly IPositionRepository _positions;
     private readonly ITradingHaltState _haltState;
     private readonly IAuditEventWriter _auditWriter;
+    private readonly IExchangeAccountRepository _exchangeAccounts;
     private readonly TimeProvider _timeProvider;
 
     public PaperTradingService(
@@ -116,6 +124,7 @@ public sealed class PaperTradingService : IPaperTradingService
         IPositionRepository positions,
         ITradingHaltState haltState,
         IAuditEventWriter auditWriter,
+        IExchangeAccountRepository exchangeAccounts,
         TimeProvider timeProvider)
     {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
@@ -123,6 +132,7 @@ public sealed class PaperTradingService : IPaperTradingService
         _positions = positions ?? throw new ArgumentNullException(nameof(positions));
         _haltState = haltState ?? throw new ArgumentNullException(nameof(haltState));
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
+        _exchangeAccounts = exchangeAccounts ?? throw new ArgumentNullException(nameof(exchangeAccounts));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
 
@@ -181,6 +191,20 @@ public sealed class PaperTradingService : IPaperTradingService
             return PaperTradeResult.Failure(
                 PaperTradeOutcome.Blocked,
                 "Only exposure-reducing orders are accepted while close-only or reduce-only mode is active.");
+        }
+
+        // A simulated order still has to be an order that could have existed.
+        // Without a connected and validated exchange account there is no venue
+        // behind the symbol, so a fill here would be a number with nothing to
+        // reconcile it against and would teach the user that a pair is
+        // tradeable when their account cannot reach it. Paper remains the only
+        // destination: a connected account permits simulation, never execution.
+        var accounts = await _exchangeAccounts.ListForUserAsync(userId, cancellationToken).ConfigureAwait(false);
+        if (!accounts.Any(account => account.CanTrade))
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.NoConnectedExchange,
+                "Connect an exchange account before trading. Paper orders are still simulated and never reach the exchange.");
         }
 
         // A caller-supplied identifier is the idempotency key. When none is

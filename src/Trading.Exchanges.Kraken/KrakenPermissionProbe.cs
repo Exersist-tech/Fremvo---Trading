@@ -41,7 +41,7 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
     /// </summary>
     internal const string ValidateOnlyFlag = "validate=true";
 
-    private const string PermissionDeniedError = "EGeneral:Permission denied";
+    private const string PermissionDeniedError = "Permission denied";
 
     private readonly HttpClient _httpClient;
     private readonly TimeProvider _timeProvider;
@@ -67,10 +67,18 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
     /// Builds the body used for the trade-permission check. Exposed to tests so
     /// the validate-only flag can be asserted.
     /// </summary>
+    /// <remarks>
+    /// The order is sized to clear Kraken's minimum order quantity and minimum
+    /// order cost. An order below either minimum is rejected on its parameters,
+    /// which produced a rejection that had nothing to do with the key. The bid
+    /// is deliberately far below market so that, even though
+    /// <c>validate=true</c> means Kraken never places it, the order would rest
+    /// rather than execute if the flag were ever absent.
+    /// </remarks>
     internal static string BuildTradeProbeBody(string nonce) =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"nonce={nonce}&{ValidateOnlyFlag}&ordertype=limit&type=buy&volume=0.0001&pair=XBTUSD&price=1");
+            $"nonce={nonce}&{ValidateOnlyFlag}&ordertype=limit&type=buy&volume=0.0002&pair=XBTUSD&price=50000.0");
 
     public async Task<ApiPermissionSnapshot> ProbeAsync(
         ExchangeCredential credential,
@@ -78,27 +86,36 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
     {
         ArgumentNullException.ThrowIfNull(credential);
 
-        var canRead = await HasPermissionAsync(
+        var read = await AskAsync(
             credential,
             BalancePath,
             nonce => $"nonce={nonce}",
             cancellationToken).ConfigureAwait(false);
 
-        var canWithdraw = await HasPermissionAsync(
+        var canRead = Conclude(read, "read account data");
+
+        var withdraw = await AskAsync(
             credential,
             WithdrawMethodsPath,
             nonce => $"nonce={nonce}",
             cancellationToken).ConfigureAwait(false);
 
+        var canWithdraw = Conclude(withdraw, "withdraw funds");
+
         // The trade check is skipped when the key can withdraw, because the
         // connection will be refused regardless and there is no reason to send
         // a further request with a credential the platform is rejecting.
-        var canTrade = !canWithdraw
-            && await HasPermissionAsync(
+        var canTrade = false;
+        if (!canWithdraw)
+        {
+            var trade = await AskAsync(
                 credential,
                 AddOrderPath,
                 BuildTradeProbeBody,
                 cancellationToken).ConfigureAwait(false);
+
+            canTrade = ConcludeTrade(trade);
+        }
 
         return new ApiPermissionSnapshot(
             CanRead: canRead,
@@ -107,7 +124,74 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
             ValidatedAtUtc: _timeProvider.GetUtcNow());
     }
 
-    private async Task<bool> HasPermissionAsync(
+    /// <summary>
+    /// Turns an answer into a yes or no, refusing to guess when Kraken did not
+    /// actually answer the question.
+    /// </summary>
+    private static bool Conclude(KrakenPermissionAnswer answer, string capability)
+    {
+        if (answer.Granted)
+        {
+            return true;
+        }
+
+        if (answer.Denied)
+        {
+            return false;
+        }
+
+        throw new ExchangePermissionProbeException(
+            $"Kraken did not say whether this key may {capability}. It answered: " +
+            $"{string.Join(", ", answer.Errors)}. The key was not stored. This is not a statement about the " +
+            "key's permissions, so try again before changing anything on Kraken.");
+    }
+
+    /// <summary>
+    /// Decides whether the key may place orders.
+    /// </summary>
+    /// <remarks>
+    /// Kraken checks a key's permission before it validates an order's
+    /// parameters, so a parameter complaint means the permission check already
+    /// passed. Treating such a rejection as an absent permission is what made a
+    /// key with "Create &amp; modify orders" enabled report that it could not
+    /// place orders: the probe's test order was refused on its size or cost,
+    /// not on the key.
+    /// </remarks>
+    private static bool ConcludeTrade(KrakenPermissionAnswer answer)
+    {
+        if (answer.Granted)
+        {
+            return true;
+        }
+
+        if (answer.Denied)
+        {
+            return false;
+        }
+
+        if (answer.Errors.Any(IsOrderParameterComplaint))
+        {
+            return true;
+        }
+
+        throw new ExchangePermissionProbeException(
+            "Kraken did not say whether this key may place orders. It answered: " +
+            $"{string.Join(", ", answer.Errors)}. The key was not stored. This is not a statement about the " +
+            "key's permissions, so try again before changing anything on Kraken.");
+    }
+
+    /// <summary>
+    /// True when Kraken rejected the probe order itself rather than the key.
+    /// </summary>
+    internal static bool IsOrderParameterComplaint(string error) =>
+        error.StartsWith("EOrder:", StringComparison.Ordinal)
+        || error.Contains("Invalid arguments", StringComparison.Ordinal)
+        || error.Contains("Insufficient funds", StringComparison.Ordinal)
+        || error.Contains("Invalid price", StringComparison.Ordinal)
+        || error.Contains("Invalid volume", StringComparison.Ordinal)
+        || error.Contains("minimum not met", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<KrakenPermissionAnswer> AskAsync(
         ExchangeCredential credential,
         string path,
         Func<string, string> buildBody,
@@ -168,15 +252,39 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
     }
 
     /// <summary>
+    /// What a Kraken response says about the permission the call required.
+    /// </summary>
+    /// <param name="Granted">True only when Kraken accepted the call.</param>
+    /// <param name="Denied">
+    /// True only when Kraken explicitly answered that the permission is absent.
+    /// When both this and <paramref name="Granted"/> are false the response did
+    /// not answer the question and no conclusion may be drawn from it.
+    /// </param>
+    /// <param name="Errors">
+    /// Kraken's own error codes, for example <c>EOrder:Insufficient funds</c>.
+    /// These are Kraken's fixed codes and carry no credential material, so they
+    /// are safe to show the user and are the only way to explain an
+    /// inconclusive result.
+    /// </param>
+    internal readonly record struct KrakenPermissionAnswer(
+        bool Granted,
+        bool Denied,
+        IReadOnlyList<string> Errors);
+
+    /// <summary>
     /// Reads a Kraken response and reports whether the key holds the permission
     /// the call required.
     /// </summary>
     /// <remarks>
     /// Kraken answers HTTP 200 even for failures and reports problems in its
-    /// <c>error</c> array, so the status code is not consulted. An unrecognised
-    /// error is treated as "permission not held", which fails closed.
+    /// <c>error</c> array, so the status code is not consulted. An error that
+    /// is not a permission answer is reported as inconclusive rather than as
+    /// "permission absent": a service outage, a rejected test order or a rate
+    /// limit say nothing about what the key may do, and reporting one as a
+    /// missing permission would tell the user to change a key setting that is
+    /// already correct.
     /// </remarks>
-    internal static bool InterpretResponse(string payload)
+    internal static KrakenPermissionAnswer InterpretResponse(string payload)
     {
         if (string.IsNullOrWhiteSpace(payload))
         {
@@ -206,24 +314,27 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
 
             if (errors.GetArrayLength() == 0)
             {
-                return true;
+                return new KrakenPermissionAnswer(Granted: true, Denied: false, Array.Empty<string>());
             }
+
+            var messages = new List<string>();
+            var denied = false;
 
             foreach (var error in errors.EnumerateArray())
             {
                 var text = error.GetString();
-
-                if (string.Equals(text, PermissionDeniedError, StringComparison.Ordinal))
+                if (text is null)
                 {
-                    return false;
+                    continue;
                 }
+
+                messages.Add(text);
 
                 // An invalid key or signature is a credential problem rather
                 // than a permission answer, and must not be reported as
                 // "permission absent" because that would be misleading.
-                if (text is not null
-                    && (text.Contains("Invalid key", StringComparison.Ordinal)
-                        || text.Contains("Invalid signature", StringComparison.Ordinal)))
+                if (text.Contains("Invalid key", StringComparison.Ordinal)
+                    || text.Contains("Invalid signature", StringComparison.Ordinal))
                 {
                     throw new ExchangePermissionProbeException(
                         "Kraken rejected this API key or its signature. Check that the API key and the private " +
@@ -233,7 +344,7 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
                 // A nonce problem says nothing about the key. Reporting it as
                 // a bad key would send the user to re-copy a credential that is
                 // correct.
-                if (text is not null && text.Contains("Invalid nonce", StringComparison.Ordinal))
+                if (text.Contains("Invalid nonce", StringComparison.Ordinal))
                 {
                     throw new ExchangePermissionProbeException(
                         "Kraken rejected the request because of its nonce, not because of the key. This happens " +
@@ -242,17 +353,26 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
                         "new API key for this platform.");
                 }
 
-                // Kraken reports a key that is disabled, expired or restricted
-                // to other addresses separately from a wrong key.
-                if (text is not null
-                    && (text.Contains("Permission denied", StringComparison.Ordinal)
-                        || text.Contains("Invalid arguments", StringComparison.Ordinal)))
+                // A key restricted to other IP addresses is a configuration
+                // problem the user can fix, and is not a missing permission.
+                if (text.Contains("Invalid IP", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("IP address", StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    throw new ExchangePermissionProbeException(
+                        "Kraken refused the request because of this key's IP address restriction. Add the address " +
+                        "this application calls from to the key's allowed list, or turn the restriction off.");
+                }
+
+                if (text.Contains(PermissionDeniedError, StringComparison.Ordinal))
+                {
+                    denied = true;
                 }
             }
 
-            return false;
+            // Only an explicit denial is a "no". Anything else is left
+            // inconclusive for the caller to interpret, because an error that
+            // is not about permissions says nothing about permissions.
+            return new KrakenPermissionAnswer(Granted: false, Denied: denied, messages);
         }
     }
 }

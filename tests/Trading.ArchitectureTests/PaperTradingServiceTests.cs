@@ -5,6 +5,7 @@ using Trading.Domain.Audit;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
+using Trading.Exchanges.Abstractions;
 using Trading.MarketData;
 
 namespace Trading.ArchitectureTests;
@@ -19,13 +20,20 @@ public sealed class PaperTradingServiceTests
 
     private sealed class Harness
     {
-        public Harness(IReadOnlyList<Candle> candles)
+        public Harness(IReadOnlyList<Candle> candles, bool exchangeConnected = true)
         {
             Candles = new StubCandleSource(candles);
             Orders = new InMemoryOrderRepository();
             Positions = new InMemoryPositionRepository();
             Halts = new InMemoryTradingHaltState();
             Audit = new RecordingAuditWriter();
+            ExchangeAccounts = new StubExchangeAccounts();
+
+            if (exchangeConnected)
+            {
+                ExchangeAccounts.AddConnected(UserId, Now);
+                ExchangeAccounts.AddConnected(OtherUserId, Now);
+            }
 
             Service = new PaperTradingService(
                 Candles,
@@ -33,6 +41,7 @@ public sealed class PaperTradingServiceTests
                 Positions,
                 Halts,
                 Audit,
+                ExchangeAccounts,
                 new FixedTimeProvider(Now));
         }
 
@@ -46,7 +55,54 @@ public sealed class PaperTradingServiceTests
 
         public RecordingAuditWriter Audit { get; }
 
+        public StubExchangeAccounts ExchangeAccounts { get; }
+
         public PaperTradingService Service { get; }
+    }
+
+    private sealed class StubExchangeAccounts : IExchangeAccountRepository
+    {
+        private readonly List<ExchangeAccount> _accounts = new();
+
+        public void AddConnected(Guid userId, DateTimeOffset nowUtc)
+        {
+            var account = new ExchangeAccount(
+                Guid.NewGuid(),
+                userId,
+                ExchangeKind.Kraken,
+                "Kraken",
+                "exchange-credential/test",
+                nowUtc);
+            account.MarkConnected(nowUtc);
+            _accounts.Add(account);
+        }
+
+        public void AddUnvalidated(Guid userId, DateTimeOffset nowUtc) =>
+            _accounts.Add(new ExchangeAccount(
+                Guid.NewGuid(),
+                userId,
+                ExchangeKind.Kraken,
+                "Kraken",
+                "exchange-credential/test",
+                nowUtc));
+
+        public Task<ExchangeAccount?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_accounts.Find(account => account.Id == id));
+
+        public Task<IReadOnlyCollection<ExchangeAccount>> ListForUserAsync(
+            Guid userId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyCollection<ExchangeAccount>>(
+                _accounts.FindAll(account => account.UserId == userId));
+
+        public Task AddAsync(ExchangeAccount account, CancellationToken cancellationToken = default)
+        {
+            _accounts.Add(account);
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateAsync(ExchangeAccount account, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private static Candle ClosedCandle(DateTimeOffset closeTime, decimal close) =>
@@ -84,6 +140,70 @@ public sealed class PaperTradingServiceTests
             ClosedCandle(Now.AddMinutes(-1), lastClose),
             FormingCandle(Now.AddMinutes(1), lastClose + 5000m),
         ]);
+
+    private static Harness MarketWithoutExchangeAccount(decimal lastClose = 30000m) =>
+        new(
+            [
+                ClosedCandle(Now.AddMinutes(-2), lastClose - 100m),
+                ClosedCandle(Now.AddMinutes(-1), lastClose),
+            ],
+            exchangeConnected: false);
+
+    [Fact]
+    public async Task AnOrderIsRefusedWhenNoExchangeAccountIsConnected()
+    {
+        var harness = MarketWithoutExchangeAccount();
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(PaperTradeOutcome.NoConnectedExchange, result.Outcome);
+
+        // Nothing may be recorded either: a refused order must leave no order
+        // and no position behind.
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+        Assert.Empty(await harness.Positions.ListOpenAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AnAccountThatWasNeverValidatedDoesNotUnlockTrading()
+    {
+        var harness = MarketWithoutExchangeAccount();
+
+        // Present but never validated: the row exists, the connection was never
+        // proven. Accepting this would let an unusable key unlock trading.
+        harness.ExchangeAccounts.AddUnvalidated(UserId, Now);
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        Assert.Equal(PaperTradeOutcome.NoConnectedExchange, result.Outcome);
+    }
+
+    [Fact]
+    public async Task AnotherUsersConnectedAccountDoesNotUnlockTrading()
+    {
+        var harness = MarketWithoutExchangeAccount();
+        harness.ExchangeAccounts.AddConnected(OtherUserId, Now);
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        Assert.Equal(PaperTradeOutcome.NoConnectedExchange, result.Outcome);
+    }
+
+    [Fact]
+    public async Task AConnectedAccountStillOnlyPermitsSimulatedFills()
+    {
+        var harness = FreshMarket();
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        // Connecting an exchange lifts the gate on simulation. It must never
+        // also promote the account out of paper, or a connection alone would
+        // become permission to trade real funds.
+        Assert.True(result.Succeeded);
+        var accounts = await harness.ExchangeAccounts.ListForUserAsync(UserId);
+        Assert.All(accounts, account => Assert.False(account.CanReachExchange));
+    }
 
     [Fact]
     public async Task FillIsPricedFromTheLastClosedCandleNotTheFormingOne()

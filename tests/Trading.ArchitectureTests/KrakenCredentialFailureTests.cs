@@ -110,9 +110,45 @@ public sealed class KrakenCredentialFailureTests
     {
         // This must stay an answer rather than an error: it is how the probe
         // establishes that a key lacks a capability.
-        Assert.False(
-            KrakenPermissionProbe.InterpretResponse(
-                "{\"error\":[\"EGeneral:Permission denied\"],\"result\":{}}"));
+        var answer = KrakenPermissionProbe.InterpretResponse(
+            "{\"error\":[\"EGeneral:Permission denied\"],\"result\":{}}");
+
+        Assert.True(answer.Denied);
+        Assert.False(answer.Granted);
+    }
+
+    [Fact]
+    public void AnOrderParameterComplaintProvesTheKeyMayTrade()
+    {
+        // Kraken checks the key's permission before it validates the order, so
+        // a complaint about the order means the permission check passed. This
+        // is the case that made a key with "Create & modify orders" enabled
+        // report that it could not place orders.
+        Assert.True(KrakenPermissionProbe.IsOrderParameterComplaint("EOrder:Insufficient funds"));
+        Assert.True(KrakenPermissionProbe.IsOrderParameterComplaint("EGeneral:Invalid arguments:volume"));
+        Assert.True(KrakenPermissionProbe.IsOrderParameterComplaint("EOrder:Order minimum not met"));
+    }
+
+    [Fact]
+    public void APermissionDenialIsNotMistakenForAnOrderComplaint()
+    {
+        Assert.False(KrakenPermissionProbe.IsOrderParameterComplaint("EGeneral:Permission denied"));
+        Assert.False(KrakenPermissionProbe.IsOrderParameterComplaint("EService:Unavailable"));
+    }
+
+    [Fact]
+    public void TheTradeProbeOrderClearsKrakenMinimums()
+    {
+        var body = KrakenPermissionProbe.BuildTradeProbeBody("1");
+
+        // An order below the venue's minimum quantity or minimum cost is
+        // rejected on its parameters, which is noise the probe should not
+        // create for itself.
+        Assert.Contains("volume=0.0002", body, StringComparison.Ordinal);
+        Assert.Contains("price=50000.0", body, StringComparison.Ordinal);
+
+        // And it must still never be capable of reaching the book.
+        Assert.Contains("validate=true", body, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -627,8 +627,40 @@
     }
   }
 
-  function setTradeStatus(message, isError) {
-    var element = $('tradeStatus');
+  // The server refuses an order when no exchange account is connected. The
+  // ticket mirrors that here so the refusal is visible before a click rather
+  // than after one. This is presentation only: the server check is the control.
+  async function refreshExchangeConnection() {
+    var button = $('submitTrade');
+
+    try {
+      var response = await fetch('/api/exchange/accounts', { headers: { 'Accept': 'application/json' } });
+      if (!response.ok) {
+        throw new Error('Connected accounts could not be read.');
+      }
+
+      var accounts = await response.json();
+      var connected = Array.isArray(accounts) && accounts.some(function (account) { return account.canTrade; });
+
+      button.disabled = !connected;
+
+      if (!connected) {
+        setTradeStatus(
+          'Connect a Kraken account before trading. Orders stay simulated with fake funds either way.',
+          true);
+      }
+
+      return connected;
+    } catch (error) {
+      // Failing closed: if the connection state cannot be read, the ticket
+      // stays shut rather than inviting an order the server will refuse.
+      button.disabled = true;
+      setTradeStatus('Exchange connection could not be checked. ' + error.message, true);
+      return false;
+    }
+  }
+
+  function setTradeStatus(message, isError) {    var element = $('tradeStatus');
     element.textContent = message;
     element.className = isError ? 'notice error' : 'notice';
   }
@@ -686,7 +718,9 @@
     } catch (error) {
       setTradeStatus('The paper order could not be submitted. ' + error.message, true);
     } finally {
-      $('submitTrade').disabled = false;
+      // Re-read rather than blindly re-enabling: a connection that was revoked
+      // mid-session must not leave an enabled ticket behind.
+      await refreshExchangeConnection();
     }
   }
 
@@ -773,6 +807,10 @@
     });
 
     attachChartInteraction();
+
+    // Whether an exchange is connected decides whether the ticket is usable at
+    // all, so it is resolved before the first candle is drawn.
+    await refreshExchangeConnection();
 
     // The pair list has to arrive before the first load, otherwise there is no
     // symbol to request.

@@ -551,8 +551,18 @@ app.MapPost("/api/login", async (
 {
     ArgumentNullException.ThrowIfNull(request);
 
+    // A body without an address is a malformed request, not a membership
+    // question, so it is refused with the same generic message rather than
+    // faulting the endpoint.
+    if (string.IsNullOrWhiteSpace(request.Email))
+    {
+        return Results.BadRequest(new { error = "Invalid login" });
+    }
+
+    var email = request.Email.Trim();
+
     var user = dbContext.Users
-        .SingleOrDefault(u => u.Email == request.Email.Trim());
+        .SingleOrDefault(u => u.Email == email);
 
     // The user is passed in even when null so the service performs the same
     // password verification either way. Short-circuiting here would make an
@@ -1889,6 +1899,7 @@ app.MapPost("/api/paper/orders", async (
             PaperTradeOutcome.Duplicate => StatusCodes.Status409Conflict,
             PaperTradeOutcome.Blocked => StatusCodes.Status403Forbidden,
             PaperTradeOutcome.PriceStale or PaperTradeOutcome.PriceUnavailable => StatusCodes.Status503ServiceUnavailable,
+            PaperTradeOutcome.NoConnectedExchange => StatusCodes.Status412PreconditionFailed,
             _ => StatusCodes.Status400BadRequest
         };
 
