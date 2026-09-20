@@ -6,9 +6,12 @@ using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Identity;
+using Trading.Application.Universe;
 using Trading.Domain.Audit;
 using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
+using Trading.Domain.Market;
+using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
@@ -80,6 +83,31 @@ builder.Services.AddSingleton<ExperimentWorkerPool>();
 // an emergency stop takes effect immediately for all callers.
 builder.Services.AddSingleton<InMemoryTradingHaltState>();
 builder.Services.AddSingleton<ITradingHaltState>(sp => sp.GetRequiredService<InMemoryTradingHaltState>());
+
+// Instrument universe. The thresholds registered here are the mandatory
+// platform floor; operator configuration is combined with them and may only
+// ever be stricter.
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<IUniverseInstrumentProvider, SeedUniverseInstrumentProvider>();
+builder.Services.AddSingleton<IUniverseEvidenceSource, UnconfiguredUniverseEvidenceSource>();
+builder.Services.AddSingleton(_ => new EligibilityThresholds(
+    minimumRollingQuoteVolume: 5_000_000m,
+    minimumMedianQuoteVolume: 3_000_000m,
+    maximumSpread: 0.0020m,
+    maximumEstimatedSlippage: 0.0035m,
+    minimumHistoryCandles: 1_000,
+    minimumListingAge: TimeSpan.FromDays(90),
+    maximumEvidenceAge: TimeSpan.FromHours(6)));
+builder.Services.AddSingleton(sp => new InstrumentEligibilityEvaluator(
+    new[] { MarketUniverseSeed.QuoteAsset },
+    sp.GetRequiredService<EligibilityThresholds>()));
+builder.Services.AddSingleton(sp => new UniverseAdminQueryService(
+    sp.GetRequiredService<InstrumentEligibilityEvaluator>(),
+    new InstrumentDegradationPolicy(sp.GetRequiredService<EligibilityThresholds>().MaximumEvidenceAge),
+    NewListingPolicy.PlatformFloor,
+    sp.GetRequiredService<EligibilityThresholds>(),
+    sp.GetRequiredService<IUniverseEvidenceSource>(),
+    sp.GetRequiredService<TimeProvider>()));
 
 var app = builder.Build();
 
@@ -913,6 +941,159 @@ app.MapGet("/admin/risk", () => Results.Content(
         document.getElementById('engage').addEventListener('click', e => { e.preventDefault(); submit(true); });
         document.getElementById('release').addEventListener('click', e => { e.preventDefault(); submit(false); });
         refresh();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
+app.MapGet("/api/universe/instruments", async (
+    UniverseAdminQueryService query,
+    IUniverseInstrumentProvider instruments,
+    string? purpose,
+    string? interval,
+    CancellationToken cancellationToken) =>
+{
+    if (!Enum.TryParse<EligibilityPurpose>(purpose ?? nameof(EligibilityPurpose.Research), true, out var parsedPurpose)
+        || parsedPurpose == EligibilityPurpose.None)
+    {
+        return Results.BadRequest(new { error = "A concrete eligibility purpose is required." });
+    }
+
+    if (!Enum.TryParse<CandleInterval>(interval ?? nameof(CandleInterval.OneHour), true, out var parsedInterval)
+        || parsedInterval == CandleInterval.None)
+    {
+        return Results.BadRequest(new { error = "A concrete candle interval is required." });
+    }
+
+    var known = await instruments.GetAllAsync(cancellationToken).ConfigureAwait(false);
+    var views = await query
+        .GetAsync(known, parsedPurpose, parsedInterval, cancellationToken)
+        .ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        purpose = parsedPurpose.ToString(),
+        interval = parsedInterval.ToString(),
+        seedVersion = MarketUniverseSeed.Version,
+        eligible = views.Count(view => view.Eligible),
+        total = views.Count,
+        instruments = views
+    });
+}).RequireAuthorization(policy => policy.RequireRole(
+    nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
+
+app.MapGet("/admin/universe", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Instrument universe — Exersist Trading</title>
+      <style>
+        body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 32px 20px 80px; }
+        h1 { font-size: 2rem; margin-bottom: 8px; }
+        p.muted { color:#9bb6cd; line-height:1.6; }
+        table { width:100%; border-collapse: collapse; margin-top: 18px; font-size: 13px; }
+        th, td { text-align:left; padding:9px 10px; border-bottom:1px solid #1b3249; vertical-align: top; }
+        th { color:#62d0ff; text-transform:uppercase; font-size:11px; letter-spacing:0.05em; }
+        .no { color:#ff8f8f; font-weight:700; }
+        .yes { color:#7ee787; font-weight:700; }
+        .note { border:1px solid rgba(255,196,107,0.4); background:rgba(255,196,107,0.08);
+                color:#ffd79a; border-radius:12px; padding:14px 16px; margin:18px 0; line-height:1.55; }
+        select { padding:9px 10px; border-radius:8px; border:1px solid #24415d;
+                 background:#0f1c2b; color:#eaf4ff; margin-right:10px; }
+        details summary { cursor:pointer; color:#9bb6cd; }
+        code { color:#8fd8ff; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>Instrument universe</h1>
+        <p class="muted">
+          Every configured pair and every gate decision behind its current standing. Membership of the
+          research seed grants nothing: an instrument becomes usable only when its gates pass against
+          current evidence.
+        </p>
+        <div class="note">
+          Eligibility here is never a prediction and never a recommendation. It states only that the
+          platform's data-quality, liquidity, and safety conditions are currently met. Test and live
+          purposes are never granted automatically; they require an explicit, audited approval.
+        </div>
+        <div>
+          <select id="purpose">
+            <option>Research</option><option>Backtest</option><option>Paper</option>
+            <option>SpotTest</option><option>SpotLive</option>
+          </select>
+          <select id="interval">
+            <option>OneMinute</option><option>FiveMinutes</option><option>FifteenMinutes</option>
+            <option selected>OneHour</option><option>FourHours</option><option>OneDay</option>
+          </select>
+        </div>
+        <p class="muted" id="summary">Loading…</p>
+        <table>
+          <thead>
+            <tr><th>Symbol</th><th>Class</th><th>State</th><th>Exchange</th>
+                <th>Exposure</th><th>Eligible</th><th>Why</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <script>
+        async function load() {
+          const purpose = document.getElementById('purpose').value;
+          const interval = document.getElementById('interval').value;
+          const response = await fetch(`/api/universe/instruments?purpose=${purpose}&interval=${interval}`);
+          const summary = document.getElementById('summary');
+          const rows = document.getElementById('rows');
+          rows.textContent = '';
+          if (!response.ok) {
+            summary.textContent = 'Not authorised to view the instrument universe.';
+            return;
+          }
+          const data = await response.json();
+          summary.textContent =
+            `${data.eligible} of ${data.total} eligible for ${data.purpose} at ${data.interval} ` +
+            `(seed ${data.seedVersion}).`;
+          for (const item of data.instruments) {
+            const tr = document.createElement('tr');
+            const failed = item.gates.filter(g => !g.passed).map(g => `${g.gate}: ${g.detail}`);
+            const cells = [
+              item.exchangeSymbol,
+              item.assetClass,
+              item.state,
+              item.isPresentOnExchange ? item.exchangeStatus : 'absent',
+              `${item.exposureDirective} — ${item.exposureReason}`
+            ];
+            for (const value of cells) {
+              const td = document.createElement('td');
+              td.textContent = value;
+              tr.appendChild(td);
+            }
+            const eligible = document.createElement('td');
+            eligible.textContent = item.eligible ? 'yes' : 'no';
+            eligible.className = item.eligible ? 'yes' : 'no';
+            tr.appendChild(eligible);
+            const why = document.createElement('td');
+            const details = document.createElement('details');
+            const sum = document.createElement('summary');
+            sum.textContent = failed.length ? `${failed.length} gate(s) failing` : 'all gates passed';
+            details.appendChild(sum);
+            for (const line of failed) {
+              const div = document.createElement('div');
+              div.textContent = line;
+              details.appendChild(div);
+            }
+            why.appendChild(details);
+            tr.appendChild(why);
+            rows.appendChild(tr);
+          }
+        }
+        document.getElementById('purpose').addEventListener('change', load);
+        document.getElementById('interval').addEventListener('change', load);
+        load();
       </script>
     </body>
     </html>

@@ -116,6 +116,14 @@ public sealed class InstrumentEligibility
     }
 
     /// <summary>
+    /// True when a grant record exists for the scope, regardless of whether
+    /// its evidence has since expired. Use this to tell "there was something
+    /// to withdraw" from "it was already absent"; use
+    /// <see cref="IsGranted"/> to decide whether the scope may be used.
+    /// </summary>
+    public bool HasGrant(EligibilityScope scope) => _grants.ContainsKey(scope);
+
+    /// <summary>
     /// True when the scope is granted, the grant's evidence has not expired,
     /// and every prerequisite is itself currently granted and unexpired.
     /// </summary>

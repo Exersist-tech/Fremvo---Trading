@@ -47,3 +47,13 @@ C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-a
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\obj\Debug\net8.0\Trading.Workers.Scanner.pdb
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\obj\Debug\net8.0\Trading.Workers.Scanner.genruntimeconfig.cache
 C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\obj\Debug\net8.0\ref\Trading.Workers.Scanner.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Application.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Domain.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Exchanges.Abstractions.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Infrastructure.Secrets.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Risk.dll
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Application.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Domain.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Exchanges.Abstractions.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Infrastructure.Secrets.pdb
+C:\Users\empty\.copilot\repos\copilot-worktrees\Fremvo---Trading\exersist-tech-automatic-eureka\src\Trading.Workers.Scanner\bin\Debug\net8.0\Trading.Risk.pdb
