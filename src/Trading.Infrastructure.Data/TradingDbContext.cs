@@ -185,7 +185,6 @@ public sealed class TradingDbContext : DbContext
             entity.Property(value => value.SlotCount).IsRequired();
             entity.Property(value => value.ChangedAtUtc).IsRequired();
             entity.Property(value => value.ChangedBy).IsRequired();
-            entity.Property(value => value.ApprovalId).HasMaxLength(128);
             entity.Property(value => value.RowVersion).IsRowVersion();
         });
 

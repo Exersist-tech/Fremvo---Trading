@@ -77,11 +77,12 @@ scheduler prerequisites, configure the worker explicitly:
 }
 ```
 
-Run `dotnet run --project src/Trading.Workers.Experiments`. The owner requests
-one to ten fixed catalog slots at `/experiments`; a different Administrator or
-RiskOfficer must approve with a nonempty reference through
-`POST /api/paper-training/{ownerId}/approve`. Use the disable or emergency-stop
-endpoints to stop it. With persisted closed candles available, the worker creates
+Run `dotnet run --project src/Trading.Workers.Experiments`. The owner starts
+one to ten fixed catalog slots at `/experiments` immediately after the configured
+paper-only prerequisites pass. An Administrator or RiskOfficer may instead start
+slots for an owner through `POST /api/paper-training/{ownerId}/start`; an ordinary
+user is limited to their own owner id. Use the disable or emergency-stop endpoints
+to stop it. With persisted closed candles available, the worker creates
 the fixed catalog workers, re-fetches and revalidates exactly fourteen
 chronological closed candles matching the attested identity, and writes
 decisions, execution claims, workers, and simulated paper ledger entries to

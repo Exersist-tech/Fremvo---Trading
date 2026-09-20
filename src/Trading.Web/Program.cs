@@ -1025,7 +1025,7 @@ app.MapPost("/api/paper-training", async (
     if (ownerId is null) return Results.Unauthorized();
     try
     {
-        var activation = await service.RequestAsync(
+        var activation = await service.StartAsync(
             ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal), request.Slots,
             prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
         return Results.Created("/api/paper-training", PaperTrainingResponse.From(activation));
@@ -1034,25 +1034,26 @@ app.MapPost("/api/paper-training", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireAuthorization();
 
-app.MapPost("/api/paper-training/{ownerId:guid}/approve", async (
+app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
     Guid ownerId,
     ClaimsPrincipal principal,
-    PaperTrainingApprovalRequest request,
+    PaperTrainingRequest request,
     PaperTrainingActivationService service,
+    IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
     CancellationToken cancellationToken) =>
 {
     var actorId = CurrentUser.TryGetUserId(principal);
     if (actorId is null) return Results.Unauthorized();
     try
     {
-        var activation = await service.ActivateAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal),
-            request.Reference, cancellationToken).ConfigureAwait(false);
+        var activation = await service.StartAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal),
+            request.Slots, prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
         return Results.Ok(PaperTrainingResponse.From(activation));
     }
     catch (UnauthorizedAccessException) { return Results.Forbid(); }
     catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
-}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
+}).RequireAuthorization();
 
 app.MapPost("/api/paper-training/{ownerId:guid}/disable", async (
     Guid ownerId,
@@ -1252,8 +1253,8 @@ app.MapGet("/experiments", () => Results.Content(
           <a href="/experiment-results">Results</a>
         </nav>
         <p class="muted">
-          Request one to ten fixed, platform-approved paper-training slots. A separate
-          Administrator or RiskOfficer approval is required before any paper worker can advance.
+          Start one to ten fixed, platform-approved paper-training slots immediately after all
+          paper-only prerequisites pass.
         </p>
 
         <div class="notice">
@@ -1265,7 +1266,7 @@ app.MapGet("/experiments", () => Results.Content(
         <form id="request-form">
           <label for="slots">Fixed paper-training slots (1–10)</label>
           <input id="slots" type="number" min="1" max="10" value="1" required />
-          <button type="submit">Request paper training</button>
+          <button type="submit">Start paper training</button>
         </form>
         <table id="grid" hidden>
           <thead>
@@ -1289,7 +1290,7 @@ app.MapGet("/experiments", () => Results.Content(
           }
           const data = await res.json();
           state.innerHTML = '<p class="muted">Paper-training status: <strong>' + data.state +
-            '</strong>. Fixed slots requested: ' + data.slots + ' of 10.</p><p class="muted">' +
+            '</strong>. Fixed slots started: ' + data.slots + ' of 10.</p><p class="muted">' +
             data.notice + '</p>';
         })();
         document.getElementById('request-form').addEventListener('submit', async event => {
@@ -1300,7 +1301,7 @@ app.MapGet("/experiments", () => Results.Content(
           });
           if (response.ok) location.reload();
           else document.getElementById('state').innerHTML =
-            '<p class="notice">Request was not accepted. All deployment prerequisites must be configured.</p>';
+            '<p class="notice">Paper training was not started. All deployment prerequisites must be configured.</p>';
         });
       </script>
     </body>
@@ -3809,29 +3810,24 @@ internal sealed record CreateExperimentWorkerRequest(
 /// <summary>Paper training accepts only a fixed catalog slot count; ownership is from the principal.</summary>
 internal sealed record PaperTrainingRequest(int Slots);
 
-/// <summary>A distinct Administrator or RiskOfficer supplies the durable approval reference.</summary>
-internal sealed record PaperTrainingApprovalRequest(string Reference);
-
 internal sealed record PaperTrainingResponse(
     string State,
     int Slots,
-    string? ApprovalReference,
     DateTimeOffset? ChangedAtUtc,
     IReadOnlyList<object> Catalog,
     string Notice)
 {
     public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
         new(
-            activation?.State.ToString() ?? "NotRequested",
+            activation?.State.ToString() ?? "NotStarted",
             activation?.Slots.Count ?? 0,
-            activation?.ApprovalId,
             activation?.ChangedAtUtc,
             PaperTrainingActivationService.ApprovedSlots.Select(slot => (object)new
             {
                 slot.Slot, slot.Group, slot.StrategyId, slot.Symbol, slot.StartingCash,
                 slot.ParameterSetId, slot.ProvenanceId
             }).ToArray(),
-            "Paper only: fake funds only. Activation requires a separate approval; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
+            "Paper only: fake funds only. Starting requires every deployment prerequisite; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
 }
 
 internal static class PaperTrainingRole

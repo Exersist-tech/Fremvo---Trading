@@ -13,7 +13,6 @@ public sealed class PersistedPaperTrainingActivation
     public bool ProtectiveScheduler { get; set; }
     public DateTimeOffset ChangedAtUtc { get; set; }
     public Guid ChangedBy { get; set; }
-    public string? ApprovalId { get; set; }
 #pragma warning disable CA1819 // EF Core SQL rowversion is represented as a byte array.
     public byte[] RowVersion { get; set; } = [];
 #pragma warning restore CA1819

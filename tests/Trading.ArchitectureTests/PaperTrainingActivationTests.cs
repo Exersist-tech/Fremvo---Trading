@@ -8,7 +8,7 @@ namespace Trading.ArchitectureTests;
 public sealed class PaperTrainingActivationTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
-    private static readonly string[] ExpectedAuditActions = ["PaperTrainingRequested", "PaperTrainingActivated"];
+    private static readonly string[] ExpectedAuditActions = ["PaperTrainingStarted"];
     private static readonly int[] ExpectedGroupSizes = [4, 3, 3];
 
     [Fact]
@@ -20,28 +20,18 @@ public sealed class PaperTrainingActivationTests
     }
 
     [Fact]
-    public async Task RequestIsInertUntilSafetyRoleExplicitlyApprovesAndAuditsIt()
+    public async Task OwnerStartsImmediatelyWhenAllPaperPrerequisitesPassesAndAuditsIt()
     {
         var repository = new InMemoryPaperTrainingActivationRepository();
         var audit = new InMemoryAuditEventWriter();
         var service = new PaperTrainingActivationService(repository, audit, new FixedTimeProvider());
         var owner = Guid.NewGuid();
 
-        var requested = await service.RequestAsync(owner, owner, RoleType.User, 2, CompletePrerequisites());
-
-        Assert.Equal(PaperTrainingActivationState.Requested, requested.State);
-        Assert.Empty(await repository.GetActiveOwnerIdsAsync());
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            service.ActivateAsync(owner, owner, RoleType.User, "approval-1"));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            service.ActivateAsync(owner, owner, RoleType.Administrator, "approval-1"));
-
-        var active = await service.ActivateAsync(owner, Guid.NewGuid(), RoleType.Administrator, "approval-1");
+        var active = await service.StartAsync(owner, owner, RoleType.User, 2, CompletePrerequisites());
 
         Assert.True(active.IsActive);
         Assert.Equal(new[] { owner }, await repository.GetActiveOwnerIdsAsync());
         Assert.Equal(ExpectedAuditActions, audit.Events.Select(e => e.Action));
-        Assert.DoesNotContain(audit.Events, e => (e.After ?? string.Empty).Contains("approval-1", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -52,9 +42,9 @@ public sealed class PaperTrainingActivationTests
         var owner = Guid.NewGuid();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            service.RequestAsync(owner, owner, RoleType.User, 1, CompletePrerequisites() with { OutputLedger = false }));
+            service.StartAsync(owner, owner, RoleType.User, 1, CompletePrerequisites() with { OutputLedger = false }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
-            service.RequestAsync(owner, owner, RoleType.User, ExperimentWorker.MaxWorkersPerUser + 1, CompletePrerequisites()));
+            service.StartAsync(owner, owner, RoleType.User, ExperimentWorker.MaxWorkersPerUser + 1, CompletePrerequisites()));
 
         Assert.Empty(await repository.GetActiveOwnerIdsAsync());
     }
@@ -66,7 +56,7 @@ public sealed class PaperTrainingActivationTests
             new InMemoryPaperTrainingActivationRepository(), new InMemoryAuditEventWriter(), new FixedTimeProvider());
         var owner = Guid.NewGuid();
 
-        var request = await service.RequestAsync(owner, owner, RoleType.User, 10, CompletePrerequisites());
+        var request = await service.StartAsync(owner, owner, RoleType.User, 10, CompletePrerequisites());
 
         Assert.Equal(10, request.Slots.Count);
         Assert.All(request.Slots, slot => Assert.Equal(PaperTrainingActivationService.FixedStartingCash, slot.StartingCash));
@@ -84,8 +74,7 @@ public sealed class PaperTrainingActivationTests
         var audit = new InMemoryAuditEventWriter();
         var service = new PaperTrainingActivationService(repository, audit, new FixedTimeProvider());
         var owner = Guid.NewGuid();
-        await service.RequestAsync(owner, owner, RoleType.User, 1, CompletePrerequisites());
-        await service.ActivateAsync(owner, Guid.NewGuid(), RoleType.RiskOfficer, "risk-approval");
+        await service.StartAsync(owner, owner, RoleType.User, 1, CompletePrerequisites());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
             service.DisableAsync(owner, Guid.NewGuid(), RoleType.User));
@@ -94,6 +83,18 @@ public sealed class PaperTrainingActivationTests
         Assert.Equal(PaperTrainingActivationState.EmergencyStopped, stopped.State);
         Assert.Empty(await repository.GetActiveOwnerIdsAsync());
         Assert.Contains(audit.Events, e => e.Action == "PaperTrainingEmergencyStopped");
+    }
+
+    [Fact]
+    public async Task AdministratorOrRiskOfficerMayStartForAnotherOwnerButOrdinaryUserMayNot()
+    {
+        var service = new PaperTrainingActivationService(
+            new InMemoryPaperTrainingActivationRepository(), new InMemoryAuditEventWriter(), new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.StartAsync(owner, Guid.NewGuid(), RoleType.User, 1, CompletePrerequisites()));
+        Assert.True((await service.StartAsync(owner, Guid.NewGuid(), RoleType.Administrator, 1, CompletePrerequisites())).IsActive);
     }
 
     private static PaperTrainingPrerequisites CompletePrerequisites() => new(true, true, true, true, true, true);

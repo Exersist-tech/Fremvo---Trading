@@ -67,7 +67,7 @@ public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivati
         PaperTrainingActivationService.ApprovedSlots.Take(value.SlotCount).ToArray(),
         new(value.DurableClosedCandleSource, value.ApprovedResearchGroupsAndGates, value.WorkerRiskPolicy,
             value.PaperFillPolicy, value.OutputLedger, value.ProtectiveScheduler),
-        value.ChangedAtUtc, value.ChangedBy, value.ApprovalId);
+        value.ChangedAtUtc, value.ChangedBy);
 
     private static PersistedPaperTrainingActivation ToEntity(PaperTrainingActivation value)
     {
@@ -88,6 +88,5 @@ public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivati
         destination.ProtectiveScheduler = source.Prerequisites.ProtectiveScheduler;
         destination.ChangedAtUtc = source.ChangedAtUtc;
         destination.ChangedBy = source.ChangedBy;
-        destination.ApprovalId = source.ApprovalId;
     }
 }

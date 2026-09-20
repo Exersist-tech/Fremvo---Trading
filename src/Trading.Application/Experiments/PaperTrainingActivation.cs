@@ -8,10 +8,10 @@ namespace Trading.Application.Experiments;
 
 public enum PaperTrainingActivationState
 {
-    Requested = 0,
-    Active,
-    Disabled,
-    EmergencyStopped
+    Inactive = 0,
+    Active = 1,
+    Disabled = 2,
+    EmergencyStopped = 3
 }
 
 /// <summary>
@@ -38,8 +38,7 @@ public sealed record PaperTrainingActivation(
     IReadOnlyList<PaperTrainingWorkerSlot> Slots,
     PaperTrainingPrerequisites Prerequisites,
     DateTimeOffset ChangedAtUtc,
-    Guid ChangedBy,
-    string? ApprovalId = null)
+    Guid ChangedBy)
 {
     public bool IsActive => State == PaperTrainingActivationState.Active;
 }
@@ -108,8 +107,8 @@ public sealed class InMemoryPaperTrainingActivationRepository : IPaperTrainingAc
 
 /// <summary>
 /// Explicit paper-training state machine. It accepts no account, credential, live-mode, futures,
-/// arbitrary balance, symbol, or strategy inputs. A request is inert until an Administrator or
-/// RiskOfficer activates it after all prerequisites are present.
+/// arbitrary balance, symbol, or strategy inputs. An owner, Administrator, or RiskOfficer can
+/// start it immediately once every paper-only prerequisite is present.
 /// </summary>
 public sealed class PaperTrainingActivationService
 {
@@ -142,41 +141,25 @@ public sealed class PaperTrainingActivationService
 
     public static IReadOnlyList<PaperTrainingWorkerSlot> ApprovedSlots => s_catalog;
 
-    public async Task<PaperTrainingActivation> RequestAsync(
+    public async Task<PaperTrainingActivation> StartAsync(
         Guid ownerId, Guid actorId, RoleType actorRole, int requestedSlots, PaperTrainingPrerequisites prerequisites,
         CancellationToken cancellationToken = default)
     {
-        RequireOwner(ownerId, actorId);
         if (actorRole is not (RoleType.User or RoleType.Administrator or RoleType.RiskOfficer))
-            throw new UnauthorizedAccessException("Only an owner may request paper training.");
+            throw new UnauthorizedAccessException("Only an owner, Administrator, or RiskOfficer may start paper training.");
+        if (actorRole == RoleType.User)
+            RequireOwner(ownerId, actorId);
         ValidateSlots(requestedSlots);
         ValidatePrerequisites(prerequisites);
-        var activation = new PaperTrainingActivation(ownerId, PaperTrainingActivationState.Requested,
-            s_catalog.Take(requestedSlots).ToArray(), prerequisites, UtcNow(), actorId);
-        if (!await _repository.TrySaveAsync(activation, null, cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException("Paper training has already been requested for this owner.");
-        await AuditAsync(activation, actorId, "PaperTrainingRequested", cancellationToken).ConfigureAwait(false);
-        return activation;
-    }
+        var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false);
+        if (current?.IsActive == true)
+            throw new InvalidOperationException("Paper training is already active for this owner.");
 
-    public async Task<PaperTrainingActivation> ActivateAsync(
-        Guid ownerId, Guid actorId, RoleType actorRole, string approvalId, CancellationToken cancellationToken = default)
-    {
-        if (actorRole is not (RoleType.Administrator or RoleType.RiskOfficer))
-            throw new UnauthorizedAccessException("Paper training requires Administrator or RiskOfficer approval.");
-        if (string.IsNullOrWhiteSpace(approvalId))
-            throw new ArgumentException("An explicit approval reference is required.", nameof(approvalId));
-        var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Paper training was not requested.");
-        if (current.OwnerId == actorId)
-            throw new UnauthorizedAccessException("The owner cannot approve their own paper-training request.");
-        if (current.State != PaperTrainingActivationState.Requested)
-            throw new InvalidOperationException("Only a requested paper-training configuration may be activated.");
-        ValidateConfiguration(current);
-        var active = current with { State = PaperTrainingActivationState.Active, ChangedAtUtc = UtcNow(), ChangedBy = actorId, ApprovalId = approvalId.Trim() };
-        if (!await _repository.TrySaveAsync(active, PaperTrainingActivationState.Requested, cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException("Paper-training activation changed concurrently; no workers were started.");
-        await AuditAsync(active, actorId, "PaperTrainingActivated", cancellationToken).ConfigureAwait(false);
+        var active = new PaperTrainingActivation(ownerId, PaperTrainingActivationState.Active,
+            s_catalog.Take(requestedSlots).ToArray(), prerequisites, UtcNow(), actorId);
+        if (!await _repository.TrySaveAsync(active, current?.State, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Paper-training start changed concurrently; no workers were started.");
+        await AuditAsync(active, actorId, "PaperTrainingStarted", cancellationToken).ConfigureAwait(false);
         return active;
     }
 
@@ -193,7 +176,7 @@ public sealed class PaperTrainingActivationService
         if (actorRole == RoleType.User)
             RequireOwner(ownerId, actorId);
         var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Paper training was not requested.");
+            ?? throw new InvalidOperationException("Paper training was not started.");
         var stopped = current with { State = state, ChangedAtUtc = UtcNow(), ChangedBy = actorId };
         if (!await _repository.TrySaveAsync(stopped, current.State, cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("Paper-training state changed concurrently; no transition occurred.");
@@ -205,14 +188,6 @@ public sealed class PaperTrainingActivationService
         await _audit.WriteAsync(new AuditEvent(Guid.NewGuid(), actorId, action, "PaperTrainingActivation",
             activation.OwnerId.ToString("N"), activation.ChangedAtUtc, null,
             $"state={activation.State};slots={activation.Slots.Count};paperOnly=true", null), cancellationToken).ConfigureAwait(false);
-
-    private static void ValidateConfiguration(PaperTrainingActivation activation)
-    {
-        ValidateSlots(activation.Slots.Count);
-        ValidatePrerequisites(activation.Prerequisites);
-        if (!activation.Slots.SequenceEqual(s_catalog.Take(activation.Slots.Count)))
-            throw new InvalidOperationException("Paper-training workers must use the fixed platform-approved catalog.");
-    }
 
     private static void ValidatePrerequisites(PaperTrainingPrerequisites prerequisites)
     {
@@ -232,7 +207,7 @@ public sealed class PaperTrainingActivationService
     private static void RequireOwner(Guid ownerId, Guid actorId)
     {
         if (ownerId == Guid.Empty || actorId == Guid.Empty || ownerId != actorId)
-            throw new UnauthorizedAccessException("A user may request or disable only their own paper training.");
+            throw new UnauthorizedAccessException("A user may start or disable only their own paper training.");
     }
 
     private DateTimeOffset UtcNow() => _timeProvider.GetUtcNow().ToUniversalTime();
