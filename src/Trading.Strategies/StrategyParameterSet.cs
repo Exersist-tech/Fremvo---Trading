@@ -1,53 +1,85 @@
+using System.Collections.ObjectModel;
+
 namespace Trading.Strategies;
 
 public sealed class StrategyParameterSet
 {
-    private readonly Dictionary<string, StrategyParameterDefinition> _definitions;
-    private readonly Dictionary<string, decimal> _values;
+    private readonly IReadOnlyDictionary<string, StrategyParameterDefinition> _definitions;
+    private readonly ReadOnlyDictionary<string, decimal> _values;
 
-    public StrategyParameterSet(IEnumerable<StrategyParameterDefinition> definitions)
+    public StrategyParameterSet(
+        IEnumerable<StrategyParameterDefinition> definitions,
+        IReadOnlyDictionary<string, StrategyParameterValue>? values = null)
     {
         ArgumentNullException.ThrowIfNull(definitions);
 
-        _definitions = definitions
-            .GroupBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
-        _values = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var definition in _definitions.Values)
+        var definitionList = definitions.ToArray();
+        if (definitionList.Any(definition => definition is null))
         {
-            if (definition.Required)
+            throw new ArgumentException("Parameter definitions cannot contain null values.", nameof(definitions));
+        }
+
+        var duplicate = definitionList
+            .GroupBy(definition => definition.Name, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+        {
+            throw new ArgumentException($"Parameter '{duplicate.Key}' is defined more than once.", nameof(definitions));
+        }
+
+        _definitions = new ReadOnlyDictionary<string, StrategyParameterDefinition>(
+            definitionList.ToDictionary(definition => definition.Name, StringComparer.OrdinalIgnoreCase));
+
+        var suppliedValues = values ?? new Dictionary<string, StrategyParameterValue>(StringComparer.OrdinalIgnoreCase);
+        var validatedValues = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        foreach (var supplied in suppliedValues)
+        {
+            if (!_definitions.TryGetValue(supplied.Key, out var definition))
             {
-                _values[definition.Name] = definition.DefaultValue;
+                throw new ArgumentException($"Parameter '{supplied.Key}' is not defined.", nameof(values));
+            }
+
+            ValidateValue(definition, supplied.Value, nameof(values));
+            validatedValues.Add(definition.Name, supplied.Value.RequireDecimal(definition.Name));
+        }
+
+        foreach (var definition in _definitions.Values.Where(definition => definition.Required))
+        {
+            if (!validatedValues.ContainsKey(definition.Name))
+            {
+                validatedValues.Add(
+                    definition.Name,
+                    definition.DefaultValue);
             }
         }
+
+        _values = new ReadOnlyDictionary<string, decimal>(validatedValues);
     }
 
     public IReadOnlyDictionary<string, decimal> Values => _values;
 
-    public void Set(string name, decimal value)
+    public decimal GetDecimal(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException("Parameter name is required.", nameof(name));
         }
 
-        if (!_definitions.TryGetValue(name, out var definition))
+        if (!_values.TryGetValue(name, out var value))
         {
-            throw new InvalidOperationException($"Parameter '{name}' is not defined.");
+            throw new KeyNotFoundException($"Parameter '{name}' was not found.");
         }
 
-        if (!definition.IsInRange(value))
-        {
-            throw new ArgumentOutOfRangeException(nameof(value), $"Parameter '{name}' must be within [{definition.Minimum}, {definition.Maximum}].");
-        }
-
-        _values[name] = value;
+        return value;
     }
 
     public decimal Get(string name)
     {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("Parameter name is required.", nameof(name));
+        }
+
         if (!_values.TryGetValue(name, out var value))
         {
             throw new KeyNotFoundException($"Parameter '{name}' was not found.");
@@ -69,5 +101,28 @@ public sealed class StrategyParameterSet
         }
 
         return definition;
+    }
+
+    private static void ValidateValue(
+        StrategyParameterDefinition definition,
+        StrategyParameterValue value,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.ValueType != definition.ValueType)
+        {
+            throw new ArgumentException(
+                $"Parameter '{definition.Name}' requires {definition.ValueType} values.",
+                parameterName);
+        }
+
+        var decimalValue = value.RequireDecimal(definition.Name);
+        if (!definition.IsInRange(decimalValue))
+        {
+            throw new ArgumentOutOfRangeException(
+                parameterName,
+                $"Parameter '{definition.Name}' must be within [{definition.Minimum}, {definition.Maximum}].");
+        }
     }
 }

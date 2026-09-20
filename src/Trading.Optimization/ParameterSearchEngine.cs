@@ -83,12 +83,12 @@ public sealed class ParameterSearchEngine
     {
         if (index >= ranges.Count)
         {
-            var parameterSet = new StrategyParameterSet(ranges.Select(range => range.Definition));
-
-            foreach (var item in current)
-            {
-                parameterSet.Set(item.Key, item.Value);
-            }
+            var parameterSet = new StrategyParameterSet(
+                ranges.Select(range => range.Definition),
+                current.ToDictionary(
+                    item => item.Key,
+                    item => StrategyParameterValue.FromNumeric(item.Value),
+                    StringComparer.OrdinalIgnoreCase));
 
             results.Add(new ParameterSearchCandidate(parameterSet, objective(parameterSet)));
             return;

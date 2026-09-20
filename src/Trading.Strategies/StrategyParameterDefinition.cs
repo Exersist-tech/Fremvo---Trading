@@ -8,7 +8,8 @@ public sealed class StrategyParameterDefinition
         decimal maximum,
         decimal defaultValue,
         string description,
-        bool required = true)
+        bool required = true,
+        StrategyParameterValueType valueType = StrategyParameterValueType.Numeric)
     {
         ArgumentNullException.ThrowIfNull(description);
 
@@ -27,12 +28,19 @@ public sealed class StrategyParameterDefinition
             throw new ArgumentOutOfRangeException(nameof(defaultValue), "Default value must be within the parameter range.");
         }
 
+        if (valueType == StrategyParameterValueType.WholeNumber
+            && decimal.Truncate(defaultValue) != defaultValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(defaultValue), "Whole-number parameter defaults must not have a fractional component.");
+        }
+
         Name = name.Trim();
         Minimum = minimum;
         Maximum = maximum;
         DefaultValue = defaultValue;
         Description = description.Trim();
         Required = required;
+        ValueType = valueType;
     }
 
     public string Name { get; }
@@ -46,6 +54,8 @@ public sealed class StrategyParameterDefinition
     public string Description { get; }
 
     public bool Required { get; }
+
+    public StrategyParameterValueType ValueType { get; }
 
     public bool IsInRange(decimal value) => value >= Minimum && value <= Maximum;
 }
