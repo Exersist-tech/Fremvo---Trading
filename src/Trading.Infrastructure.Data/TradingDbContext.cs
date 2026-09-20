@@ -1,5 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Trading.Domain.Audit;
+using Trading.Domain.Execution;
+using Trading.Domain.Orders;
+using Trading.Domain.Positions;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
 
@@ -19,6 +22,23 @@ public sealed class TradingDbContext : DbContext
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
 
     public DbSet<ExchangeAccount> ExchangeAccounts => Set<ExchangeAccount>();
+
+    public DbSet<Order> Orders => Set<Order>();
+
+    public DbSet<Position> Positions => Set<Position>();
+
+    public DbSet<OrderReconciliationRecord> OrderReconciliations => Set<OrderReconciliationRecord>();
+
+    /// <summary>
+    /// Precision used for every monetary and quantity column.
+    /// </summary>
+    /// <remarks>
+    /// Eight decimal places matches the smallest unit quoted by the supported
+    /// exchanges. Mapping these as SQL <c>decimal</c> rather than a floating
+    /// point type is mandatory: a rounding error in a quantity becomes a
+    /// rejected or materially different order.
+    /// </remarks>
+    internal const string MoneyColumnType = "decimal(28,8)";
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -160,6 +180,113 @@ public sealed class TradingDbContext : DbContext
 
             entity.HasIndex(account => new { account.UserId, account.ExchangeKind })
                 .IsUnique(false);
+        });
+
+        modelBuilder.Entity<Order>(entity =>
+        {
+            entity.ToTable("Orders");
+            entity.HasKey(order => order.Id);
+
+            entity.Property(order => order.UserId).IsRequired();
+            entity.Property(order => order.StrategyId).IsRequired();
+
+            entity.Property(order => order.Symbol)
+                .HasMaxLength(32)
+                .IsRequired();
+
+            entity.Property(order => order.Side).HasConversion<int>().IsRequired();
+            entity.Property(order => order.Type).HasConversion<int>().IsRequired();
+            entity.Property(order => order.State).HasConversion<int>().IsRequired();
+
+            entity.Property(order => order.Quantity).HasColumnType(MoneyColumnType).IsRequired();
+            entity.Property(order => order.Price).HasColumnType(MoneyColumnType).IsRequired();
+            entity.Property(order => order.FilledQuantity).HasColumnType(MoneyColumnType).IsRequired();
+
+            entity.Property(order => order.CreatedAtUtc).IsRequired();
+            entity.Property(order => order.LastTransitionAtUtc).IsRequired(false);
+
+            entity.Property(order => order.ClientOrderId)
+                .HasMaxLength(64)
+                .IsRequired();
+
+            // Durable duplicate-order protection. An in-memory idempotency
+            // guard is lost on restart or when a second instance starts, so
+            // the database must be the authority on client order id reuse.
+            entity.HasIndex(order => order.ClientOrderId).IsUnique();
+
+            entity.Property(order => order.ExchangeOrderId)
+                .HasMaxLength(64)
+                .IsRequired(false);
+
+            entity.Property(order => order.ReduceOnly).IsRequired();
+            entity.Property(order => order.CloseOnly).IsRequired();
+            entity.Property(order => order.RequiresReconciliation).IsRequired();
+
+            entity.Property(order => order.ReconciliationReason)
+                .HasMaxLength(512)
+                .IsRequired(false);
+
+            // Optimistic concurrency. Two workers must never both believe
+            // they own the transition of a single order.
+            entity.Property(order => order.Version).IsConcurrencyToken().IsRequired();
+
+            entity.HasIndex(order => new { order.UserId, order.CreatedAtUtc });
+            entity.HasIndex(order => new { order.UserId, order.RequiresReconciliation });
+        });
+
+        modelBuilder.Entity<Position>(entity =>
+        {
+            entity.ToTable("Positions");
+            entity.HasKey(position => position.Id);
+
+            entity.Property(position => position.UserId).IsRequired();
+            entity.Property(position => position.StrategyId).IsRequired();
+
+            entity.Property(position => position.Symbol)
+                .HasMaxLength(32)
+                .IsRequired();
+
+            entity.Property(position => position.Direction).HasConversion<int>().IsRequired();
+            entity.Property(position => position.Status).HasConversion<int>().IsRequired();
+
+            entity.Property(position => position.Quantity).HasColumnType(MoneyColumnType).IsRequired();
+            entity.Property(position => position.EntryPrice).HasColumnType(MoneyColumnType).IsRequired();
+            entity.Property(position => position.MarkPrice).HasColumnType(MoneyColumnType).IsRequired();
+            entity.Property(position => position.UnrealizedPnl).HasColumnType(MoneyColumnType).IsRequired();
+
+            entity.Property(position => position.OpenedAtUtc).IsRequired();
+            entity.Property(position => position.LastTransitionAtUtc).IsRequired(false);
+            entity.Property(position => position.Version).IsConcurrencyToken().IsRequired();
+
+            entity.HasIndex(position => new { position.UserId, position.Status });
+        });
+
+        modelBuilder.Entity<OrderReconciliationRecord>(entity =>
+        {
+            entity.ToTable("OrderReconciliations");
+            entity.HasKey(record => record.Id);
+
+            entity.Property(record => record.OrderId).IsRequired();
+
+            entity.Property(record => record.ExchangeOrderId)
+                .HasMaxLength(64)
+                .IsRequired(false);
+
+            entity.Property(record => record.ObservedStatus).HasConversion<int>().IsRequired();
+            entity.Property(record => record.ObservedAtUtc).IsRequired();
+
+            entity.Property(record => record.Source)
+                .HasMaxLength(128)
+                .IsRequired();
+
+            entity.Property(record => record.ResolutionReason)
+                .HasMaxLength(512)
+                .IsRequired(false);
+
+            entity.Property(record => record.ResolvedAtUtc).IsRequired(false);
+
+            entity.HasIndex(record => record.OrderId);
+            entity.HasIndex(record => record.ResolvedAtUtc);
         });
 
         base.OnModelCreating(modelBuilder);

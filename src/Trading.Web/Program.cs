@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
@@ -34,6 +35,10 @@ var featureNames = new[]
 const string ExperimentDisclaimer =
     "Experiment workers trade with fake funds only and cannot place an order on a real exchange. " +
     "Simulated results do not indicate future results, and no strategy is guaranteed to be profitable.";
+
+const string OrdersDisclaimer =
+    "Live trading is disabled. Orders shown here are paper orders placed with fake funds. " +
+    "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -84,6 +89,14 @@ builder.Services.AddSingleton<ExperimentWorkerPool>();
 builder.Services.AddSingleton<InMemoryTradingHaltState>();
 builder.Services.AddSingleton<ITradingHaltState>(sp => sp.GetRequiredService<InMemoryTradingHaltState>());
 
+// Execution storage. These are the non-durable implementations, which is acceptable only
+// because live trading is disabled. Enabling live trading requires swapping these for the
+// Entity Framework repositories so an exchange order can never outlive its local record.
+builder.Services.AddSingleton<InMemoryOrderRepository>();
+builder.Services.AddSingleton<IOrderRepository>(sp => sp.GetRequiredService<InMemoryOrderRepository>());
+builder.Services.AddSingleton<IPositionRepository, InMemoryPositionRepository>();
+builder.Services.AddSingleton<IOrderReconciliationRepository, InMemoryOrderReconciliationRepository>();
+
 // Instrument universe. The thresholds registered here are the mandatory
 // platform floor; operator configuration is combined with them and may only
 // ever be stricter.
@@ -111,6 +124,7 @@ builder.Services.AddSingleton(sp => new UniverseAdminQueryService(
 
 var app = builder.Build();
 
+app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -151,6 +165,8 @@ app.MapGet("/", () => Results.Content(
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
       <title>Exersist Trading Beta</title>
       <style>
         :root {
@@ -253,9 +269,37 @@ app.MapGet("/", () => Results.Content(
               <li>Identity and invitation domain</li>
               <li>Persistence model for auth metadata</li>
               <li>Audit writer and query API enabled</li>
-              <li>Next: market data and risk controls</li>
+              <li>Order and position state machines persisted</li>
+              <li>Unknown-order reconciliation enforced</li>
             </ul>
           </article>
+        </section>
+
+        <section class="grid" style="margin-top:1.5rem">
+          <a class="card-link" href="/orders"><article class="card">
+            <h3>Orders and reconciliation</h3>
+            <p>Paper orders, open positions, and any order frozen because its exchange outcome could not be established.</p>
+          </article></a>
+          <a class="card-link" href="/experiments"><article class="card">
+            <h3>Experiment workers</h3>
+            <p>Up to ten isolated paper workers with separate balances, state and random seeds.</p>
+          </article></a>
+          <a class="card-link" href="/optimization"><article class="card">
+            <h3>Optimization</h3>
+            <p>Training, validation, untouched holdout and walk-forward plan validation.</p>
+          </article></a>
+          <a class="card-link" href="/admin/universe"><article class="card">
+            <h3>Market universe</h3>
+            <p>Instrument eligibility, data quality evidence and listing-age restrictions.</p>
+          </article></a>
+          <a class="card-link" href="/admin/risk"><article class="card">
+            <h3>Risk and halts</h3>
+            <p>Emergency stop, global and scoped trading halts, close-only and reduce-only modes.</p>
+          </article></a>
+          <a class="card-link" href="/account"><article class="card">
+            <h3>Account</h3>
+            <p>Invitation-only registration and sign in. Secrets never reach the browser.</p>
+          </article></a>
         </section>
       </div>
     </body>
@@ -423,6 +467,8 @@ app.MapGet("/optimization", () => Results.Content(
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
       <title>Optimization plan — Exersist Trading</title>
       <style>
         body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
@@ -626,6 +672,8 @@ app.MapGet("/experiments", () => Results.Content(
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
       <title>Experiment workers — Exersist Trading</title>
       <style>
         body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
@@ -848,6 +896,8 @@ app.MapGet("/admin/risk", () => Results.Content(
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
       <title>Trading safety controls — Exersist Trading</title>
       <style>
         body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
@@ -990,6 +1040,8 @@ app.MapGet("/admin/universe", () => Results.Content(
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
       <title>Instrument universe — Exersist Trading</title>
       <style>
         body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
@@ -1094,6 +1146,392 @@ app.MapGet("/admin/universe", () => Results.Content(
         document.getElementById('purpose').addEventListener('change', load);
         document.getElementById('interval').addEventListener('change', load);
         load();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
+// Orders and positions for the signed-in user only. There is no user id parameter, so one
+// user cannot read another user's trading activity.
+app.MapGet("/api/orders", async (
+    ClaimsPrincipal principal,
+    IOrderRepository orders,
+    IPositionRepository positions,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var ownedOrders = await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var ownedPositions = await positions.ListOpenAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Paper",
+        disclaimer = OrdersDisclaimer,
+        frozen = ownedOrders.Count(order => order.RequiresReconciliation),
+        orders = ownedOrders.Select(order => new
+        {
+            order.Id,
+            order.Symbol,
+            side = order.Side.ToString(),
+            type = order.Type.ToString(),
+            state = order.State.ToString(),
+            order.Quantity,
+            order.FilledQuantity,
+            order.RemainingQuantity,
+            order.Price,
+            order.ClientOrderId,
+            order.ExchangeOrderId,
+            order.ReduceOnly,
+            order.CloseOnly,
+            order.RequiresReconciliation,
+            order.ReconciliationReason,
+            order.CanResubmit,
+            order.CreatedAtUtc,
+            order.LastTransitionAtUtc
+        }),
+        positions = ownedPositions.Select(position => new
+        {
+            position.Id,
+            position.Symbol,
+            direction = position.Direction.ToString(),
+            status = position.Status.ToString(),
+            position.Quantity,
+            position.EntryPrice,
+            position.MarkPrice,
+            position.UnrealizedPnl,
+            position.PermitsIncrease,
+            position.OpenedAtUtc
+        })
+    });
+}).RequireAuthorization();
+
+// Outstanding reconciliations. Every record listed here blocks resubmission of its order until
+// the exchange has proven what actually happened.
+app.MapGet("/api/orders/reconciliations", async (
+    ClaimsPrincipal principal,
+    IOrderReconciliationRepository reconciliations,
+    IOrderRepository orders,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var ownedOrderIds = (await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false))
+        .Select(order => order.Id)
+        .ToHashSet();
+
+    var unresolved = await reconciliations.ListUnresolvedAsync(cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        disclaimer = OrdersDisclaimer,
+        records = unresolved
+            .Where(record => ownedOrderIds.Contains(record.OrderId))
+            .Select(record => new
+            {
+                record.Id,
+                record.OrderId,
+                record.ExchangeOrderId,
+                observedStatus = record.ObservedStatus.ToString(),
+                record.ObservedAtUtc,
+                record.Source,
+                record.RequiresManualReview,
+                record.RequiresResolutionBeforeResubmission,
+                record.IsResolved
+            })
+    });
+}).RequireAuthorization();
+
+app.MapGet("/orders", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <title>Orders and reconciliation</title>
+    </head>
+    <body>
+      <main>
+        <h1>Orders and reconciliation</h1>
+        <p class="lede">
+          Every order placed on your behalf, together with any order whose exchange outcome could
+          not be established. Paper trading is the only mode currently enabled.
+        </p>
+
+        <div class="notice">
+          <strong>Unknown outcomes are never retried.</strong>
+          An order whose exchange status is unknown may already be live. It stays frozen until the
+          exchange confirms what happened, because resubmitting on a guess would double real
+          exposure.
+        </div>
+
+        <h2>Frozen awaiting reconciliation</h2>
+        <div id="reconciliations"><p class="empty">Loading.</p></div>
+
+        <h2>Orders</h2>
+        <div id="orders"><p class="empty">Loading.</p></div>
+
+        <h2>Open positions</h2>
+        <div id="positions"><p class="empty">Loading.</p></div>
+      </main>
+
+      <script>
+        // Every cell is written with textContent so no exchange or user supplied
+        // string can be interpreted as markup.
+        function cell(row, text, className) {
+          var td = document.createElement('td');
+          td.textContent = text === null || text === undefined ? '-' : String(text);
+          if (className) { td.className = className; }
+          row.appendChild(td);
+          return td;
+        }
+
+        function pill(row, text, tone) {
+          var td = document.createElement('td');
+          var span = document.createElement('span');
+          span.className = 'pill ' + tone;
+          span.textContent = text;
+          td.appendChild(span);
+          row.appendChild(td);
+        }
+
+        function table(container, headers, rows, builder, emptyText) {
+          container.textContent = '';
+          if (!rows.length) {
+            var p = document.createElement('p');
+            p.className = 'empty';
+            p.textContent = emptyText;
+            container.appendChild(p);
+            return;
+          }
+
+          var t = document.createElement('table');
+          var thead = document.createElement('thead');
+          var hr = document.createElement('tr');
+          headers.forEach(function (h) {
+            var th = document.createElement('th');
+            th.textContent = h;
+            hr.appendChild(th);
+          });
+          thead.appendChild(hr);
+          t.appendChild(thead);
+
+          var tbody = document.createElement('tbody');
+          rows.forEach(function (item) {
+            var tr = document.createElement('tr');
+            builder(tr, item);
+            tbody.appendChild(tr);
+          });
+          t.appendChild(tbody);
+          container.appendChild(t);
+        }
+
+        function unauthorized(container) {
+          container.textContent = '';
+          var p = document.createElement('p');
+          p.className = 'empty';
+          p.textContent = 'Sign in to view your orders.';
+          container.appendChild(p);
+        }
+
+        async function load() {
+          var ordersEl = document.getElementById('orders');
+          var positionsEl = document.getElementById('positions');
+          var reconEl = document.getElementById('reconciliations');
+
+          var response = await fetch('/api/orders', { headers: { 'Accept': 'application/json' } });
+          if (response.status === 401) {
+            unauthorized(ordersEl);
+            unauthorized(positionsEl);
+            unauthorized(reconEl);
+            return;
+          }
+
+          var data = await response.json();
+
+          table(ordersEl,
+            ['Symbol', 'Side', 'Type', 'State', 'Quantity', 'Filled', 'Price', 'Client order id'],
+            data.orders,
+            function (tr, o) {
+              cell(tr, o.symbol);
+              cell(tr, o.side);
+              cell(tr, o.type);
+              pill(tr, o.state, o.requiresReconciliation ? 'bad' : 'ok');
+              cell(tr, o.quantity, 'numeric');
+              cell(tr, o.filledQuantity, 'numeric');
+              cell(tr, o.price, 'numeric');
+              cell(tr, o.clientOrderId);
+            },
+            'No orders yet.');
+
+          table(positionsEl,
+            ['Symbol', 'Direction', 'Status', 'Quantity', 'Entry', 'Mark', 'Unrealized'],
+            data.positions,
+            function (tr, p) {
+              cell(tr, p.symbol);
+              cell(tr, p.direction);
+              pill(tr, p.status, p.permitsIncrease ? 'ok' : 'warn');
+              cell(tr, p.quantity, 'numeric');
+              cell(tr, p.entryPrice, 'numeric');
+              cell(tr, p.markPrice, 'numeric');
+              cell(tr, p.unrealizedPnl, 'numeric');
+            },
+            'No open positions.');
+
+          var recon = await fetch('/api/orders/reconciliations', { headers: { 'Accept': 'application/json' } });
+          if (recon.status === 401) {
+            unauthorized(reconEl);
+            return;
+          }
+
+          var reconData = await recon.json();
+          table(reconEl,
+            ['Order', 'Observed status', 'Observed at', 'Source', 'Blocks resubmission'],
+            reconData.records,
+            function (tr, r) {
+              cell(tr, r.orderId);
+              pill(tr, r.observedStatus, 'bad');
+              cell(tr, r.observedAtUtc);
+              cell(tr, r.source);
+              cell(tr, r.requiresResolutionBeforeResubmission ? 'Yes' : 'No');
+            },
+            'Nothing is awaiting reconciliation.');
+        }
+
+        load();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
+app.MapGet("/account", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <title>Account</title>
+    </head>
+    <body>
+      <main>
+        <h1>Account</h1>
+        <p class="lede">
+          Fremvo Trading is invitation only. Registration requires a valid invitation code issued
+          by an administrator.
+        </p>
+
+        <div class="notice">
+          <strong>Your keys stay yours.</strong>
+          Exchange API secrets are never stored in this application's database, never written to
+          logs, and never returned to the browser. The platform cannot withdraw or transfer funds,
+          and no withdrawal capability exists anywhere in the product.
+        </div>
+
+        <h2>Sign in</h2>
+        <form id="login-form" class="card">
+          <div class="field">
+            <label for="login-email">Email</label>
+            <input id="login-email" type="email" autocomplete="username" required />
+          </div>
+          <div class="field">
+            <label for="login-password">Password</label>
+            <input id="login-password" type="password" autocomplete="current-password" required />
+          </div>
+          <button type="submit">Sign in</button>
+        </form>
+
+        <h2>Register with an invitation</h2>
+        <form id="register-form" class="card">
+          <div class="field">
+            <label for="register-code">Invitation code</label>
+            <input id="register-code" type="text" required />
+          </div>
+          <div class="field">
+            <label for="register-email">Email</label>
+            <input id="register-email" type="email" autocomplete="username" required />
+          </div>
+          <div class="field">
+            <label for="register-name">Display name</label>
+            <input id="register-name" type="text" required />
+          </div>
+          <div class="field">
+            <label for="register-password">Password</label>
+            <input id="register-password" type="password" autocomplete="new-password" required />
+          </div>
+          <button type="submit">Register</button>
+        </form>
+
+        <p id="status" class="empty"></p>
+
+        <h2>Sign out</h2>
+        <button id="logout" class="secondary" type="button">Sign out</button>
+      </main>
+
+      <script>
+        var status = document.getElementById('status');
+
+        function report(text) {
+          status.textContent = text;
+        }
+
+        async function post(url, body) {
+          var response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+
+          if (response.ok) { return { ok: true }; }
+
+          // Server messages are deliberately generic. Nothing here reveals whether an
+          // account exists, and no credential is ever echoed back.
+          return { ok: false, status: response.status };
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async function (event) {
+          event.preventDefault();
+          report('Signing in.');
+          var result = await post('/api/login', {
+            email: document.getElementById('login-email').value,
+            password: document.getElementById('login-password').value
+          });
+          report(result.ok ? 'Signed in.' : 'Sign in failed.');
+          document.getElementById('login-password').value = '';
+        });
+
+        document.getElementById('register-form').addEventListener('submit', async function (event) {
+          event.preventDefault();
+          report('Registering.');
+          var result = await post('/api/register', {
+            invitationCode: document.getElementById('register-code').value,
+            email: document.getElementById('register-email').value,
+            displayName: document.getElementById('register-name').value,
+            password: document.getElementById('register-password').value
+          });
+          report(result.ok ? 'Registered. You can now sign in.' : 'Registration failed.');
+          document.getElementById('register-password').value = '';
+        });
+
+        document.getElementById('logout').addEventListener('click', async function () {
+          await fetch('/api/logout', { method: 'POST' });
+          report('Signed out.');
+        });
       </script>
     </body>
     </html>

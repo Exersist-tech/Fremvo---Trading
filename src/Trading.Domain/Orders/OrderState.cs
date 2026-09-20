@@ -126,6 +126,162 @@ public sealed class Order
 
     public int Version { get; private set; }
 
+    /// <summary>
+    /// The exchange's own order identifier, once the exchange has confirmed
+    /// one. Null while the order has never been acknowledged.
+    /// </summary>
+    public string? ExchangeOrderId { get; private set; }
+
+    public decimal FilledQuantity { get; private set; }
+
+    public decimal RemainingQuantity => Quantity - FilledQuantity;
+
+    public DateTimeOffset? LastTransitionAtUtc { get; private set; }
+
+    /// <summary>
+    /// True when the exchange outcome is unknown and must be established
+    /// before anything further is done with this order.
+    /// </summary>
+    /// <remarks>
+    /// This is the single most important flag on the aggregate. An order
+    /// whose exchange status is unknown may already be live on the exchange.
+    /// Resubmitting it would double the intended exposure, so the order is
+    /// frozen until a query proves what actually happened.
+    /// </remarks>
+    public bool RequiresReconciliation { get; private set; }
+
+    public string? ReconciliationReason { get; private set; }
+
+    /// <summary>
+    /// True only when the order is provably not live on the exchange and may
+    /// safely be submitted again. Unknown is never safe.
+    /// </summary>
+    public bool CanResubmit =>
+        !RequiresReconciliation &&
+        State is OrderState.Draft or OrderState.PendingValidation;
+
+    public bool IsTerminal =>
+        State is OrderState.Filled or OrderState.Canceled
+            or OrderState.Rejected or OrderState.Expired;
+
+    /// <summary>
+    /// Records that the exchange acknowledged the order.
+    /// </summary>
+    public void MarkSubmitted(string? exchangeOrderId, DateTimeOffset occurredAtUtc)
+    {
+        if (IsTerminal)
+        {
+            throw new InvalidOperationException("A terminal order cannot be submitted again.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(exchangeOrderId))
+        {
+            ExchangeOrderId = exchangeOrderId.Trim();
+        }
+
+        State = OrderState.New;
+        Transition(occurredAtUtc);
+    }
+
+    /// <summary>
+    /// Records a partial fill. Fills are cumulative and may never exceed the
+    /// ordered quantity or move backwards, which would silently lose exposure.
+    /// </summary>
+    public void MarkPartiallyFilled(decimal cumulativeFilledQuantity, DateTimeOffset occurredAtUtc)
+    {
+        if (cumulativeFilledQuantity <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cumulativeFilledQuantity), "A fill must be positive.");
+        }
+
+        if (cumulativeFilledQuantity > Quantity)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cumulativeFilledQuantity), "A fill cannot exceed the ordered quantity.");
+        }
+
+        if (cumulativeFilledQuantity < FilledQuantity)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cumulativeFilledQuantity), "Cumulative fills cannot decrease.");
+        }
+
+        FilledQuantity = cumulativeFilledQuantity;
+        State = cumulativeFilledQuantity == Quantity ? OrderState.Filled : OrderState.PartiallyFilled;
+        Transition(occurredAtUtc);
+    }
+
+    /// <summary>
+    /// Freezes the order because its exchange outcome is unknown.
+    /// </summary>
+    public void MarkUnknown(string reason, DateTimeOffset occurredAtUtc)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("A reason is required.", nameof(reason));
+        }
+
+        RequiresReconciliation = true;
+        ReconciliationReason = reason.Trim();
+        Transition(occurredAtUtc);
+    }
+
+    /// <summary>
+    /// Clears the reconciliation freeze after the true exchange state has
+    /// been established, and applies that state.
+    /// </summary>
+    /// <param name="resolvedState">
+    /// The state proven by the exchange. It may not be
+    /// <see cref="OrderState.Draft"/>: resolution must assert what happened.
+    /// </param>
+    public void ResolveReconciliation(
+        OrderState resolvedState,
+        decimal cumulativeFilledQuantity,
+        string? exchangeOrderId,
+        string reason,
+        DateTimeOffset occurredAtUtc)
+    {
+        if (!RequiresReconciliation)
+        {
+            throw new InvalidOperationException("This order is not awaiting reconciliation.");
+        }
+
+        if (resolvedState == OrderState.Draft)
+        {
+            throw new ArgumentException(
+                "Reconciliation must assert what happened on the exchange.", nameof(resolvedState));
+        }
+
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("A resolution reason is required.", nameof(reason));
+        }
+
+        if (cumulativeFilledQuantity < 0m || cumulativeFilledQuantity > Quantity)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cumulativeFilledQuantity), "Resolved fills must lie between zero and the ordered quantity.");
+        }
+
+        if (cumulativeFilledQuantity < FilledQuantity)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cumulativeFilledQuantity), "Resolved fills cannot be lower than fills already recorded.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(exchangeOrderId))
+        {
+            ExchangeOrderId = exchangeOrderId.Trim();
+        }
+
+        FilledQuantity = cumulativeFilledQuantity;
+        State = resolvedState;
+        RequiresReconciliation = false;
+        ReconciliationReason = reason.Trim();
+        Transition(occurredAtUtc);
+    }
+
     public void MarkAccepted()
     {
         if (State == OrderState.Rejected || State == OrderState.Canceled || State == OrderState.Filled)
@@ -167,6 +323,12 @@ public sealed class Order
         }
 
         State = OrderState.Canceled;
+        Version++;
+    }
+
+    private void Transition(DateTimeOffset occurredAtUtc)
+    {
+        LastTransitionAtUtc = occurredAtUtc;
         Version++;
     }
 }

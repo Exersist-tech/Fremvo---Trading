@@ -69,10 +69,31 @@ public sealed class OrderReconciliationRecord
 
     public bool RequiresManualReview => ObservedStatus == ExchangeOrderStatus.Unknown || ObservedStatus == ExchangeOrderStatus.Failed;
 
-    public bool RequiresResolutionBeforeResubmission =>
-        ObservedStatus == ExchangeOrderStatus.Unknown ||
-        ObservedStatus == ExchangeOrderStatus.PendingCancel ||
-        ObservedStatus == ExchangeOrderStatus.PendingReplace;
+    public bool IsResolved => ResolvedAtUtc.HasValue;
+
+    /// <summary>
+    /// True only when the exchange has proven the order is not live and can
+    /// never become live.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ExchangeOrderStatus.Failed"/> is deliberately excluded. A
+    /// failure is a failure to learn the outcome, not evidence that the
+    /// exchange rejected the order.
+    /// </remarks>
+    public bool ProvesOrderIsNotLive =>
+        ObservedStatus is ExchangeOrderStatus.Rejected
+            or ExchangeOrderStatus.Expired
+            or ExchangeOrderStatus.Canceled;
+
+    /// <summary>
+    /// True whenever resubmitting would risk duplicating live exposure.
+    /// </summary>
+    /// <remarks>
+    /// The default is to block. Resubmission is permitted only by positive
+    /// proof that the original order is not live, never by the absence of
+    /// evidence that it is.
+    /// </remarks>
+    public bool RequiresResolutionBeforeResubmission => !ProvesOrderIsNotLive;
 
     public void Resolve(ExchangeOrderStatus resolvedStatus, string reason, DateTimeOffset resolvedAtUtc)
     {

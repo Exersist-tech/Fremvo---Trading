@@ -99,6 +99,50 @@ public sealed class Position
 
     public PositionStatus Status { get; private set; }
 
+    public int Version { get; private set; }
+
+    public DateTimeOffset? LastTransitionAtUtc { get; private set; }
+
+    /// <summary>
+    /// True when exposure may still be increased. Closed, liquidated and
+    /// restricted positions never permit an increase.
+    /// </summary>
+    public bool PermitsIncrease => Status == PositionStatus.Open;
+
+    /// <summary>
+    /// Restricts the position so only exposure-reducing orders are accepted.
+    /// </summary>
+    /// <remarks>
+    /// The restriction is deliberately one-way. Lifting it requires a new
+    /// evaluation rather than a state transition, so a degraded feed or a
+    /// risk breach cannot be undone by the same code path that noticed it.
+    /// </remarks>
+    public void RestrictToReduceOnly(DateTimeOffset occurredAtUtc)
+    {
+        if (Status is PositionStatus.Flat or PositionStatus.Liquidated)
+        {
+            throw new InvalidOperationException("A closed position cannot be restricted.");
+        }
+
+        Status = PositionStatus.ReducedOnly;
+        Transition(occurredAtUtc);
+    }
+
+    /// <summary>
+    /// Marks the position as closing. Only exposure-removing orders are
+    /// accepted from this point.
+    /// </summary>
+    public void BeginClosing(DateTimeOffset occurredAtUtc)
+    {
+        if (Status is PositionStatus.Flat or PositionStatus.Liquidated)
+        {
+            throw new InvalidOperationException("A closed position cannot begin closing.");
+        }
+
+        Status = PositionStatus.Closing;
+        Transition(occurredAtUtc);
+    }
+
     public void UpdateMarkPrice(decimal newMarkPrice)
     {
         if (newMarkPrice <= 0m)
@@ -136,5 +180,12 @@ public sealed class Position
     {
         Status = PositionStatus.Liquidated;
         Quantity = 0m;
+        Version++;
+    }
+
+    private void Transition(DateTimeOffset occurredAtUtc)
+    {
+        LastTransitionAtUtc = occurredAtUtc;
+        Version++;
     }
 }

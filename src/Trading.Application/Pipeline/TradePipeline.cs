@@ -1,5 +1,6 @@
 namespace Trading.Application.Pipeline;
 
+using Trading.Application.Execution;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
@@ -138,6 +139,7 @@ public sealed class TradePipeline
     private readonly RiskEngine _riskEngine;
     private readonly ITradingHaltState _haltState;
     private readonly OrderIdempotencyGuard _idempotencyGuard;
+    private readonly IOrderReconciliationRepository? _reconciliations;
     private readonly TradePipelineOptions _options;
 
     public TradePipeline(
@@ -151,7 +153,8 @@ public sealed class TradePipeline
         RiskEngine riskEngine,
         ITradingHaltState haltState,
         OrderIdempotencyGuard idempotencyGuard,
-        TradePipelineOptions? options = null)
+        TradePipelineOptions? options = null,
+        IOrderReconciliationRepository? reconciliations = null)
     {
         ArgumentNullException.ThrowIfNull(marketEvents);
         ArgumentNullException.ThrowIfNull(decisions);
@@ -174,6 +177,7 @@ public sealed class TradePipeline
         _riskEngine = riskEngine;
         _haltState = haltState;
         _idempotencyGuard = idempotencyGuard;
+        _reconciliations = reconciliations;
         _options = options ?? new TradePipelineOptions();
     }
 
@@ -330,13 +334,31 @@ public sealed class TradePipeline
         // An unknown outcome must be reconciled, never blindly retried.
         if (IsUnknownOutcome(execution))
         {
+            const string UnknownReason =
+                "Exchange status unknown; reconciliation required before any resubmission.";
+
+            // The record is what makes the freeze durable and visible. Without
+            // it the unknown outcome would exist only as a returned value that
+            // a caller could ignore.
+            if (_reconciliations is not null)
+            {
+                await _reconciliations.AddAsync(
+                    new OrderReconciliationRecord(
+                        Guid.NewGuid(),
+                        command.Id,
+                        exchangeOrderId: null,
+                        ExchangeOrderStatus.Unknown,
+                        now,
+                        source: $"pipeline:{context.Mode}"),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             await WriteAuditAsync(
                 context, "Trade.ExecutionUnknown", intent.Id.ToString(),
-                "Exchange status unknown; reconciliation required before any resubmission.",
+                UnknownReason,
                 cancellationToken).ConfigureAwait(false);
 
-            return TradePipelineResult.NeedsReconciliation(
-                "Exchange status unknown; reconciliation required before any resubmission.");
+            return TradePipelineResult.NeedsReconciliation(UnknownReason);
         }
 
         if (!execution.Success)
