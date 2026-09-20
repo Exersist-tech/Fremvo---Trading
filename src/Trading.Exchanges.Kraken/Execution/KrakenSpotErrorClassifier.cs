@@ -83,7 +83,40 @@ internal static class KrakenSpotErrorClassifier
         "Cost minimum not met",
         "Invalid leverage",
         "Trading agreement required",
-        "Unavailable for this pair"
+        "Unavailable for this pair",
+
+        // Kraken's precision and filter refusals. Each is raised while
+        // validating the request, before the order can reach the book.
+        "Tick size check failed",
+        "Limit price check failed",
+        "Price check failed",
+        "Unknown asset",
+        "Orders limit exceeded",
+        "Positions limit exceeded",
+        "Reduce only",
+        "Post only order"
+    ];
+
+    /// <summary>
+    /// Errors that mean Kraken was unwilling or unable to act right now.
+    /// </summary>
+    /// <remarks>
+    /// These are listed even though unrecognised strings already fall through
+    /// to <see cref="KrakenErrorClass.Inconclusive"/>. Naming them makes the
+    /// intent testable: a future edit that moves a rate limit or a nonce error
+    /// into the refusal list has to delete an explicit statement that it is
+    /// not one, rather than merely add a marker.
+    /// </remarks>
+    private static readonly string[] InconclusiveMarkers =
+    [
+        "Rate limit exceeded",
+        "Too many requests",
+        "Temporary lockout",
+        "Invalid nonce",
+        "Service:Unavailable",
+        "Service:Busy",
+        "Internal error",
+        "Cancel pending"
     ];
 
     private static readonly string[] CredentialMarkers =
@@ -127,6 +160,14 @@ internal static class KrakenSpotErrorClassifier
             || e.Contains("Order not open", StringComparison.OrdinalIgnoreCase)))
         {
             return KrakenErrorClass.AlreadyClosed;
+        }
+
+        if (errors.Any(e => InconclusiveMarkers.Any(m => e.Contains(m, StringComparison.OrdinalIgnoreCase))))
+        {
+            // Checked before the refusal list so that a message carrying both
+            // a rate limit and something that reads like a content complaint
+            // is not mistaken for proof the order is absent.
+            return KrakenErrorClass.Inconclusive;
         }
 
         if (errors.Any(e => BadRequestMarkers.Any(m => e.Contains(m, StringComparison.OrdinalIgnoreCase))))

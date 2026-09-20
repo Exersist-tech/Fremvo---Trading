@@ -266,7 +266,8 @@ public sealed class ExecutionCommand
         decimal price,
         DateTimeOffset createdAtUtc,
         string clientOrderId,
-        bool isPaperOnly = true)
+        bool isPaperOnly = true,
+        Guid? exchangeAccountId = null)
     {
         if (id == Guid.Empty)
         {
@@ -298,6 +299,17 @@ public sealed class ExecutionCommand
             throw new ArgumentException("Client order id is required.", nameof(clientOrderId));
         }
 
+        // A command that may reach a venue must name the account it will be
+        // sent with. Without it the adapter would have to infer whose money is
+        // at risk, and an inference is not an acceptable basis for a real
+        // order. Simulated commands need no account, because nothing is sent.
+        if (!isPaperOnly && (exchangeAccountId is null || exchangeAccountId == Guid.Empty))
+        {
+            throw new ArgumentException(
+                "A command that is not paper-only must name the exchange account it executes against.",
+                nameof(exchangeAccountId));
+        }
+
         Id = id;
         TradeIntentId = tradeIntentId;
         Symbol = symbol.Trim();
@@ -307,6 +319,7 @@ public sealed class ExecutionCommand
         CreatedAtUtc = createdAtUtc;
         ClientOrderId = clientOrderId.Trim();
         IsPaperOnly = isPaperOnly;
+        ExchangeAccountId = exchangeAccountId;
     }
 
     public Guid Id { get; }
@@ -326,6 +339,40 @@ public sealed class ExecutionCommand
     public string ClientOrderId { get; }
 
     public bool IsPaperOnly { get; }
+
+    /// <summary>
+    /// The exchange account this command executes against. Null only for a
+    /// paper-only command, which reaches no venue.
+    /// </summary>
+    public Guid? ExchangeAccountId { get; }
+}
+
+/// <summary>
+/// What an execution adapter established about a command.
+/// </summary>
+/// <remarks>
+/// <see cref="Rejected"/> and <see cref="Unknown"/> must never be collapsed
+/// into a single "did not succeed". A rejection proves no order exists, so a
+/// corrected resubmission is safe. An unknown outcome proves nothing, and
+/// resubmitting on it is how a network timeout becomes two live positions.
+/// </remarks>
+public enum ExecutionOutcome
+{
+    /// <summary>The order exists and filled, wholly or partly.</summary>
+    Filled = 0,
+
+    /// <summary>
+    /// The venue refused the order on its own content. No order exists and
+    /// none can arise from this command.
+    /// </summary>
+    Rejected = 1,
+
+    /// <summary>
+    /// Nothing was established. The order may be live. It must be reconciled
+    /// against the venue before anything further is submitted for the same
+    /// intent.
+    /// </summary>
+    Unknown = 2
 }
 
 public interface IExecutionAdapter
@@ -343,7 +390,8 @@ public sealed class ExecutionResult
         decimal averageFillPrice,
         decimal fees,
         DateTimeOffset executedAtUtc,
-        string? failureReason = null)
+        string? failureReason = null,
+        ExecutionOutcome? outcome = null)
     {
         if (executionCommandId == Guid.Empty)
         {
@@ -378,7 +426,25 @@ public sealed class ExecutionResult
         Fees = fees;
         ExecutedAtUtc = executedAtUtc;
         FailureReason = failureReason;
+
+        // Deriving the outcome is only legitimate for an adapter that cannot
+        // be in doubt — a simulated fill always knows what it did. A venue
+        // adapter must state the outcome, because "did not succeed" is exactly
+        // where a refusal and an unanswered request look alike.
+        Outcome = outcome ?? (success ? ExecutionOutcome.Filled : ExecutionOutcome.Rejected);
     }
+
+    /// <summary>
+    /// What was established. Prefer this over <see cref="Success"/> when
+    /// deciding whether anything further may be submitted.
+    /// </summary>
+    public ExecutionOutcome Outcome { get; }
+
+    /// <summary>
+    /// True when the platform must establish the venue's state before
+    /// submitting anything else for the same intent.
+    /// </summary>
+    public bool RequiresReconciliation => Outcome == ExecutionOutcome.Unknown;
 
     public Guid ExecutionCommandId { get; }
 

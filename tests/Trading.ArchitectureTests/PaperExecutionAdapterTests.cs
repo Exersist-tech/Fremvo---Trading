@@ -40,7 +40,8 @@ public sealed class PaperExecutionAdapterTests
             3500m,
             DateTimeOffset.UtcNow,
             "client-order-live-1",
-            isPaperOnly: false);
+            isPaperOnly: false,
+            exchangeAccountId: Guid.NewGuid());
 
         var result = await adapter.ExecuteAsync(command);
 

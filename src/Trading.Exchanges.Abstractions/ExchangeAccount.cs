@@ -107,6 +107,50 @@ public sealed class ExchangeAccount
 
     public DateTimeOffset? StageChangedAtUtc { get; private set; }
 
+    /// <summary>
+    /// The largest notional, in the instrument's quote currency, that a single
+    /// order may carry while this account is in
+    /// <see cref="TradingStage.Proving"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Kraken publishes no public Spot sandbox, so proving the execution and
+    /// reconciliation route means placing real orders. The ceiling is what
+    /// keeps the cost of that proof small and known in advance.
+    /// </para>
+    /// <para>
+    /// It is recorded here but enforced by the risk engine, not by the
+    /// execution adapter. Enforcing it at the adapter would make the one
+    /// component that talks to the exchange the only thing standing between a
+    /// bug and an unbounded real order.
+    /// </para>
+    /// <para>
+    /// Null means no ceiling has been set, which the risk engine must treat as
+    /// "no proving order is permitted" rather than "no limit".
+    /// </para>
+    /// </remarks>
+    public decimal? ProvingNotionalCeiling { get; private set; }
+
+    /// <summary>
+    /// Sets the proving ceiling. Only the platform may call this; a user may
+    /// not raise their own ceiling.
+    /// </summary>
+    public void SetProvingNotionalCeiling(decimal ceiling)
+    {
+        if (ceiling <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ceiling), "A proving notional ceiling must be positive.");
+        }
+
+        ProvingNotionalCeiling = ceiling;
+    }
+
+    /// <summary>
+    /// Clears the ceiling, which stops proving orders entirely.
+    /// </summary>
+    public void ClearProvingNotionalCeiling() => ProvingNotionalCeiling = null;
+
     public void MarkPendingValidation(DateTimeOffset nowUtc)
     {
         Status = ExchangeAccountStatus.PendingValidation;

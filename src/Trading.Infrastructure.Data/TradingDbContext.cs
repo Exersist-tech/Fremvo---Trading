@@ -195,6 +195,13 @@ public sealed class TradingDbContext : DbContext
             entity.Property(account => account.StageChangedAtUtc)
                 .IsRequired(false);
 
+            // Money, so decimal with an explicit precision. Nullable because
+            // "no ceiling set" is a distinct state from "a ceiling of zero",
+            // and the risk engine blocks on the former.
+            entity.Property(account => account.ProvingNotionalCeiling)
+                .HasColumnType("decimal(18,8)")
+                .IsRequired(false);
+
             entity.HasIndex(account => new { account.UserId, account.ExchangeKind })
                 .IsUnique(false);
         });

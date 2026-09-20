@@ -474,10 +474,11 @@ public sealed class KrakenSpotOrderGatewayTests
     [Fact]
     public void TheGatewayIsNotYetALiveExecutionRoute()
     {
-        // Phase 9.1 delivers the ability to talk to Kraken. It deliberately
-        // does not open the promotion ladder: the execution adapter, replay
-        // harness, reconciliation taxonomy and proving ceiling come first. The
-        // day this assertion is deleted, live trading becomes reachable.
+        // Phase 9 delivers the ability to place, reconcile and bound a real
+        // order. It deliberately does not open the promotion ladder: the gated
+        // rollout, supervision and audit surface are Phase 10. The day this
+        // assertion is deleted, live trading becomes reachable, and that must
+        // be a decision rather than a side effect.
         Assert.False(typeof(ILiveExecutionRoute).IsAssignableFrom(typeof(KrakenSpotOrderGateway)));
     }
 

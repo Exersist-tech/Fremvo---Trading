@@ -162,7 +162,8 @@ public sealed class RiskEngine
         StalenessPolicy? stalenessPolicy = null,
         RiskLimitHierarchy? riskLimitHierarchy = null,
         DateTimeOffset? lastDataUpdateUtc = null,
-        DateTimeOffset? nowUtc = null)
+        DateTimeOffset? nowUtc = null,
+        ProvingRestriction? provingRestriction = null)
     {
         var active = new List<RiskLimit>();
 
@@ -248,6 +249,18 @@ public sealed class RiskEngine
         {
             active.Add(new RiskLimit(RiskLimitType.MaxDailyLoss, 500m, "Daily loss limit reached."));
             return new RiskEvaluationResult(false, "Daily loss limit reached.", active);
+        }
+
+        // The proving bounds are a platform restriction, not a user preference,
+        // so they are checked alongside the mandatory ceilings and cannot be
+        // widened by anything the user configures.
+        if (provingRestriction?.Violation() is { } provingViolation)
+        {
+            active.Add(new RiskLimit(
+                RiskLimitType.MaxOrderSize,
+                provingRestriction.NotionalCeiling ?? 0m,
+                provingViolation));
+            return new RiskEvaluationResult(false, provingViolation, active);
         }
 
         foreach (var limit in _mandatoryLimits)
