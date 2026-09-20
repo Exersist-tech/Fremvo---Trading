@@ -244,7 +244,11 @@ public sealed class PaperExperimentWorkerRunnerTests
     }
 
     private static Dictionary<string, ExperimentCandleSeriesResult> FixedUniverseSeries() =>
-        new[] { ("BTC/USD", 100m), ("ETH/USD", 90m), ("SOL/USD", 80m) }
+        new[]
+            {
+                ("BTC/USD", 100m), ("ETH/USD", 90m), ("SOL/USD", 80m),
+                ("XRP/EUR", 70m), ("TRX/EUR", 60m), ("DOGE/EUR", 50m), ("ADA/EUR", 40m)
+            }
             .ToDictionary(pair => pair.Item1, pair =>
             {
                 var candles = Enumerable.Range(0, 91).Select(index =>

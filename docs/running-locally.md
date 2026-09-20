@@ -35,7 +35,7 @@ the symbols and native Kraken intervals, for example:
 ```json
 "MarketDataStreaming": {
   "Enabled": true,
-  "Symbols": [ "BTC/USD" ],
+  "Symbols": [ "BTC/USD", "ETH/USD", "SOL/USD", "XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR" ],
   "Intervals": [ "OneMinute", "FiveMinutes" ],
   "MaximumReconnectDelaySeconds": 30
 }

@@ -34,7 +34,7 @@ public sealed class UnconfiguredSupplementalExperimentEvidenceProvider : ISupple
 /// </summary>
 public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplementalExperimentEvidenceProvider
 {
-    private static readonly string[] Universe = ["BTC/USD", "ETH/USD", "SOL/USD"];
+    private static readonly string[] Universe = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR"];
     private readonly IExperimentCandleSeriesSource _candles;
 
     public PlatformSupplementalExperimentEvidenceProvider(IExperimentCandleSeriesSource candles) =>
@@ -81,7 +81,7 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
                 primarySeries.AsOfUtc, result.Series.Candles));
         }
 
-        var dataset = new CrossSectionalMomentumDataset("platform-fixed-btc-eth-sol-v1", primarySeries.AsOfUtc, primarySeries.Interval, members);
+        var dataset = new CrossSectionalMomentumDataset("platform-fixed-paper-universe-v2", primarySeries.AsOfUtc, primarySeries.Interval, members);
         if (!relativeStrength)
         {
             var model = new CrossSectionalMomentumRotationResearchModel();
@@ -93,9 +93,9 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
                         ["topCount"] = StrategyParameterValue.WholeNumber(1)
                     }), provenance.GateEvaluation));
             if (result.Status == CrossSectionalMomentumResearchStatus.Blocked) return ExperimentAnalysisResult.Blocked(result.Rationale);
-            return result.Rankings.Single().Symbol == "BTC/USD"
+            return result.Rankings.Single().Symbol == primarySeries.Symbol
                 ? ExperimentAnalysisResult.Analyzed(result.Rationale, 1m)
-                : ExperimentAnalysisResult.NoCondition($"{result.Rationale} BTC/USD is not the fixed worker candidate.");
+                : ExperimentAnalysisResult.NoCondition($"{result.Rationale} {primarySeries.Symbol} is not the fixed worker candidate.");
         }
 
         var relative = new RelativeStrengthPullbackRotationResearchModel();
@@ -109,9 +109,9 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
                     ["maximumPullbackFraction"] = StrategyParameterValue.FromNumeric(.10m)
                 }), provenance.GateEvaluation));
         if (evaluation.Status == RelativeStrengthPullbackResearchStatus.Blocked) return ExperimentAnalysisResult.Blocked(evaluation.Rationale);
-        return evaluation.Candidate?.Symbol == "BTC/USD"
+        return evaluation.Candidate?.Symbol == primarySeries.Symbol
             ? ExperimentAnalysisResult.Analyzed(evaluation.Rationale, 1m)
-            : ExperimentAnalysisResult.NoCondition($"{evaluation.Rationale} BTC/USD is not the fixed worker candidate.");
+            : ExperimentAnalysisResult.NoCondition($"{evaluation.Rationale} {primarySeries.Symbol} is not the fixed worker candidate.");
     }
 
     private static ExperimentAnalysisResult Session(ExperimentCandleSeries series, ExperimentResearchProvenance provenance)
@@ -142,7 +142,7 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
         var component = new RegimeSwitchingComponentObservation(
             new StrategyAnalysisProposal(new StrategyTemplateId("ema-trend-continuation-v1"), series.AsOfUtc,
                 StrategyAnalysisDirection.Bullish, .5m, "Fixed closed-candle platform component observation."),
-            new RegimeSwitchingObservationProvenance("platform-fixed-btc-eth-sol-v1", "BTC/USD", timeframe, series.AsOfUtc, true));
+            new RegimeSwitchingObservationProvenance("platform-fixed-paper-universe-v2", series.Symbol, timeframe, series.AsOfUtc, true));
         var result = model.Evaluate(new RegimeSwitchingEnsembleEvaluationInput(classification, [component], provenance.GateEvaluation));
         return result.Status == RegimeSwitchingEnsembleStatus.Observed && result.Direction == StrategyAnalysisDirection.Bullish
             ? ExperimentAnalysisResult.Analyzed(result.Rationale, 1m)
@@ -155,7 +155,12 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
     {
         "BTC/USD" => Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
         "ETH/USD" => Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
-        _ => Guid.Parse("55555555-5555-5555-5555-555555555555")
+        "SOL/USD" => Guid.Parse("55555555-5555-5555-5555-555555555555"),
+        "XRP/EUR" => Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        "TRX/EUR" => Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+        "DOGE/EUR" => Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+        "ADA/EUR" => Guid.Parse("f0f0f0f0-f0f0-f0f0-f0f0-f0f0f0f0f0f0"),
+        _ => throw new InvalidOperationException($"'{symbol}' is not an approved paper-universe symbol.")
     };
 
     private static bool HasExactSafeSeries(ExperimentCandleSeries series)

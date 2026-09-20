@@ -10,6 +10,8 @@ public sealed class PaperTrainingActivationTests
     private static readonly DateTimeOffset Now = new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
     private static readonly string[] ExpectedAuditActions = ["PaperTrainingStarted"];
     private static readonly int[] ExpectedGroupSizes = [4, 3, 3];
+    private static readonly string[] ExpectedCatalogSymbols =
+        ["XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR", "XRP/EUR", "TRX/EUR", "BTC/USD", "BTC/USD", "DOGE/EUR", "ADA/EUR"];
 
     [Fact]
     public async Task DefaultActivationSourceStartsNoWorkers()
@@ -64,7 +66,7 @@ public sealed class PaperTrainingActivationTests
         Assert.Equal(10, request.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(ExpectedGroupSizes, request.Slots.GroupBy(slot => slot.Group).OrderBy(group => group.Key).Select(group => group.Count()));
         Assert.All(request.Slots, slot => Assert.StartsWith("phase5b-", slot.ProvenanceId, StringComparison.Ordinal));
-        Assert.All(request.Slots, slot => Assert.Equal("BTC/USD", slot.Symbol));
+        Assert.Equal(ExpectedCatalogSymbols, request.Slots.Select(slot => slot.Symbol));
     }
 
     [Fact]
