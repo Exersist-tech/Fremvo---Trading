@@ -46,6 +46,36 @@
     }
   }
 
+  // Revealing the password is a deliberate, temporary action taken by the
+  // person at the keyboard. The field is put back to a password field on
+  // submit so a revealed password is not left on screen afterwards.
+  function togglePassword() {
+    var field = $('login-password');
+    var button = $('toggle-password');
+    var reveal = field.type === 'password';
+    field.type = reveal ? 'text' : 'password';
+    button.textContent = reveal ? 'Hide' : 'Show';
+    button.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+    field.focus();
+  }
+
+  function hidePassword() {
+    var field = $('login-password');
+    if (field.type !== 'password') {
+      field.type = 'password';
+      $('toggle-password').textContent = 'Show';
+      $('toggle-password').setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  // Caps Lock is the most common reason a correct password is rejected, and
+  // the server deliberately cannot tell the user which half was wrong.
+  function updateCapsLockNote(event) {
+    var note = $('capslock-note');
+    if (typeof event.getModifierState !== 'function') { return; }
+    note.hidden = !event.getModifierState('CapsLock');
+  }
+
   async function signIn(event) {
     event.preventDefault();
 
@@ -60,6 +90,7 @@
 
     setStatus('Signing in.', false);
     $('login-submit').disabled = true;
+    hidePassword();
 
     try {
       var response = await fetch('/api/login', {
@@ -101,6 +132,10 @@
 
   window.addEventListener('DOMContentLoaded', async function () {
     $('login-form').addEventListener('submit', signIn);
+    $('toggle-password').addEventListener('click', togglePassword);
+    $('login-password').addEventListener('keyup', updateCapsLockNote);
+    $('login-password').addEventListener('keydown', updateCapsLockNote);
+    $('login-password').addEventListener('blur', function () { $('capslock-note').hidden = true; });
 
     if (new URLSearchParams(window.location.search).has('signedOut')) {
       $('signed-out-note').hidden = false;

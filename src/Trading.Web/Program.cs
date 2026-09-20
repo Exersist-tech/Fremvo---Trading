@@ -283,7 +283,17 @@ app.MapPost("/api/audit", async (IAuditEventWriter writer, CancellationToken can
     return Results.Ok(new { request.Id, request.Action, request.CorrelationId });
 });
 
-app.MapGet("/", () => Results.Content(
+// The entry point is a decision, not a page. An anonymous visitor is sent to
+// sign-in, because on an invitation-only platform there is nothing else for
+// them to do; a signed-in user is sent straight to the trading application
+// rather than to a marketing page they have already read. The overview itself
+// still exists at /welcome for anyone who wants it.
+app.MapGet("/", (ClaimsPrincipal principal) =>
+    principal.Identity?.IsAuthenticated == true
+        ? Results.Redirect("/chart")
+        : Results.Redirect("/login"));
+
+app.MapGet("/welcome", () => Results.Content(
     """
     <!DOCTYPE html>
     <html lang="en">
@@ -2611,53 +2621,96 @@ app.MapGet("/exchange", () => Results.Content(
 // A dedicated sign-in page. Sign-in is the only thing on it, so an
 // unauthenticated visitor lands somewhere with one obvious action rather than
 // on a page mixing sign-in, registration and account management.
-app.MapGet("/login", () => Results.Content(
-    """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <link rel="stylesheet" href="/app.css" />
-      <script defer src="/login.js"></script>
-      <title>Sign in</title>
-    </head>
-    <body>
-      <main class="signin">
-        <h1>Fremvo <span class="accent">Trading</span></h1>
-        <p class="lede">Invitation only. Sign in to reach the trading application.</p>
+app.MapGet("/login", (IHostEnvironment environment, IConfiguration configuration) =>
+{
+    // The seeded demo credentials are shown on the page only when this process
+    // actually seeded them: Development environment *and* the seed flag. Both
+    // conditions are the same ones the seeder itself checks, so the hint can
+    // never describe an account that does not exist, and it cannot appear in a
+    // deployed environment even if the flag is set by mistake.
+    var demoHint = environment.IsDevelopment()
+        && configuration.GetValue<bool>("Development:SeedDemoData")
+            ? $"""
+              <div class="notice ok demo-hint">
+                <strong>Development build.</strong>
+                Seeded sign-in: <code>{DevelopmentDataSeeder.AdministratorEmail}</code>
+                / <code>{DevelopmentDataSeeder.DemoPassword}</code>.
+                These exist only in the local development database.
+              </div>
+              """
+            : string.Empty;
 
-        <div id="signed-out-note" class="notice" hidden>You are signed out.</div>
+    return Results.Content(
+        $$"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <link rel="stylesheet" href="/app.css" />
+          <script defer src="/login.js"></script>
+          <title>Sign in - Fremvo Trading</title>
+        </head>
+        <body class="signin-body">
+          <main class="signin">
+            <section class="signin-brand">
+              <div class="brand-mark">Fremvo <span class="accent">Trading</span></div>
+              <h1>Trade your own exchange account.</h1>
+              <p class="lede">
+                An invitation-only platform for scanning markets, testing approved strategy
+                templates against history, and trading them through your own exchange keys.
+              </p>
+              <ul class="brand-points">
+                <li><strong>Your funds stay yours.</strong> The platform never holds, transfers or
+                    withdraws funds, and no withdrawal capability exists anywhere in the product.</li>
+                <li><strong>Paper first.</strong> Every account starts with fake funds. Live trading
+                    is off by default and has to be earned, not switched on.</li>
+                <li><strong>No profit claims.</strong> Backtests and simulations describe the past.
+                    They are not a prediction and not financial advice.</li>
+              </ul>
+            </section>
 
-        <form id="login-form" class="card">
-          <div class="field">
-            <label for="login-email">Email</label>
-            <input id="login-email" type="email" autocomplete="username" required autofocus />
-          </div>
-          <div class="field">
-            <label for="login-password">Password</label>
-            <input id="login-password" type="password" autocomplete="current-password" required />
-          </div>
-          <button id="login-submit" type="submit">Sign in</button>
-        </form>
+            <section class="signin-panel">
+              <div class="card signin-card">
+                <h2>Sign in</h2>
+                <p class="signin-sub">Use the email your invitation was issued to.</p>
 
-        <p id="status" class="empty" role="status" aria-live="polite"></p>
+                <div id="signed-out-note" class="notice" hidden>You are signed out.</div>
 
-        <p class="empty">
-          No account? Registration requires an invitation code from an administrator.
-          <a href="/account">Register with an invitation</a>.
-        </p>
+                <form id="login-form" novalidate>
+                  <div class="field">
+                    <label for="login-email">Email</label>
+                    <input id="login-email" type="email" inputmode="email" spellcheck="false"
+                           autocomplete="username" required autofocus placeholder="you@example.com" />
+                  </div>
+                  <div class="field">
+                    <label for="login-password">Password</label>
+                    <div class="input-with-action">
+                      <input id="login-password" type="password" autocomplete="current-password" required />
+                      <button id="toggle-password" type="button" class="link-button"
+                              aria-controls="login-password" aria-pressed="false">Show</button>
+                    </div>
+                    <p id="capslock-note" class="hint" hidden>Caps Lock is on.</p>
+                  </div>
+                  <button id="login-submit" type="submit" class="primary wide">Sign in</button>
+                </form>
 
-        <div class="notice">
-          <strong>Live trading is disabled.</strong>
-          Every account starts in paper trading with fake funds. The platform never holds,
-          transfers or withdraws funds, and no withdrawal capability exists in the product.
-        </div>
-      </main>
-    </body>
-    </html>
-    """,
-    "text/html"));
+                <p id="status" class="empty" role="status" aria-live="polite"></p>
+
+                <p class="signin-alt">
+                  No account? Registration requires an invitation code from an administrator.
+                  <a href="/account">Register with an invitation</a>.
+                </p>
+              </div>
+
+              {{demoHint}}
+            </section>
+          </main>
+        </body>
+        </html>
+        """,
+        "text/html");
+});
 
 app.MapGet("/account", () => Results.Content(
     """

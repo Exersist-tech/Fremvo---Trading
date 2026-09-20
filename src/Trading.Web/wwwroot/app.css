@@ -315,14 +315,141 @@ footer.app-footer {
 
 .notice.ok { border-left-color: var(--ok); }
 
-/* The dedicated sign-in page is narrow so the single action on it is
-   unmistakable. */
+/* The sign-in page. It carries no navigation bar, because every link on it
+   would lead somewhere the visitor cannot go. The product statement sits
+   beside the form rather than above it, so the form stays the first thing in
+   reach on a narrow screen while the claims stay visible on a wide one. */
+body.signin-body {
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 520px at 12% -10%, rgba(79, 156, 249, 0.16), transparent 60%),
+    radial-gradient(900px 480px at 100% 110%, rgba(63, 185, 80, 0.10), transparent 60%),
+    var(--bg);
+}
+
 main.signin {
-  max-width: 28rem;
+  max-width: 62rem;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  align-items: center;
+  gap: 3.5rem;
+  padding: 2.5rem 1.5rem;
 }
 
-main.signin h1 {
-  margin-bottom: 0.25rem;
+.signin-brand .brand-mark {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 1.05rem;
+  margin-bottom: 1.75rem;
 }
 
-main.signin .accent { color: var(--accent); }
+.signin-brand h1 {
+  font-size: clamp(1.8rem, 3.2vw, 2.5rem);
+  line-height: 1.2;
+  margin-bottom: 0.75rem;
+}
+
+.signin .accent { color: var(--accent); }
+
+.brand-points {
+  list-style: none;
+  margin: 1.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.brand-points li {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  border-left: 2px solid var(--line);
+  padding-left: 0.9rem;
+}
+
+.brand-points strong { color: var(--text); }
+
+.signin-panel { min-width: 0; }
+
+.signin-card {
+  padding: 1.6rem 1.6rem 1.4rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.signin-card h2 { margin: 0 0 0.2rem; font-size: 1.25rem; }
+
+.signin-sub {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0 0 1.25rem;
+}
+
+.signin-card input[type="email"],
+.signin-card input[type="password"] {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.95rem;
+}
+
+.signin-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.input-with-action { position: relative; display: flex; align-items: center; }
+
+.input-with-action input { padding-right: 4.25rem; }
+
+button.link-button {
+  position: absolute;
+  right: 0.35rem;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem;
+}
+
+button.link-button:hover { color: var(--accent); }
+
+.hint { color: var(--warn); font-size: 0.78rem; margin: 0.35rem 0 0; }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+button.wide { width: 100%; padding: 0.6rem 1rem; font-size: 0.95rem; }
+
+.signin-card #status { padding: 0.75rem 0 0; }
+
+.signin-alt {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 1.1rem 0 0;
+  padding-top: 1rem;
+}
+
+.demo-hint { margin-bottom: 0; }
+.demo-hint code { color: var(--text); font-size: 0.85rem; }
+
+@media (max-width: 860px) {
+  main.signin {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    align-items: start;
+    min-height: 0;
+  }
+
+  /* The form comes first when there is no room to show both side by side. */
+  .signin-panel { order: -1; }
+  .brand-points { gap: 0.6rem; }
+}
