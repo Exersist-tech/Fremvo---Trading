@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Trading.Strategies")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2c6c0ff39d39a6998921086e5a91eaae09bd8725")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1946d05009c29e461b27a0af024a7d47913efdef")]
 [assembly: System.Reflection.AssemblyProductAttribute("Trading.Strategies")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Trading.Strategies")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
