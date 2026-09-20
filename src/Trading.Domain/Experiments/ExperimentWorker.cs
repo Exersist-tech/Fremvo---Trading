@@ -83,11 +83,45 @@ public sealed class PaperTradingLedgerEntry
     public string Direction { get; }
 }
 
+/// <summary>
+/// Immutable, per-worker limits for experimental paper positions. These values do not configure
+/// live or spot trading. Additions are deliberately capped at a small platform ceiling.
+/// </summary>
+public sealed record ExperimentPaperPositionControls(
+    int MaxAdditionsPerPosition,
+    decimal MaxTotalPurchasedQuantity,
+    decimal MaxTotalPurchasedNotional,
+    decimal MaxPositionQuantity,
+    decimal MaxPositionNotional)
+{
+    public const int PlatformMaxAdditionsPerPosition = 5;
+
+    public static ExperimentPaperPositionControls Default { get; } =
+        new(3, 100m, 100_000m, 100m, 100_000m);
+
+    public ExperimentPaperPositionControls Validate()
+    {
+        if (MaxAdditionsPerPosition < 0 || MaxAdditionsPerPosition > PlatformMaxAdditionsPerPosition)
+            throw new ArgumentOutOfRangeException(nameof(MaxAdditionsPerPosition),
+                $"Additions must be between zero and {PlatformMaxAdditionsPerPosition}.");
+        if (MaxTotalPurchasedQuantity <= 0m || MaxTotalPurchasedNotional <= 0m
+            || MaxPositionQuantity <= 0m || MaxPositionNotional <= 0m)
+            throw new ArgumentOutOfRangeException(nameof(MaxTotalPurchasedQuantity),
+                "All paper-position quantity and notional limits must be positive.");
+        return this;
+    }
+}
+
 public sealed class ExperimentWorker
 {
     public const int MaxWorkersPerUser = 10;
 
     private readonly List<PaperTradingLedgerEntry> _ledger = new();
+    private readonly ExperimentPaperPositionControls _positionControls;
+    private decimal _totalPurchasedQuantity;
+    private decimal _totalPurchasedNotional;
+    private int _additionCount;
+    private decimal? _favorableMarkPrice;
 
     public ExperimentWorker(
         Guid id,
@@ -97,7 +131,8 @@ public sealed class ExperimentWorker
         string marketSymbol,
         decimal startingCash,
         DateTimeOffset createdAtUtc,
-        int randomSeed)
+        int randomSeed,
+        ExperimentPaperPositionControls? positionControls = null)
     {
         if (id == Guid.Empty)
         {
@@ -140,6 +175,7 @@ public sealed class ExperimentWorker
         Status = ExperimentWorkerStatus.Created;
         RandomSeed = randomSeed;
         StrategyParameters = "{}";
+        _positionControls = (positionControls ?? ExperimentPaperPositionControls.Default).Validate();
     }
 
     public Guid Id { get; }
@@ -159,6 +195,16 @@ public sealed class ExperimentWorker
     public decimal PositionQuantity { get; private set; }
 
     public decimal AverageEntryPrice { get; private set; }
+
+    public ExperimentPaperPositionControls PositionControls => _positionControls;
+
+    public int AdditionCount => _additionCount;
+
+    public decimal TotalPurchasedQuantity => _totalPurchasedQuantity;
+
+    public decimal TotalPurchasedNotional => _totalPurchasedNotional;
+
+    public decimal? PriorFavorableMarkPrice => _favorableMarkPrice;
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -253,6 +299,22 @@ public sealed class ExperimentWorker
         FailureReason = reason.Trim();
     }
 
+    /// <summary>
+    /// Records a closed, favorable experimental-paper mark. A later position add must consume
+    /// this mark, so every add follows independently observed upside rather than averaging down.
+    /// </summary>
+    public void RecordFavorablePaperMark(decimal markPrice)
+    {
+        if (Status != ExperimentWorkerStatus.Running)
+            throw new InvalidOperationException($"Only a running worker can record a mark. The worker is currently {Status}.");
+        if (PositionQuantity <= 0m)
+            throw new InvalidOperationException("A favorable mark requires an existing paper position.");
+        if (markPrice <= AverageEntryPrice)
+            throw new InvalidOperationException("A paper position add requires a prior mark strictly above its average entry price.");
+
+        _favorableMarkPrice = markPrice;
+    }
+
     public void ApplyPaperTrade(decimal quantity, decimal executionPrice, decimal fee, string direction)
     {
         if (Status != ExperimentWorkerStatus.Running)
@@ -292,23 +354,17 @@ public sealed class ExperimentWorker
         }
 
         var isBuy = directionLower.Equals("buy", StringComparison.OrdinalIgnoreCase);
-        var notional = quantity * executionPrice;
+        var notional = checked(quantity * executionPrice);
         var cashDelta = isBuy ? -(notional + fee) : notional - fee;
+        if (CashBalance + cashDelta < 0m)
+        {
+            throw new InvalidOperationException(
+                "Paper-trading cash balance is insufficient for this trade. Experiment workers never borrow.");
+        }
 
         if (isBuy)
         {
-            if (CashBalance + cashDelta < 0m)
-            {
-                throw new InvalidOperationException(
-                    "Paper-trading cash balance is insufficient for this buy. Experiment workers never borrow.");
-            }
-
-            var previousQuantity = PositionQuantity;
-            PositionQuantity += quantity;
-            var weightedAverage = (AverageEntryPrice * previousQuantity) + (executionPrice * quantity);
-            AverageEntryPrice = previousQuantity == 0m
-                ? executionPrice
-                : weightedAverage / PositionQuantity;
+            ApplyPaperBuy(quantity, executionPrice, fee, notional);
         }
         else
         {
@@ -322,6 +378,8 @@ public sealed class ExperimentWorker
             if (PositionQuantity == 0m)
             {
                 AverageEntryPrice = 0m;
+                _additionCount = 0;
+                _favorableMarkPrice = null;
             }
         }
 
@@ -336,6 +394,45 @@ public sealed class ExperimentWorker
             fee,
             DateTimeOffset.UtcNow,
             directionLower));
+    }
+
+    private void ApplyPaperBuy(decimal quantity, decimal executionPrice, decimal fee, decimal notional)
+    {
+        var previousQuantity = PositionQuantity;
+        var nextQuantity = checked(previousQuantity + quantity);
+        var nextPurchasedQuantity = checked(_totalPurchasedQuantity + quantity);
+        var nextPurchasedNotional = checked(_totalPurchasedNotional + notional);
+        var nextPositionNotional = checked(nextQuantity * executionPrice);
+
+        if (nextPurchasedQuantity > _positionControls.MaxTotalPurchasedQuantity)
+            throw new InvalidOperationException("Paper buy exceeds this worker's total purchased quantity limit.");
+        if (nextPurchasedNotional > _positionControls.MaxTotalPurchasedNotional)
+            throw new InvalidOperationException("Paper buy exceeds this worker's total purchased notional limit.");
+        if (nextQuantity > _positionControls.MaxPositionQuantity)
+            throw new InvalidOperationException("Paper buy exceeds this worker's position quantity limit.");
+        if (nextPositionNotional > _positionControls.MaxPositionNotional)
+            throw new InvalidOperationException("Paper buy exceeds this worker's position notional limit.");
+
+        if (previousQuantity > 0m)
+        {
+            if (_additionCount >= _positionControls.MaxAdditionsPerPosition)
+                throw new InvalidOperationException("Paper buy exceeds this worker's maximum additions per position.");
+            if (_favorableMarkPrice is null || _favorableMarkPrice <= AverageEntryPrice)
+                throw new InvalidOperationException("Paper position add requires a prior realized favorable mark.");
+            if (executionPrice < AverageEntryPrice)
+                throw new InvalidOperationException("Paper position add below average entry is forbidden to prevent averaging down.");
+        }
+
+        var totalCost = checked((AverageEntryPrice * previousQuantity) + notional + fee);
+        PositionQuantity = nextQuantity;
+        AverageEntryPrice = totalCost / nextQuantity;
+        _totalPurchasedQuantity = nextPurchasedQuantity;
+        _totalPurchasedNotional = nextPurchasedNotional;
+        if (previousQuantity > 0m)
+        {
+            _additionCount++;
+            _favorableMarkPrice = null;
+        }
     }
 }
 
