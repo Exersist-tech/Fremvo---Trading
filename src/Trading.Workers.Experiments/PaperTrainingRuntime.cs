@@ -42,6 +42,60 @@ public sealed class ScopedDecisionLedger : IExperimentDecisionLedger
     }
 }
 
+/// <summary>Uses a fresh EF scope per worker operation while preserving strict owner scoping.</summary>
+public sealed class ScopedExperimentWorkerRepository : IExperimentWorkerRepository, IPaperTradingLedgerRepository
+    {
+        private readonly IServiceScopeFactory _scopes;
+        public ScopedExperimentWorkerRepository(IServiceScopeFactory scopes) => _scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
+        public async Task<ExperimentWorker?> GetAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().GetAsync(userId, workerId, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task<IReadOnlyCollection<ExperimentWorker>> ListAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().ListAsync(userId, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task<int> CountAsync(Guid userId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().CountAsync(userId, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().SaveAsync(worker, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task AddAsync(Guid userId, PaperTradingLedgerEntry entry, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().AddAsync(userId, entry, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task<IReadOnlyCollection<PaperTradingLedgerEntry>> ListAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().ListAsync(userId, workerId, cancellationToken).ConfigureAwait(false);
+        }
+}
+
+public sealed class ScopedPaperExecutionLedger : IExperimentPaperExecutionLedger
+    {
+        private readonly IServiceScopeFactory _scopes;
+        public ScopedPaperExecutionLedger(IServiceScopeFactory scopes) => _scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
+        public async Task<(ExperimentPaperExecutionClaimResult Result, ExperimentPaperExecutionAssociation? Association)> ClaimAsync(
+            Guid userId, ExperimentPaperExecutionAssociation association, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>().ClaimAsync(userId, association, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task CompleteAsync(Guid userId, ExperimentPaperExecutionAssociation association, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            await scope.ServiceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>().CompleteAsync(userId, association, cancellationToken).ConfigureAwait(false);
+        }
+}
+
 /// <summary>
 /// Creates the fixed catalog workers and immutable approved-paper configuration only after the
 /// durable activation source has selected an owner. No browser input is used here.

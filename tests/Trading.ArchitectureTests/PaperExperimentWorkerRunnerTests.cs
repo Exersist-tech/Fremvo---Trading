@@ -43,7 +43,7 @@ public sealed class PaperExperimentWorkerRunnerTests
     }
 
     [Fact]
-    public async Task EveryPhase5BFamilyResolvesToItsOwnInputBlockedAdapterWithoutChangingWorkerState()
+    public async Task EveryPhase5BFamilyResolvesDeterministicallyWithoutChangingWorkerState()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
@@ -56,10 +56,13 @@ public sealed class PaperExperimentWorkerRunnerTests
             var first = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
             var second = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
 
-            Assert.Equal(ExperimentAnalysisOutcome.Blocked, first.Outcome);
             Assert.Equal(first.Outcome, second.Outcome);
             Assert.Equal(first.Reason, second.Reason);
-            Assert.Contains(definition.FamilyId, first.Reason, StringComparison.Ordinal);
+            Assert.True(first.Outcome is ExperimentAnalysisOutcome.Analyzed or ExperimentAnalysisOutcome.Blocked or ExperimentAnalysisOutcome.NoCondition);
+            if (first.Outcome == ExperimentAnalysisOutcome.Analyzed)
+                Assert.NotNull(first.Evidence);
+            else if (first.Outcome == ExperimentAnalysisOutcome.Blocked)
+                Assert.Contains(definition.FamilyId, first.Reason, StringComparison.Ordinal);
             Assert.Equal(0m, worker.PositionQuantity);
             Assert.Empty(worker.Ledger);
         }
@@ -139,7 +142,7 @@ public sealed class PaperExperimentWorkerRunnerTests
         var existingExposure = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis,
             snapshot with { PositionQuantity = 1m }, identity);
 
-        Assert.Equal(ExperimentProposalAction.Neutral, first.Proposal.Action);
+        Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
         Assert.Equal(first, repeated);
         Assert.Equal(ExperimentProposalAction.Neutral, existingExposure.Proposal.Action);
         Assert.DoesNotContain(Enum.GetNames<ExperimentProposalAction>(), action => action.Equals("Add", StringComparison.OrdinalIgnoreCase));

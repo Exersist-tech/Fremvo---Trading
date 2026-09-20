@@ -78,13 +78,16 @@ one to ten fixed catalog slots at `/experiments`; a different Administrator or
 RiskOfficer must approve with a nonempty reference through
 `POST /api/paper-training/{ownerId}/approve`. Use the disable or emergency-stop
 endpoints to stop it. With persisted closed candles available, the worker creates
-the fixed catalog workers, evaluates only their approved paper/spot evidence,
-and writes attested decisions to the durable decision ledger. Each fixed slot
-is bound to its own strategy/version/parameter provenance. The EMA continuation
-family evaluates only its final three chronological closed candles; families
-that require cross-sectional, session, or classifier evidence remain explicitly
-blocked until their exact persisted evidence is available.
-It never substitutes live, futures, credential, or network components.
+the fixed catalog workers, re-fetches and revalidates exactly fourteen
+chronological closed candles matching the attested identity, and writes
+decisions, execution claims, workers, and simulated paper ledger entries to
+the database. The platform-owned strategy-to-plan mapping, exchange filters,
+sizing ceilings, and risk evidence are constants; configuration and browser
+input cannot select an adapter, quantity, or route. A simulated fill changes a
+worker only after the mandatory paper pipeline has completed. Re-reading a
+worker replays its immutable ledger, so balances and positions are
+deterministic across restarts. It never registers a live/futures adapter,
+exchange client, credentials, or network dependency.
 
 ## Opt-in Kraken Live Proving profile
 

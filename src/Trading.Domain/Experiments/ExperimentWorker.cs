@@ -248,6 +248,48 @@ public sealed class ExperimentWorker
         StrategyParameters = parametersJson.Trim();
     }
 
+    /// <summary>
+    /// Rebuilds a persisted worker exclusively from its immutable trade history. This keeps the
+    /// stored balances and positions independently reproducible instead of trusting projections.
+    /// </summary>
+    public static ExperimentWorker Replay(
+        Guid id,
+        Guid userId,
+        string name,
+        string strategyId,
+        string marketSymbol,
+        decimal startingCash,
+        DateTimeOffset createdAtUtc,
+        int randomSeed,
+        string strategyParameters,
+        ExperimentPaperPositionControls controls,
+        ExperimentWorkerStatus status,
+        string? failureReason,
+        IEnumerable<PaperTradingLedgerEntry> ledger)
+    {
+        var worker = new ExperimentWorker(id, userId, name, strategyId, marketSymbol, startingCash, createdAtUtc, randomSeed, controls);
+        worker.UpdateStrategyParameters(strategyParameters);
+        if (status is ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused)
+            worker.Start();
+
+        foreach (var entry in (ledger ?? throw new ArgumentNullException(nameof(ledger)))
+            .OrderBy(entry => entry.OccurredAtUtc)
+            .ThenBy(entry => entry.Id))
+        {
+            if (entry.WorkerId != id)
+                throw new InvalidOperationException("A persisted paper ledger entry belongs to another worker.");
+            worker.ApplyPaperTrade(entry.Quantity, entry.ExecutionPrice, entry.Fee, entry.Direction, entry.OccurredAtUtc, entry.Id);
+        }
+
+        if (status == ExperimentWorkerStatus.Paused)
+            worker.Pause();
+        else if (status == ExperimentWorkerStatus.Completed)
+            worker.Complete();
+        else if (status == ExperimentWorkerStatus.Failed)
+            worker.Fail(string.IsNullOrWhiteSpace(failureReason) ? "Persisted worker failure." : failureReason);
+        return worker;
+    }
+
     public void Start()
     {
         if (Status == ExperimentWorkerStatus.Completed || Status == ExperimentWorkerStatus.Failed)
@@ -320,7 +362,8 @@ public sealed class ExperimentWorker
         decimal executionPrice,
         decimal fee,
         string direction,
-        DateTimeOffset? occurredAtUtc = null)
+        DateTimeOffset? occurredAtUtc = null,
+        Guid? ledgerEntryId = null)
     {
         if (Status != ExperimentWorkerStatus.Running)
         {
@@ -397,7 +440,7 @@ public sealed class ExperimentWorker
         CashBalance += cashDelta;
 
         _ledger.Add(new PaperTradingLedgerEntry(
-            Guid.NewGuid(),
+            ledgerEntryId ?? Guid.NewGuid(),
             Id,
             MarketSymbol,
             quantity,

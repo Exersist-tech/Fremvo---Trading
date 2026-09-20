@@ -87,18 +87,21 @@ public sealed class InMemoryExperimentPaperExecutionLedger : IExperimentPaperExe
 
 public sealed class ExperimentPaperTradeResult
 {
-    private ExperimentPaperTradeResult(bool submitted, string reason, TradePipelineResult? pipelineResult)
+    private ExperimentPaperTradeResult(bool submitted, string reason, TradePipelineResult? pipelineResult, PaperExecutionLedgerEntry? paperFill)
     {
         Submitted = submitted;
         Reason = reason;
         PipelineResult = pipelineResult;
+        PaperFill = paperFill;
     }
 
     public bool Submitted { get; }
     public string Reason { get; }
     public TradePipelineResult? PipelineResult { get; }
-    internal static ExperimentPaperTradeResult Skipped(string reason) => new(false, reason, null);
-    internal static ExperimentPaperTradeResult Processed(TradePipelineResult result) => new(true, string.Empty, result);
+    /// <summary>Fake paper-adapter result, present only after the mandatory pipeline completed.</summary>
+    public PaperExecutionLedgerEntry? PaperFill { get; }
+    internal static ExperimentPaperTradeResult Skipped(string reason) => new(false, reason, null, null);
+    internal static ExperimentPaperTradeResult Processed(TradePipelineResult result, PaperExecutionLedgerEntry? paperFill) => new(true, string.Empty, result, paperFill);
 }
 
 /// <summary>
@@ -211,7 +214,10 @@ public sealed class PaperExperimentTradeOrchestrator
             proposal.Key.UserId,
             claim with { Status = status, ExecutionCommandId = result.ExecutionCommandId, Detail = result.BlockedReason },
             cancellationToken).ConfigureAwait(false);
-        return ExperimentPaperTradeResult.Processed(result);
+        var paperFill = result.Executed && result.ExecutionCommandId is Guid executionCommandId
+            ? _paperAdapter.Ledger.SingleOrDefault(entry => entry.ExecutionCommandId == executionCommandId)
+            : null;
+        return ExperimentPaperTradeResult.Processed(result, paperFill);
     }
 
     private static PortfolioSnapshot ToPipelinePortfolio(ExperimentWorkerPortfolioSnapshot portfolio) =>

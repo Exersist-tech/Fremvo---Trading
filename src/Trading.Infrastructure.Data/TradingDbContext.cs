@@ -44,6 +44,8 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedExperimentPaperExecutionAssociation> ExperimentPaperExecutionAssociations => Set<PersistedExperimentPaperExecutionAssociation>();
     public DbSet<PersistedExperimentResultSnapshot> ExperimentResultSnapshots => Set<PersistedExperimentResultSnapshot>();
     public DbSet<PersistedPaperTrainingActivation> PaperTrainingActivations => Set<PersistedPaperTrainingActivation>();
+    public DbSet<PersistedExperimentWorker> ExperimentWorkers => Set<PersistedExperimentWorker>();
+    public DbSet<PersistedPaperTradingLedgerEntry> PaperTradingLedgerEntries => Set<PersistedPaperTradingLedgerEntry>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -184,6 +186,37 @@ public sealed class TradingDbContext : DbContext
             entity.Property(value => value.ChangedBy).IsRequired();
             entity.Property(value => value.ApprovalId).HasMaxLength(128);
             entity.Property(value => value.RowVersion).IsRowVersion();
+        });
+
+        modelBuilder.Entity<PersistedExperimentWorker>(entity =>
+        {
+            entity.ToTable("ExperimentWorkers");
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Name).HasMaxLength(200).IsRequired();
+            entity.Property(value => value.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(value => value.MarketSymbol).HasMaxLength(64).IsRequired();
+            entity.Property(value => value.StrategyParameters).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(value => value.FailureReason).HasMaxLength(512);
+            entity.Property(value => value.StartingCash).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxTotalPurchasedQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxTotalPurchasedNotional).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxPositionQuantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.MaxPositionNotional).HasColumnType(MoneyColumnType);
+            entity.HasIndex(value => new { value.UserId, value.Id }).IsUnique();
+            entity.HasIndex(value => new { value.UserId, value.Status });
+            entity.HasMany(value => value.LedgerEntries).WithOne().HasForeignKey(value => value.WorkerId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PersistedPaperTradingLedgerEntry>(entity =>
+        {
+            entity.ToTable("ExperimentPaperTradingLedgerEntries");
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(value => value.Direction).HasMaxLength(8).IsRequired();
+            entity.Property(value => value.Quantity).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.ExecutionPrice).HasColumnType(MoneyColumnType);
+            entity.Property(value => value.Fee).HasColumnType(MoneyColumnType);
+            entity.HasIndex(value => new { value.UserId, value.WorkerId, value.OccurredAtUtc, value.Id });
         });
 
         modelBuilder.Entity<ExchangeAccount>(entity =>

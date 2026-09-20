@@ -36,6 +36,8 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
     private readonly ExperimentDecisionPolicy _decisions;
     private readonly ExperimentWorkerRiskEvaluator _workerRisk;
     private readonly PaperExperimentTradeOrchestrator _paper;
+    private readonly IExperimentWorkerRepository _workers;
+    private readonly IPaperTradingLedgerRepository _ledger;
     private readonly TimeProvider _time;
 
     public PaperTrainingSizedExecutionRunner(
@@ -45,6 +47,8 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         ExperimentDecisionPolicy decisions,
         ExperimentWorkerRiskEvaluator workerRisk,
         PaperExperimentTradeOrchestrator paper,
+        IExperimentWorkerRepository workers,
+        IPaperTradingLedgerRepository ledger,
         TimeProvider time)
     {
         _analysis = analysis ?? throw new ArgumentNullException(nameof(analysis));
@@ -53,6 +57,8 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         _decisions = decisions ?? throw new ArgumentNullException(nameof(decisions));
         _workerRisk = workerRisk ?? throw new ArgumentNullException(nameof(workerRisk));
         _paper = paper ?? throw new ArgumentNullException(nameof(paper));
+        _workers = workers ?? throw new ArgumentNullException(nameof(workers));
+        _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
         _time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
@@ -96,7 +102,15 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
             return;
 
         // The pipeline receives the sizer output verbatim; it is never clamped or rounded here.
-        await _paper.ProcessSizedAsync(decision, snapshot.Context, sized.Quantity, cancellationToken).ConfigureAwait(false);
+        var result = await _paper.ProcessSizedAsync(decision, snapshot.Context, sized.Quantity, cancellationToken).ConfigureAwait(false);
+        if (result.PipelineResult?.Executed != true || result.PaperFill is null)
+            return;
+
+        var adapterFill = result.PaperFill;
+        worker.ApplyPaperTrade(adapterFill.Quantity, adapterFill.Price, adapterFill.Fees,
+            adapterFill.Direction == Trading.Domain.Execution.TradeDirection.Buy ? "buy" : "sell", adapterFill.ExecutedAtUtc);
+        await _ledger.AddAsync(worker.UserId, worker.Ledger.Last(), cancellationToken).ConfigureAwait(false);
+        await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsExactPlan(PaperExecutionPlan plan, ExperimentWorker worker, ExperimentDecisionEvidence evidence, ExperimentPaperCandleSnapshot candle)
