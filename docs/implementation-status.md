@@ -95,7 +95,7 @@ See `docs/strategy-research-plan.md`. These are falsifiable research templates, 
 | Task | Status | Notes |
 |---|---|---|
 | 5B.1 Strategy approval state machine + immutable versioned approvals | Done | 2026-09-20 — Pure immutable platform-governance domain models define stable template/version and parameter-schema references, validated SHA-256 content fingerprints, UTC-only auditable Draft → UnderReview → Approved/Rejected/Retired transitions, and human-only approval. Approval neither grants trading eligibility nor exposes user code or execution. |
-| 5B.2 Strategy approval requirements (instrument/history/liquidity/spread/slippage/timeframes/product/modes) | Not started | |
+| 5B.2 Strategy approval requirements (instrument/history/liquidity/spread/slippage/timeframes/product/modes) | Done | 2026-09-20 — Pure immutable, exchange-neutral approval requirements now attach to an approval snapshot and explicitly restrict platform instrument scopes, closed history, decimal liquidity/spread/slippage bounds, evidence freshness, normalized intervals, Spot product type, and research/backtest/paper modes. Evaluation is deterministic and fails closed for absent, invalid, stale, incomplete, or out-of-range evidence. Intersections only tighten constraints; empty/open-ended restrictions and all live/futures product or modes are rejected. Requirements neither grant eligibility nor invoke strategy or execution. |
 | 5B.3 Regime/signal/execution timeframe separation | Not started | |
 | 5B.4 Rejection-gate engine with recorded per-gate results | Not started | |
 | 5B.5 Family 1 — multi-timeframe EMA trend continuation | Not started | |

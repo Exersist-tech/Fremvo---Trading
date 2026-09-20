@@ -1,6 +1,9 @@
 using System.Linq.Expressions;
 using System.Reflection;
 using Trading.Domain.Execution;
+using Trading.Domain.Market;
+using Trading.Domain.Strategies;
+using Trading.Domain.Universe;
 using Trading.Strategies;
 using Trading.Strategies.Approvals;
 
@@ -192,6 +195,126 @@ public sealed class StrategyApprovalTests
     }
 
     [Fact]
+    public void ApprovalRequirementsAllowOnlyCompleteFreshResearchEvidence()
+    {
+        var requirements = Requirements();
+        var evidence = Evidence();
+
+        var allowed = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements,
+            evidence,
+            CandleInterval.OneHour,
+            TradingProductType.Spot,
+            StrategyApprovalMode.Backtest,
+            s_createdAtUtc.AddMinutes(30));
+
+        Assert.True(allowed.Allowed);
+        Assert.Empty(allowed.Failures);
+    }
+
+    [Fact]
+    public void ApprovalRequirementsFailClosedForAbsentStaleAndIncompleteEvidence()
+    {
+        var requirements = Requirements();
+        var absent = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, null, CandleInterval.OneHour, TradingProductType.Spot,
+            StrategyApprovalMode.Research, s_createdAtUtc);
+        var stale = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(observedAtUtc: s_createdAtUtc.AddHours(-2)),
+            CandleInterval.OneHour, TradingProductType.Spot,
+            StrategyApprovalMode.Research, s_createdAtUtc);
+        var incomplete = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(closedHistoryCandles: 99),
+            CandleInterval.OneHour, TradingProductType.Spot,
+            StrategyApprovalMode.Research, s_createdAtUtc);
+
+        Assert.False(absent.Allowed);
+        Assert.False(stale.Allowed);
+        Assert.False(incomplete.Allowed);
+    }
+
+    [Theory]
+    [InlineData(99.99, 0.10, 0.01)]
+    [InlineData(100.00, 0.11, 0.01)]
+    [InlineData(100.00, 0.10, 0.011)]
+    public void ApprovalRequirementsEnforceDecimalMarketBounds(
+        decimal liquidity,
+        decimal spread,
+        decimal slippage)
+    {
+        var evaluation = StrategyApprovalRequirementEvaluator.Evaluate(
+            Requirements(),
+            Evidence(liquidity, spread, slippage),
+            CandleInterval.OneHour,
+            TradingProductType.Spot,
+            StrategyApprovalMode.Research,
+            s_createdAtUtc);
+
+        Assert.False(evaluation.Allowed);
+    }
+
+    [Fact]
+    public void ApprovalRequirementsRejectMismatchedScopeAndBlockLiveFutures()
+    {
+        var requirements = Requirements();
+        var wrongInterval = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(), CandleInterval.FourHours, TradingProductType.Spot,
+            StrategyApprovalMode.Research, s_createdAtUtc);
+        var wrongMode = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(), CandleInterval.OneHour, TradingProductType.Spot,
+            StrategyApprovalMode.Paper, s_createdAtUtc);
+        var wrongProduct = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(), CandleInterval.OneHour, TradingProductType.Futures,
+            StrategyApprovalMode.Research, s_createdAtUtc);
+
+        Assert.False(wrongInterval.Allowed);
+        Assert.False(wrongMode.Allowed);
+        Assert.False(wrongProduct.Allowed);
+        Assert.Throws<ArgumentException>(() => Requirements(
+            products: new[] { TradingProductType.Futures }));
+        Assert.Throws<ArgumentException>(() => Requirements(
+            modes: new[] { StrategyApprovalMode.SpotLive }));
+    }
+
+    [Fact]
+    public void ApprovalCannotBeApprovedWithoutRequirementsAndIntersectionsOnlyTighten()
+    {
+        var human = StrategyApprovalActor.Human(Guid.NewGuid());
+        var underReview = StrategyApproval.CreateDraft(
+                Guid.NewGuid(),
+                Version(),
+                human,
+                s_createdAtUtc)
+            .TransitionTo(StrategyApprovalState.UnderReview, human, s_createdAtUtc.AddMinutes(1));
+
+        Assert.Throws<InvalidOperationException>(() => underReview.TransitionTo(
+            StrategyApprovalState.Approved, human, s_createdAtUtc.AddMinutes(2), human));
+
+        var tighter = new StrategyApprovalRequirements(
+            new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+            200,
+            200m,
+            0.05m,
+            0.005m,
+            TimeSpan.FromMinutes(10),
+            new[] { CandleInterval.OneHour },
+            new[] { TradingProductType.Spot },
+            new[] { StrategyApprovalMode.Backtest });
+        var intersection = Requirements().Intersect(tighter);
+
+        Assert.Equal(200, intersection.MinimumClosedHistoryCandles);
+        Assert.Equal(200m, intersection.MinimumLiquidity);
+        Assert.Equal(0.05m, intersection.MaximumSpread);
+        Assert.Equal(0.005m, intersection.MaximumEstimatedSlippage);
+        Assert.Equal(TimeSpan.FromMinutes(10), intersection.MaximumEvidenceAge);
+        Assert.Equal(new[] { StrategyApprovalMode.Backtest }, intersection.AllowedModes);
+        Assert.Throws<ArgumentException>(() => new StrategyApprovalRequirements(
+            Array.Empty<ApprovedInstrumentScope>(), 1, 1m, 1m, 1m, TimeSpan.FromMinutes(1),
+            new[] { CandleInterval.OneHour }, new[] { TradingProductType.Spot },
+            new[] { StrategyApprovalMode.Research }));
+    }
+
+    [Fact]
     public void ApprovalAuditRecordsAreDeterministicAndUtcOnly()
     {
         var human = StrategyApprovalActor.Human(Guid.Parse("11111111-1111-1111-1111-111111111111"));
@@ -230,11 +353,44 @@ public sealed class StrategyApprovalTests
     private static StrategyApproval Draft(StrategyApprovalActor creator) =>
         StrategyApproval.CreateDraft(
             Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-            new StrategyVersion(
-                new StrategyTemplateVersionIdentity("platform.ema-trend", 1),
-                new StrategyParameterSchemaReference("ema-parameters", 1, FirstFingerprint),
-                FirstFingerprint,
-                s_createdAtUtc),
+            Version(),
             creator,
-            s_createdAtUtc);
+            s_createdAtUtc,
+            Requirements());
+
+    private static readonly Guid InstrumentId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+
+    private static StrategyVersion Version() => new(
+        new StrategyTemplateVersionIdentity("platform.ema-trend", 1),
+        new StrategyParameterSchemaReference("ema-parameters", 1, FirstFingerprint),
+        FirstFingerprint,
+        s_createdAtUtc);
+
+    private static StrategyApprovalRequirements Requirements(
+        IEnumerable<TradingProductType>? products = null,
+        IEnumerable<StrategyApprovalMode>? modes = null) =>
+        new(
+            new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+            100,
+            100m,
+            0.10m,
+            0.01m,
+            TimeSpan.FromMinutes(30),
+            new[] { CandleInterval.OneHour },
+            products ?? new[] { TradingProductType.Spot },
+            modes ?? new[] { StrategyApprovalMode.Research, StrategyApprovalMode.Backtest });
+
+    private static StrategyApprovalEvidence Evidence(
+        decimal? liquidity = 100m,
+        decimal? spread = 0.10m,
+        decimal? estimatedSlippage = 0.01m,
+        int closedHistoryCandles = 100,
+        DateTimeOffset? observedAtUtc = null) => new(
+        InstrumentId,
+        AssetClass.Cryptocurrency,
+        closedHistoryCandles,
+        liquidity,
+        spread,
+        estimatedSlippage,
+        observedAtUtc ?? s_createdAtUtc);
 }

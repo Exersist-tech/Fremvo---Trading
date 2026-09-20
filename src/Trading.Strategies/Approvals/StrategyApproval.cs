@@ -44,6 +44,7 @@ public sealed class StrategyApproval
         StrategyApprovalActor createdBy,
         DateTimeOffset createdAtUtc,
         StrategyApprovalActor? approvedBy,
+        StrategyApprovalRequirements? requirements,
         IEnumerable<StrategyApprovalTransition> transitions)
     {
         Id = id;
@@ -52,6 +53,7 @@ public sealed class StrategyApproval
         CreatedBy = createdBy;
         CreatedAtUtc = createdAtUtc;
         ApprovedBy = approvedBy;
+        Requirements = requirements;
         _transitions = new ReadOnlyCollection<StrategyApprovalTransition>(transitions.ToArray());
     }
 
@@ -67,6 +69,8 @@ public sealed class StrategyApproval
 
     public StrategyApprovalActor? ApprovedBy { get; }
 
+    public StrategyApprovalRequirements? Requirements { get; }
+
     public IReadOnlyList<StrategyApprovalTransition> Transitions => _transitions;
 
     public bool IsTerminal => State is StrategyApprovalState.Rejected or StrategyApprovalState.Retired;
@@ -75,7 +79,8 @@ public sealed class StrategyApproval
         Guid id,
         StrategyVersion strategyVersion,
         StrategyApprovalActor createdBy,
-        DateTimeOffset createdAtUtc)
+        DateTimeOffset createdAtUtc,
+        StrategyApprovalRequirements? requirements = null)
     {
         if (id == Guid.Empty)
         {
@@ -93,6 +98,7 @@ public sealed class StrategyApproval
             createdBy,
             createdAtUtc,
             null,
+            requirements,
             Array.Empty<StrategyApprovalTransition>());
     }
 
@@ -126,6 +132,11 @@ public sealed class StrategyApproval
         if (target == StrategyApprovalState.Approved)
         {
             ValidateHumanApproval(actor, approver);
+            if (Requirements is null)
+            {
+                throw new InvalidOperationException(
+                    "A strategy approval requires explicit restrictive requirements before approval.");
+            }
         }
         else if (approver is not null)
         {
@@ -147,6 +158,7 @@ public sealed class StrategyApproval
             CreatedBy,
             CreatedAtUtc,
             target == StrategyApprovalState.Approved ? approver : ApprovedBy,
+            Requirements,
             _transitions.Append(transition));
     }
 
