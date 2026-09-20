@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Trading.Infrastructure.Data;
+using Trading.Infrastructure.Data.MarketData;
+using Trading.MarketData;
 
 namespace Trading.Web.Extensions;
 
@@ -19,6 +21,7 @@ internal static class ServiceCollectionExtensions
 
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlServer(connectionString));
+        services.AddScoped<ICandleRepository, EfCandleRepository>();
 
         return services;
     }

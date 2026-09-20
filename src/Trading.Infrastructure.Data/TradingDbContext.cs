@@ -5,6 +5,7 @@ using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
+using Trading.Infrastructure.Data.MarketData;
 
 namespace Trading.Infrastructure.Data;
 
@@ -28,6 +29,8 @@ public sealed class TradingDbContext : DbContext
     public DbSet<Position> Positions => Set<Position>();
 
     public DbSet<OrderReconciliationRecord> OrderReconciliations => Set<OrderReconciliationRecord>();
+
+    public DbSet<PersistedCandle> Candles => Set<PersistedCandle>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -325,6 +328,33 @@ public sealed class TradingDbContext : DbContext
 
             entity.HasIndex(record => record.OrderId);
             entity.HasIndex(record => record.ResolvedAtUtc);
+        });
+
+        modelBuilder.Entity<PersistedCandle>(entity =>
+        {
+            entity.ToTable("Candles");
+            entity.HasKey(candle => new { candle.Symbol, candle.Interval, candle.OpenTimeUtc });
+
+            entity.Property(candle => candle.Symbol)
+                .HasMaxLength(32)
+                .IsRequired();
+
+            entity.Property(candle => candle.Interval)
+                .HasConversion<int>()
+                .IsRequired();
+
+            entity.Property(candle => candle.OpenTimeUtc).IsRequired();
+            entity.Property(candle => candle.CloseTimeUtc).IsRequired();
+            entity.Property(candle => candle.Open).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.High).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Low).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Close).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.Volume).HasColumnType("decimal(28,12)").IsRequired();
+            entity.Property(candle => candle.IsClosed).IsRequired();
+            entity.Property(candle => candle.IsDerived).IsRequired();
+            entity.Property(candle => candle.QualityFlags).HasColumnType("nvarchar(max)").IsRequired();
+
+            entity.HasIndex(candle => new { candle.Symbol, candle.Interval, candle.CloseTimeUtc, candle.OpenTimeUtc });
         });
 
         base.OnModelCreating(modelBuilder);
