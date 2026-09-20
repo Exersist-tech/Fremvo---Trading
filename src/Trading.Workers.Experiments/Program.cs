@@ -3,6 +3,7 @@ using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Execution;
 using Trading.Domain.Experiments;
+using Trading.MarketData.Experiments;
 using Trading.Risk;
 using Trading.Workers.Experiments;
 
@@ -29,6 +30,9 @@ builder.Services.AddSingleton<IExecutionAdapter, PaperExecutionAdapter>();
 builder.Services.AddSingleton<TradePipeline>();
 builder.Services.AddSingleton<ExperimentWorkerPool>();
 
+// This is intentionally inert until an explicit training configuration selects a durable
+// dataset. Registering the prerequisite must not make existing workers execute.
+builder.Services.AddSingleton<IExperimentCandleSeriesSource, UnconfiguredExperimentCandleSeriesSource>();
 builder.Services.AddSingleton<IExperimentMarketFeed, UnconfiguredExperimentMarketFeed>();
 builder.Services.AddSingleton<IApprovedStrategyTemplateFactory, UnconfiguredStrategyTemplateFactory>();
 builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, UnconfiguredExperimentResearchGroupConfigurationSource>();
