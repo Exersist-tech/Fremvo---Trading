@@ -1,6 +1,9 @@
 using Trading.Application.Experiments;
 using Trading.Domain.Experiments;
+using Trading.Infrastructure.Data;
+using Trading.Infrastructure.Data.Experiments;
 using Trading.MarketData.Experiments;
+using Microsoft.EntityFrameworkCore;
 using Trading.Workers.Experiments;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -23,6 +26,24 @@ builder.Services.AddSingleton<IExperimentWorkerRunner, UnconfiguredExperimentWor
 // Activation is fail-closed by default. A deployment must explicitly replace this source with a
 // durable, audited activation repository; host configuration alone can never start training.
 builder.Services.AddSingleton<IPaperTrainingActivationSource, DisabledPaperTrainingActivationSource>();
+var paperTrainingEnabled = builder.Configuration.GetValue<bool>("Experiments:PaperTraining:Enabled");
+if (paperTrainingEnabled)
+{
+    var connectionString = builder.Configuration.GetConnectionString("TradingDb");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException(
+            "Experiments:PaperTraining:Enabled requires ConnectionStrings:TradingDb; no paper workers were started.");
+    }
+
+    builder.Services.AddDbContext<TradingDbContext>(options => options.UseSqlServer(connectionString));
+    builder.Services.AddScoped<EfPaperTrainingActivationRepository>();
+    builder.Services.AddScoped<IPaperTrainingActivationRepository>(provider =>
+        provider.GetRequiredService<EfPaperTrainingActivationRepository>());
+    builder.Services.AddScoped<IPaperTrainingActivationSource>(provider =>
+        provider.GetRequiredService<EfPaperTrainingActivationRepository>());
+    builder.Services.AddSingleton<IPaperTrainingActivationSource, ScopedPaperTrainingActivationSource>();
+}
 
 // Protective exits have an independent, explicitly disabled schedule. This inert evaluator is
 // intentional: enabling the schedule alone cannot activate broader experiment training.

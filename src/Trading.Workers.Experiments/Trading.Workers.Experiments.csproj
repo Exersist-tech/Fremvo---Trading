@@ -10,11 +10,13 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.8" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Trading.Application\Trading.Application.csproj" />
     <ProjectReference Include="..\Trading.Domain\Trading.Domain.csproj" />
     <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
+    <ProjectReference Include="..\Trading.Infrastructure.Data\Trading.Infrastructure.Data.csproj" />
   </ItemGroup>
 </Project>

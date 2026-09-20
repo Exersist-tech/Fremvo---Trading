@@ -33,6 +33,8 @@ public sealed class PaperTrainingActivationTests
         Assert.Empty(await repository.GetActiveOwnerIdsAsync());
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
             service.ActivateAsync(owner, owner, RoleType.User, "approval-1"));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.ActivateAsync(owner, owner, RoleType.Administrator, "approval-1"));
 
         var active = await service.ActivateAsync(owner, Guid.NewGuid(), RoleType.Administrator, "approval-1");
 

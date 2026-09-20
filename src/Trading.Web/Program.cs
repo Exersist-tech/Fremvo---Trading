@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
@@ -36,6 +37,7 @@ using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
 using Trading.Infrastructure.Data.Execution;
 using Trading.Infrastructure.Data.ExchangeAccounts;
+using Trading.Infrastructure.Data.Experiments;
 using Trading.Infrastructure.Secrets;
 using Trading.MarketData;
 using Trading.Optimization;
@@ -92,6 +94,9 @@ builder.Services.AddSingleton<IPasswordHasher>(sp => sp.GetRequiredService<Pbkdf
 builder.Services.AddScoped<ITradingAuthenticationService, TradingAuthenticationService>();
 builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolicyService>();
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
+builder.Services.Configure<PaperTrainingPrerequisiteOptions>(
+    builder.Configuration.GetSection(PaperTrainingPrerequisiteOptions.SectionName));
+builder.Services.AddScoped<PaperTrainingActivationService>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
     new AuditQueryService(provider.GetRequiredService<TradingDbContext>().AuditEvents));
 
@@ -996,6 +1001,93 @@ app.MapGet("/optimization/plan-validation", () => Results.Content(
     """,
     "text/html")).RequireAuthorization();
 
+// Paper-training configuration is deliberately separate from the legacy research-worker API:
+// the browser can request only a count from the fixed platform catalog, never trading inputs.
+app.MapGet("/api/paper-training", async (
+    ClaimsPrincipal principal,
+    IPaperTrainingActivationRepository repository,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var activation = await repository.GetAsync(ownerId.Value, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(PaperTrainingResponse.From(activation));
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training", async (
+    ClaimsPrincipal principal,
+    PaperTrainingRequest request,
+    PaperTrainingActivationService service,
+    IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.RequestAsync(
+            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal), request.Slots,
+            prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
+        return Results.Created("/api/paper-training", PaperTrainingResponse.From(activation));
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/{ownerId:guid}/approve", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingApprovalRequest request,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.ActivateAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal),
+            request.Reference, cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
+
+app.MapPost("/api/paper-training/{ownerId:guid}/disable", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.DisableAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/{ownerId:guid}/emergency-stop", async (
+    Guid ownerId,
+    ClaimsPrincipal principal,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.EmergencyStopAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
 app.MapGet("/api/experiments", async (
     ClaimsPrincipal principal,
     IExperimentWorkerRepository repository,
@@ -1039,43 +1131,8 @@ app.MapGet("/api/experiments", async (
     });
 }).RequireAuthorization();
 
-app.MapPost("/api/experiments", async (
-    ClaimsPrincipal principal,
-    ExperimentWorkerPool pool,
-    CreateExperimentWorkerRequest request,
-    CancellationToken cancellationToken) =>
-{
-    ArgumentNullException.ThrowIfNull(request);
-
-    var userId = CurrentUser.TryGetUserId(principal);
-    if (userId is null)
-    {
-        return Results.Unauthorized();
-    }
-
-    try
-    {
-        var worker = await pool.CreateWorkerAsync(
-            userId.Value,
-            request.Name,
-            request.StrategyTemplateId,
-            request.MarketSymbol,
-            request.StartingCash,
-            DateTimeOffset.UtcNow,
-            request.RandomSeed,
-            cancellationToken).ConfigureAwait(false);
-
-        return Results.Ok(new { worker.Id, worker.Name, status = worker.Status.ToString() });
-    }
-    catch (ArgumentException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
-    }
-    catch (InvalidOperationException ex)
-    {
-        return Results.BadRequest(new { error = ex.Message });
-    }
-}).RequireAuthorization();
+app.MapPost("/api/experiments", () => Results.StatusCode(StatusCodes.Status410Gone))
+    .RequireAuthorization();
 
 // This is a read-only research evidence projection. It neither schedules workers nor exposes
 // an execution, promotion, or strategy-control surface.
@@ -1195,19 +1252,21 @@ app.MapGet("/experiments", () => Results.Content(
           <a href="/experiment-results">Results</a>
         </nav>
         <p class="muted">
-          Up to ten isolated workers per user. Each worker keeps its own balance, position,
-          strategy state, parameters, random seed, and results. Workers may read the same
-          immutable historical data but never share mutable state, and a worker that fails does
-          not stop the others.
+          Request one to ten fixed, platform-approved paper-training slots. A separate
+          Administrator or RiskOfficer approval is required before any paper worker can advance.
         </p>
 
         <div class="notice">
-          Experiment workers trade with fake funds only. They cannot place an order on a real
-          exchange. Past or simulated results do not indicate future results, and no strategy is
-          guaranteed to be profitable.
+          Paper only: workers use fake funds and cannot place an order on a real exchange.
+          Live account stages are untouched. Disable or emergency stop ends paper training.
         </div>
 
         <div id="state"></div>
+        <form id="request-form">
+          <label for="slots">Fixed paper-training slots (1–10)</label>
+          <input id="slots" type="number" min="1" max="10" value="1" required />
+          <button type="submit">Request paper training</button>
+        </form>
         <table id="grid" hidden>
           <thead>
             <tr>
@@ -1223,25 +1282,26 @@ app.MapGet("/experiments", () => Results.Content(
         const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
         (async () => {
           const state = document.getElementById('state');
-          const res = await fetch('/api/experiments');
+          const res = await fetch('/api/paper-training');
           if (res.status === 401) {
-            state.innerHTML = '<p class="muted">Sign in to view your experiment workers.</p>';
+            state.innerHTML = '<p class="muted">Sign in to view paper-training status.</p>';
             return;
           }
           const data = await res.json();
-          state.innerHTML = '<p class="muted">Using ' + data.used + ' of ' + data.maxWorkers + ' workers.</p>';
-          if (data.workers.length === 0) {
-            state.innerHTML += '<p class="muted">No experiment workers yet.</p>';
-            return;
-          }
-          const grid = document.getElementById('grid');
-          grid.hidden = false;
-          grid.querySelector('tbody').innerHTML = data.workers.map(w =>
-            '<tr><td>' + w.name + '</td><td>' + w.marketSymbol + '</td><td>' + w.status +
-            '</td><td>' + w.randomSeed + '</td><td>' + n(w.cashBalance) + '</td><td>' +
-            n(w.positionQuantity) + '</td><td>' + n(w.realizedProfitAndLoss) + '</td><td>' +
-            w.tradeCount + '</td></tr>').join('');
+          state.innerHTML = '<p class="muted">Paper-training status: <strong>' + data.state +
+            '</strong>. Fixed slots requested: ' + data.slots + ' of 10.</p><p class="muted">' +
+            data.notice + '</p>';
         })();
+        document.getElementById('request-form').addEventListener('submit', async event => {
+          event.preventDefault();
+          const response = await fetch('/api/paper-training', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slots: Number(document.getElementById('slots').value) })
+          });
+          if (response.ok) location.reload();
+          else document.getElementById('state').innerHTML =
+            '<p class="notice">Request was not accepted. All deployment prerequisites must be configured.</p>';
+        });
       </script>
     </body>
     </html>
@@ -3745,6 +3805,42 @@ internal sealed record CreateExperimentWorkerRequest(
     string MarketSymbol,
     decimal StartingCash,
     int RandomSeed);
+
+/// <summary>Paper training accepts only a fixed catalog slot count; ownership is from the principal.</summary>
+internal sealed record PaperTrainingRequest(int Slots);
+
+/// <summary>A distinct Administrator or RiskOfficer supplies the durable approval reference.</summary>
+internal sealed record PaperTrainingApprovalRequest(string Reference);
+
+internal sealed record PaperTrainingResponse(
+    string State,
+    int Slots,
+    string? ApprovalReference,
+    DateTimeOffset? ChangedAtUtc,
+    IReadOnlyList<object> Catalog,
+    string Notice)
+{
+    public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
+        new(
+            activation?.State.ToString() ?? "NotRequested",
+            activation?.Slots.Count ?? 0,
+            activation?.ApprovalId,
+            activation?.ChangedAtUtc,
+            PaperTrainingActivationService.ApprovedSlots.Select(slot => (object)new
+            {
+                slot.Slot, slot.Group, slot.StrategyId, slot.Symbol, slot.StartingCash,
+                slot.ParameterSetId, slot.ProvenanceId
+            }).ToArray(),
+            "Paper only: fake funds only. Activation requires a separate approval; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
+}
+
+internal static class PaperTrainingRole
+{
+    public static RoleType From(ClaimsPrincipal principal) =>
+        principal.IsInRole(nameof(RoleType.Administrator)) ? RoleType.Administrator :
+        principal.IsInRole(nameof(RoleType.RiskOfficer)) ? RoleType.RiskOfficer :
+        RoleType.User;
+}
 
 /// <summary>
 /// Halt change request. Every change requires a reason, which is written to the audit trail.

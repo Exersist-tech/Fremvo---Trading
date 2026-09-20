@@ -33,6 +33,9 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<IScanResultRepository, EfScanResultRepository>();
         services.AddScoped<ScannerResultsQueryService>();
         services.AddScoped<IExperimentResultLedger, EfExperimentResultLedger>();
+        services.AddScoped<EfPaperTrainingActivationRepository>();
+        services.AddScoped<IPaperTrainingActivationRepository>(provider =>
+            provider.GetRequiredService<EfPaperTrainingActivationRepository>());
 
         return services;
     }

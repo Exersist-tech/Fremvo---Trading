@@ -168,6 +168,8 @@ public sealed class PaperTrainingActivationService
             throw new ArgumentException("An explicit approval reference is required.", nameof(approvalId));
         var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Paper training was not requested.");
+        if (current.OwnerId == actorId)
+            throw new UnauthorizedAccessException("The owner cannot approve their own paper-training request.");
         if (current.State != PaperTrainingActivationState.Requested)
             throw new InvalidOperationException("Only a requested paper-training configuration may be activated.");
         ValidateConfiguration(current);

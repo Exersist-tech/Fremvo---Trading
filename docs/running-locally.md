@@ -46,6 +46,41 @@ only Kraken's public WebSocket endpoint; do not configure credentials, API
 keys, or authorization headers. A candle is persisted only after a subsequent
 interval proves it is closed.
 
+## Opt-in paper-training worker
+
+Paper training is disabled by default. It uses fake funds only, has no live or
+futures route, and does not read exchange credentials. After preparing the
+durable closed-candle, approved-group, risk, fill, ledger, and protective
+scheduler prerequisites, configure the worker explicitly:
+
+```json
+{
+  "ConnectionStrings": { "TradingDb": "Server=(localdb)\\MSSQLLocalDB;Database=Trading;Trusted_Connection=True;TrustServerCertificate=True" },
+  "Experiments": {
+    "EnabledUserIds": [ "PUT-THE-OWNER-GUID-HERE" ],
+    "PaperTraining": {
+      "Enabled": true,
+      "Prerequisites": {
+        "DurableClosedCandleSource": true,
+        "ApprovedResearchGroupsAndGates": true,
+        "WorkerRiskPolicy": true,
+        "PaperFillPolicy": true,
+        "OutputLedger": true,
+        "ProtectiveScheduler": true
+      }
+    }
+  }
+}
+```
+
+Run `dotnet run --project src/Trading.Workers.Experiments`. The owner requests
+one to ten fixed catalog slots at `/experiments`; a different Administrator or
+RiskOfficer must approve with a nonempty reference through
+`POST /api/paper-training/{ownerId}/approve`. Use the disable or emergency-stop
+endpoints to stop it. This host intentionally remains a no-op until durable
+paper-only runner sources are supplied; it never substitutes live, futures,
+credential, or network components.
+
 ## Opt-in Kraken Live Proving profile
 
 The normal `https` profile cannot send a real order. To exercise the
