@@ -14,6 +14,7 @@ using Trading.Domain.Audit;
 using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
 using Trading.Domain.Market;
+using Trading.Domain.Orders;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
@@ -151,6 +152,11 @@ builder.Services.AddSingleton<IOrderReconciliationRepository, InMemoryOrderRecon
 // platform floor; operator configuration is combined with them and may only
 // ever be stricter.
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Paper trading (Phase 5). Scoped because it writes audit events through the
+// scoped writer. This service has no exchange adapter of any kind: its fills
+// are simulated against published closed candles and it cannot reach a venue.
+builder.Services.AddScoped<PaperTradingService>();
 builder.Services.AddSingleton<IUniverseInstrumentProvider, SeedUniverseInstrumentProvider>();
 builder.Services.AddSingleton<IUniverseEvidenceSource, UnconfiguredUniverseEvidenceSource>();
 builder.Services.AddSingleton(_ => new EligibilityThresholds(
@@ -1565,6 +1571,81 @@ app.MapGet("/api/marketdata/candles", async (
     }
 }).RequireAuthorization();
 
+// ---------------------------------------------------------------------------
+// Paper trading (Phase 5). This is the only route in the application that
+// creates an order or a position, and it creates them with fake funds only.
+// The trading mode is fixed inside the service; there is no request field,
+// header, or configuration switch that can redirect this route to a venue.
+// ---------------------------------------------------------------------------
+
+app.MapPost("/api/paper/orders", async (
+    SubmitPaperOrderRequest request,
+    ClaimsPrincipal principal,
+    PaperTradingService paperTrading,
+    CancellationToken cancellationToken) =>
+{
+    // The owner comes from the signed-in principal, never from the request
+    // body, so a caller cannot trade into another user's book.
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (!Enum.TryParse<OrderSide>(request.Side, ignoreCase: true, out var side))
+    {
+        return Results.BadRequest(new { error = "InvalidSide", message = "Side must be Buy or Sell." });
+    }
+
+    var result = await paperTrading
+        .SubmitAsync(userId.Value, request.Symbol, side, request.Quantity, request.ClientOrderId, cancellationToken)
+        .ConfigureAwait(false);
+
+    if (!result.Succeeded)
+    {
+        // Each refusal keeps its own outcome so the operator can tell a halt
+        // from stale data from a duplicate. Collapsing them into one generic
+        // failure would hide which safety control actually fired.
+        var status = result.Outcome switch
+        {
+            PaperTradeOutcome.Duplicate => StatusCodes.Status409Conflict,
+            PaperTradeOutcome.Blocked => StatusCodes.Status403Forbidden,
+            PaperTradeOutcome.PriceStale or PaperTradeOutcome.PriceUnavailable => StatusCodes.Status503ServiceUnavailable,
+            _ => StatusCodes.Status400BadRequest
+        };
+
+        return Results.Json(
+            new { error = result.Outcome.ToString(), message = result.Message },
+            statusCode: status);
+    }
+
+    var order = result.Order!;
+    return Results.Ok(new
+    {
+        tradingMode = "Paper",
+        disclaimer = OrdersDisclaimer,
+        order = new
+        {
+            order.Id,
+            order.ClientOrderId,
+            order.Symbol,
+            side = order.Side.ToString(),
+            state = order.State.ToString(),
+            order.Quantity,
+            order.FilledQuantity,
+            fillPrice = order.Price
+        },
+        position = result.Position is null ? null : new
+        {
+            result.Position.Symbol,
+            direction = result.Position.Direction.ToString(),
+            result.Position.Quantity,
+            result.Position.EntryPrice,
+            status = result.Position.Status.ToString()
+        }
+    });
+}).RequireAuthorization();
+
 app.MapPost("/api/exchange/accounts", async (
     ConnectExchangeAccountRequest request,
     ClaimsPrincipal principal,
@@ -1699,8 +1780,8 @@ app.MapGet("/chart", () => Results.Content(
         <h1>Chart</h1>
         <p class="lede">
           Price history from Kraken with your open positions and working orders marked on it.
-          This page reads market data only; it has no control that places, changes or cancels an
-          order.
+          Orders placed here are paper orders filled with fake funds against the last closed
+          candle. Nothing on this page can reach an exchange.
         </p>
 
         <div class="notice">
@@ -1737,6 +1818,29 @@ app.MapGet("/chart", () => Results.Content(
 
         <h2>Position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
+
+        <h2>Place a paper trade</h2>
+        <div class="notice">
+          <strong>Fake funds. No exchange is contacted.</strong>
+          The fill is priced at the close of the last closed candle, so it reflects a price that
+          actually settled. It does not model spread, slippage, fees or partial fills, so a paper
+          result is an upper bound on what the same decision would have returned live.
+        </div>
+
+        <div class="toolbar">
+          <label for="tradeSide">Side</label>
+          <select id="tradeSide">
+            <option value="Buy">Buy</option>
+            <option value="Sell">Sell</option>
+          </select>
+
+          <label for="tradeQuantity">Quantity</label>
+          <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
+
+          <button id="submitTrade" type="button">Submit paper order</button>
+        </div>
+
+        <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
 
         <p class="empty">
           Kraken serves no ten-minute candle. That interval is refused rather than answered with a
@@ -2113,3 +2217,13 @@ internal sealed record HaltCommandRequest(
     string? Symbol,
     Guid? TargetId,
     string? Reason);
+
+/// <summary>
+/// Paper order submission. It carries no user id, because the owner is taken from the signed-in
+/// principal, and no trading mode, because a paper order can never be redirected to a venue.
+/// </summary>
+internal sealed record SubmitPaperOrderRequest(
+    string Symbol,
+    string Side,
+    decimal Quantity,
+    string? ClientOrderId);

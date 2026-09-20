@@ -336,8 +336,7 @@
       }
 
       setStatus(
-        'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken. ' +
-        'Nothing on this page places an order.',
+        'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.',
         false);
 
       draw();
@@ -349,12 +348,76 @@
     }
   }
 
+  function setTradeStatus(message, isError) {
+    var element = $('tradeStatus');
+    element.textContent = message;
+    element.className = isError ? 'notice error' : 'notice';
+  }
+
+  async function submitTrade() {
+    var symbol = $('symbol').value.trim();
+    var side = $('tradeSide').value;
+    var quantity = Number($('tradeQuantity').value);
+
+    if (!symbol) {
+      setTradeStatus('Enter a pair first.', true);
+      return;
+    }
+
+    if (!isFinite(quantity) || quantity <= 0) {
+      setTradeStatus('Quantity must be a positive number.', true);
+      return;
+    }
+
+    setTradeStatus('Submitting paper order.', false);
+    $('submitTrade').disabled = true;
+
+    try {
+      var response = await fetch('/api/paper/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        // No client order id is sent, so each click is a distinct intent. A
+        // reused identifier would be treated as a repeat of the earlier order
+        // and refused.
+        body: JSON.stringify({ symbol: symbol, side: side, quantity: quantity, clientOrderId: null })
+      });
+
+      var payload = await response.json();
+
+      if (!response.ok) {
+        // The refusal reason is shown verbatim so the user can tell a halt
+        // from stale market data from a rejected size.
+        setTradeStatus(
+          (payload && payload.error ? payload.error + ': ' : 'Refused: ') +
+          (payload && payload.message ? payload.message : 'The paper order was not accepted.'),
+          true);
+        return;
+      }
+
+      setTradeStatus(
+        'Paper order ' + payload.order.state.toLowerCase() + ': ' +
+        payload.order.side + ' ' + payload.order.quantity + ' ' + payload.order.symbol +
+        ' at ' + formatPrice(payload.order.fillPrice) + '. Fake funds only.',
+        false);
+
+      // Reload so the new entry line and position row are drawn from stored
+      // state rather than from the response, which would show a position the
+      // server may not actually hold.
+      await load();
+    } catch (error) {
+      setTradeStatus('The paper order could not be submitted. ' + error.message, true);
+    } finally {
+      $('submitTrade').disabled = false;
+    }
+  }
+
   window.addEventListener('DOMContentLoaded', function () {
     $('load').addEventListener('click', load);
     $('symbol').addEventListener('keydown', function (event) {
       if (event.key === 'Enter') { load(); }
     });
     $('interval').addEventListener('change', load);
+    $('submitTrade').addEventListener('click', submitTrade);
     load();
   });
 
