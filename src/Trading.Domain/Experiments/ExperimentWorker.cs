@@ -315,7 +315,12 @@ public sealed class ExperimentWorker
         _favorableMarkPrice = markPrice;
     }
 
-    public void ApplyPaperTrade(decimal quantity, decimal executionPrice, decimal fee, string direction)
+    public void ApplyPaperTrade(
+        decimal quantity,
+        decimal executionPrice,
+        decimal fee,
+        string direction,
+        DateTimeOffset? occurredAtUtc = null)
     {
         if (Status != ExperimentWorkerStatus.Running)
         {
@@ -343,6 +348,12 @@ public sealed class ExperimentWorker
             throw new ArgumentOutOfRangeException(
                 nameof(quantity),
                 "Quantity must be positive; use the direction to express buy or sell.");
+        }
+
+        var tradeTime = occurredAtUtc ?? DateTimeOffset.UtcNow;
+        if (tradeTime.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Paper-trading occurrence time must be UTC.", nameof(occurredAtUtc));
         }
 
         var directionLower = direction.Trim();
@@ -392,7 +403,7 @@ public sealed class ExperimentWorker
             quantity,
             executionPrice,
             fee,
-            DateTimeOffset.UtcNow,
+            tradeTime,
             directionLower));
     }
 
