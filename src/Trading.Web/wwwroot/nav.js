@@ -8,6 +8,7 @@
 
   var LINKS = [
     { href: '/', label: 'Overview' },
+    { href: '/chart', label: 'Chart' },
     { href: '/orders', label: 'Orders' },
     { href: '/experiments', label: 'Experiments' },
     { href: '/optimization', label: 'Optimization' },

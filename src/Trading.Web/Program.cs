@@ -1682,6 +1682,73 @@ app.MapDelete("/api/exchange/accounts/{accountId:guid}", async (
     return Results.Ok(new { disconnected = true });
 }).RequireAuthorization();
 
+app.MapGet("/chart", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/chart.js"></script>
+      <title>Chart</title>
+    </head>
+    <body>
+      <main>
+        <h1>Chart</h1>
+        <p class="lede">
+          Price history from Kraken with your open positions and working orders marked on it.
+          This page reads market data only; it has no control that places, changes or cancels an
+          order.
+        </p>
+
+        <div class="notice">
+          <strong>The bar still forming is drawn dashed.</strong>
+          A partial bar looks like a finished one on most charts, which invites reading a signal
+          off a candle that has not closed. Strategies here only act on closed candles, and the
+          chart shows the same distinction.
+        </div>
+
+        <div class="toolbar">
+          <label for="symbol">Pair</label>
+          <input id="symbol" value="XBTUSD" size="12" autocomplete="off" />
+
+          <label for="interval">Interval</label>
+          <select id="interval">
+            <option value="OneMinute">1 minute</option>
+            <option value="FiveMinutes">5 minutes</option>
+            <option value="TenMinutes">10 minutes</option>
+            <option value="FifteenMinutes">15 minutes</option>
+            <option value="ThirtyMinutes">30 minutes</option>
+            <option value="OneHour" selected>1 hour</option>
+            <option value="FourHours">4 hours</option>
+            <option value="OneDay">1 day</option>
+          </select>
+
+          <button id="load" type="button">Load</button>
+        </div>
+
+        <div id="status" class="notice">Loading.</div>
+
+        <canvas id="chart" width="1100" height="460"
+                style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
+        <p id="legend" class="empty"></p>
+
+        <h2>Position on this pair</h2>
+        <div id="positions"><p class="empty">Loading.</p></div>
+
+        <p class="empty">
+          Kraken serves no ten-minute candle. That interval is refused rather than answered with a
+          different size; a ten-minute bar is built from ten closed one-minute bars and marked as
+          derived.
+        </p>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
 app.MapGet("/exchange", () => Results.Content(
     """
     <!DOCTYPE html>
