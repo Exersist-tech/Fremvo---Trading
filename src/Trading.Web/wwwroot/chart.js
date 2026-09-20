@@ -36,6 +36,8 @@
   };
 
   var MIN_BARS = 12;
+  var pairSearchTimer = null;
+  var pairSearchGeneration = 0;
 
   function $(id) { return document.getElementById(id); }
 
@@ -572,6 +574,57 @@
         return false;
       }
 
+      function replacePairOptions() {
+        var select = $('symbol');
+        var previous = select.value;
+
+        select.textContent = '';
+        state.pairs.forEach(function (pair) {
+          var option = document.createElement('option');
+          option.value = pair.symbol;
+          option.textContent = pair.displayName;
+          select.appendChild(option);
+        });
+
+        if (state.pairs.some(function (pair) { return pair.symbol === previous; })) {
+          select.value = previous;
+        }
+      }
+
+      async function refreshPairsForSearch(query, generation) {
+        try {
+          var response = await fetch('/api/marketdata/pairs', { headers: { 'Accept': 'application/json' } });
+          var payload = await response.json();
+
+          if (!response.ok || generation !== pairSearchGeneration) {
+            return;
+          }
+
+          state.pairs = payload.filter(function (pair) { return pair.isActive; });
+          replacePairOptions();
+          renderPairSearch(query);
+        } catch (error) {
+          // Keep the last known active catalogue visible. A temporary public-data
+          // outage must not make the already selected trading pair disappear.
+          if (generation === pairSearchGeneration) {
+            renderPairSearch(query);
+          }
+        }
+      }
+
+      function schedulePairSearch(query) {
+        renderPairSearch(query);
+
+        if (pairSearchTimer !== null) {
+          window.clearTimeout(pairSearchTimer);
+        }
+
+        var generation = ++pairSearchGeneration;
+        pairSearchTimer = window.setTimeout(function () {
+          refreshPairsForSearch(query, generation);
+        }, 250);
+      }
+
       // Only pairs the venue is actually accepting orders on are offered.
       // Listing a delisted pair would let someone build a position they cannot
       // trade out of.
@@ -624,6 +677,11 @@
       var host = $('pairResults');
       host.textContent = '';
       host.classList.remove('has-results');
+      var empty = $('pairSearchEmpty');
+      if (empty) {
+        empty.textContent = '';
+        empty.classList.remove('has-message');
+      }
     }
 
     function renderPairSearch(query) {
@@ -662,7 +720,121 @@
       });
 
       host.classList.toggle('has-results', matches.length > 0);
+        var empty = $('pairSearchEmpty');
+        if (empty) {
+          empty.textContent = needle && !matches.length
+            ? 'No active Kraken pair matches "' + String(query).trim() + '".'
+            : '';
+          empty.classList.toggle('has-message', Boolean(needle && !matches.length));
+        }
     }
+  }
+
+  function setPairSearchValue(pair) {
+    if (!pair) { return; }
+    $('pairSearch').value = pair.displayName + ' (' + pair.symbol + ')';
+  }
+
+  function replacePairOptions() {
+    var select = $('symbol');
+    var previous = select.value;
+
+    select.textContent = '';
+    state.pairs.forEach(function (pair) {
+      var option = document.createElement('option');
+      option.value = pair.symbol;
+      option.textContent = pair.displayName;
+      select.appendChild(option);
+    });
+
+    if (state.pairs.some(function (pair) { return pair.symbol === previous; })) {
+      select.value = previous;
+    }
+  }
+
+  function clearPairResults() {
+    var host = $('pairResults');
+    host.textContent = '';
+    host.classList.remove('has-results');
+    var empty = $('pairSearchEmpty');
+    empty.textContent = '';
+    empty.classList.remove('has-message');
+  }
+
+  function renderPairSearch(query) {
+    var host = $('pairResults');
+    var needle = String(query || '').trim().toUpperCase();
+    var matches = state.pairs.filter(function (pair) {
+      if (!needle) { return true; }
+      return pair.symbol.toUpperCase().indexOf(needle) !== -1 ||
+        pair.displayName.toUpperCase().indexOf(needle) !== -1 ||
+        pair.baseAsset.toUpperCase().indexOf(needle) !== -1 ||
+        pair.quoteAsset.toUpperCase().indexOf(needle) !== -1;
+    }).slice(0, 8);
+
+    host.textContent = '';
+
+    matches.forEach(function (pair) {
+      var option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'pair-result';
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(pair.symbol === $('symbol').value));
+      option.textContent = pair.displayName;
+
+      var detail = document.createElement('small');
+      detail.textContent = pair.symbol + ' · ' + pair.baseAsset + '/' + pair.quoteAsset;
+      option.appendChild(detail);
+      option.addEventListener('click', function () {
+        $('symbol').value = pair.symbol;
+        setPairSearchValue(pair);
+        clearPairResults();
+        load();
+      });
+
+      host.appendChild(option);
+    });
+
+    host.classList.toggle('has-results', matches.length > 0);
+    var empty = $('pairSearchEmpty');
+    empty.textContent = needle && !matches.length
+      ? 'No active Kraken pair matches "' + String(query).trim() + '".'
+      : '';
+    empty.classList.toggle('has-message', Boolean(needle && !matches.length));
+  }
+
+  async function refreshPairsForSearch(query, generation) {
+    try {
+      var response = await fetch('/api/marketdata/pairs', { headers: { 'Accept': 'application/json' } });
+      var payload = await response.json();
+
+      if (!response.ok || generation !== pairSearchGeneration) {
+        return;
+      }
+
+      state.pairs = payload.filter(function (pair) { return pair.isActive; });
+      replacePairOptions();
+      renderPairSearch(query);
+    } catch (error) {
+      // Keep the last known active catalogue visible. A temporary public-data
+      // outage must not make the already selected trading pair disappear.
+      if (generation === pairSearchGeneration) {
+        renderPairSearch(query);
+      }
+    }
+  }
+
+  function schedulePairSearch(query) {
+    renderPairSearch(query);
+
+    if (pairSearchTimer !== null) {
+      window.clearTimeout(pairSearchTimer);
+    }
+
+    var generation = ++pairSearchGeneration;
+    pairSearchTimer = window.setTimeout(function () {
+      refreshPairsForSearch(query, generation);
+    }, 250);
   }
 
   function renderPairFilters() {
@@ -1119,7 +1291,7 @@
       renderPairSearch($('pairSearch').value);
     });
     $('pairSearch').addEventListener('input', function () {
-      renderPairSearch($('pairSearch').value);
+      schedulePairSearch($('pairSearch').value);
     });
     $('pairSearch').addEventListener('keydown', function (event) {
       if (event.key === 'Escape') {

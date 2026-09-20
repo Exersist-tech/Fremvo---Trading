@@ -2548,8 +2548,8 @@ app.MapGet("/chart", () => Results.Content(
 
         <div id="status" class="notice">Loading.</div>
 
-        <div class="chart-stage">
-          <div class="chart-controls chart-controls-left">
+        <div class="chart-toolbar">
+          <div class="pair-selector">
             <label for="pairSearch">Search pairs</label>
             <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
                    aria-autocomplete="list" aria-controls="pairResults" />
@@ -2558,9 +2558,10 @@ app.MapGet("/chart", () => Results.Content(
                  Kraken-backed options; it never accepts arbitrary symbols. -->
             <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
             <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
+            <p id="pairSearchEmpty" class="pair-search-empty" aria-live="polite"></p>
           </div>
 
-          <div class="chart-controls chart-controls-right">
+          <div class="chart-actions">
             <label for="interval">Interval</label>
             <select id="interval">
               <option value="OneMinute">1 minute</option>
@@ -2578,7 +2579,9 @@ app.MapGet("/chart", () => Results.Content(
             <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
             <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
           </div>
+        </div>
 
+        <div class="chart-stage">
           <canvas id="chart" width="1100" height="460"
                   style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
         </div>

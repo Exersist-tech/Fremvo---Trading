@@ -195,33 +195,39 @@ tbody tr:last-child td { border-bottom: none; }
   position: relative;
 }
 
-.chart-controls {
-  position: absolute;
-  z-index: 2;
+.chart-toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.pair-selector,
+.chart-actions {
   gap: 0.5rem;
   padding: 0.5rem;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  backdrop-filter: blur(8px);
 }
 
-.chart-controls-left {
-  top: 0.7rem;
-  left: 0.7rem;
+.pair-selector {
+  display: flex;
   align-items: stretch;
   flex-direction: column;
-  min-width: min(290px, calc(100% - 1.4rem));
+  width: min(22rem, 100%);
 }
 
-.chart-controls-right {
-  top: 0.7rem;
-  right: 0.7rem;
+.chart-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.chart-controls label {
+.pair-selector label,
+.chart-actions label {
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 600;
@@ -229,14 +235,14 @@ tbody tr:last-child td { border-bottom: none; }
   text-transform: uppercase;
 }
 
-.chart-controls input,
-.chart-controls select {
+.pair-selector input,
+.chart-actions select {
   min-height: 2.2rem;
 }
 
 .pair-results {
   display: none;
-  max-height: 16rem;
+  max-height: 14rem;
   overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -268,6 +274,17 @@ tbody tr:last-child td { border-bottom: none; }
   color: var(--muted);
   font-size: 0.74rem;
   font-weight: 400;
+}
+
+.pair-search-empty {
+  display: none;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pair-search-empty.has-message {
+  display: block;
 }
 
 .visually-hidden {
@@ -315,19 +332,9 @@ button.danger {
 }
 
 @media (max-width: 780px) {
-  .chart-controls-right {
-    top: auto;
-    right: 0.5rem;
-    bottom: 0.5rem;
-    left: 0.5rem;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-  }
-
-  .chart-controls-left {
-    top: 0.5rem;
-    left: 0.5rem;
-  }
+  .chart-toolbar { align-items: stretch; flex-direction: column; }
+  .pair-selector { width: 100%; }
+  .chart-actions { justify-content: flex-start; }
 }
 
 .tabs {
