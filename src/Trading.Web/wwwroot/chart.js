@@ -19,6 +19,8 @@
   var TEXT = '#d6d8db';
   var ENTRY_LONG = '#3da5ff';
   var ENTRY_SHORT = '#ff9f43';
+  var STOP = '#ff5f56';
+  var TARGET = '#3fbf6f';
 
   var state = {
     candles: [],
@@ -260,6 +262,16 @@
         label: (short ? 'Short entry' : 'Long entry'),
         colour: short ? ENTRY_SHORT : ENTRY_LONG
       });
+
+      // A stop and a target are drawn distinctly from the entry, because
+      // mistaking a stop for an entry misreads the risk on the trade.
+      if (p.stopLossPrice !== null && p.stopLossPrice !== undefined) {
+        entries.push({ price: Number(p.stopLossPrice), label: 'Stop', colour: STOP });
+      }
+
+      if (p.takeProfitPrice !== null && p.takeProfitPrice !== undefined) {
+        entries.push({ price: Number(p.takeProfitPrice), label: 'Target', colour: TARGET });
+      }
     });
 
     state.orders.forEach(function (o) {
@@ -274,6 +286,102 @@
     });
 
     return entries.filter(function (e) { return isFinite(e.price) && e.price > 0; });
+  }
+
+  function buildExitRow(position) {
+    var tr = document.createElement('tr');
+    var td = document.createElement('td');
+    td.colSpan = 12;
+
+    var wrap = document.createElement('div');
+    wrap.className = 'toolbar';
+
+    var label = document.createElement('span');
+    label.textContent = 'Protective exits for ' + position.symbol + ':';
+    wrap.appendChild(label);
+
+    var stop = document.createElement('input');
+    stop.type = 'number';
+    stop.step = 'any';
+    stop.min = '0';
+    stop.placeholder = 'stop';
+    stop.value = position.stopLossPrice === null || position.stopLossPrice === undefined
+      ? '' : String(position.stopLossPrice);
+    wrap.appendChild(stop);
+
+    var target = document.createElement('input');
+    target.type = 'number';
+    target.step = 'any';
+    target.min = '0';
+    target.placeholder = 'target';
+    target.value = position.takeProfitPrice === null || position.takeProfitPrice === undefined
+      ? '' : String(position.takeProfitPrice);
+    wrap.appendChild(target);
+
+    var save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save levels';
+    save.addEventListener('click', async function () {
+      save.disabled = true;
+
+      try {
+        // An empty box means no level, not zero. Sending zero would place a
+        // stop that can never be reached and read as protection that is not
+        // there.
+        var body = {
+          stopLossPrice: stop.value === '' ? null : Number(stop.value),
+          takeProfitPrice: target.value === '' ? null : Number(target.value)
+        };
+
+        var response = await fetch('/api/paper/positions/' + encodeURIComponent(position.id) + '/exits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        var payload = await response.json().catch(function () { return {}; });
+
+        if (!response.ok) {
+          // The domain's own wording is surfaced, because it explains why the
+          // level was refused rather than just that it was.
+          setStatus(payload.message || 'The levels were refused.', true);
+          return;
+        }
+
+        setStatus('Levels saved. They are checked against closed candles only.', false);
+        await load();
+      } catch (error) {
+        setStatus('The levels could not be saved. ' + error.message, true);
+      } finally {
+        save.disabled = false;
+      }
+    });
+    wrap.appendChild(save);
+
+    var note = document.createElement('span');
+    note.className = 'empty';
+    note.textContent = 'Checked on closed candles only. A candle that reaches both levels is settled as the stop.';
+    wrap.appendChild(note);
+
+    td.appendChild(wrap);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  async function evaluateExits() {
+    // Evaluation changes state, so it is a POST and never happens as a side
+    // effect of simply reading the page.
+    try {
+      var response = await fetch('/api/paper/exits/evaluate', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!response.ok) { return null; }
+      return await response.json();
+    } catch (error) {
+      return null;
+    }
   }
 
   function renderPositionTable() {
@@ -294,7 +402,7 @@
 
     var table = document.createElement('table');
     var head = document.createElement('tr');
-    ['Pair', 'Direction', 'Quantity', 'Entry', 'Last closed price', 'Unrealised', 'Return', 'Break even', 'Priced at', 'Opened']
+    ['Pair', 'Direction', 'Quantity', 'Entry', 'Last closed price', 'Unrealised', 'Return', 'Break even', 'Stop', 'Target', 'Priced at', 'Opened']
       .forEach(function (title) {
         var th = document.createElement('th');
         th.textContent = title;
@@ -322,6 +430,12 @@
         unrealised === null || unrealised === undefined ? 'unknown' : formatSigned(unrealised),
         percent === null || percent === undefined ? 'unknown' : formatSigned(percent) + '%',
         formatPrice(position.breakEvenPrice),
+        position.stopLossPrice === null || position.stopLossPrice === undefined
+          ? 'none'
+          : formatPrice(position.stopLossPrice),
+        position.takeProfitPrice === null || position.takeProfitPrice === undefined
+          ? 'none'
+          : formatPrice(position.takeProfitPrice),
         position.pricedAtUtc ? formatTime(position.pricedAtUtc) : 'not priced',
         formatTime(position.openedAtUtc)
       ];
@@ -335,10 +449,17 @@
           td.style.color = Number(unrealised) >= 0 ? '#3fbf6f' : '#ff6b6b';
         }
 
+        // An unprotected position says so in grey rather than showing a blank
+        // cell, which would read as though a level existed and was not shown.
+        if ((index === 8 || index === 9) && value === 'none') {
+          td.style.color = '#9aa0a6';
+        }
+
         tr.appendChild(td);
       });
 
       table.appendChild(tr);
+      table.appendChild(buildExitRow(position));
     });
 
     host.appendChild(table);
@@ -388,6 +509,19 @@
         option.textContent = pair.displayName;
         select.appendChild(option);
       });
+
+      // A pair may be requested by link, for example from the positions page.
+      // It is honoured only if the venue actually lists it, so a hand-edited
+      // query string cannot select a pair that is not tradable.
+      var requested = new URLSearchParams(window.location.search).get('symbol');
+      var requestedMatch = requested
+        ? state.pairs.filter(function (p) { return p.symbol === requested.toUpperCase(); })
+        : [];
+
+      if (requestedMatch.length) {
+        select.value = requestedMatch[0].symbol;
+        return true;
+      }
 
       var preferred = state.pairs.filter(function (p) { return p.symbol === 'XBTUSD'; });
       select.value = preferred.length ? 'XBTUSD' : (state.pairs.length ? state.pairs[0].symbol : '');
@@ -458,15 +592,30 @@
 
       // Positions come from the valuation route so the profit and loss figures
       // are the server's decimal results, not numbers derived in the browser.
+      //
+      // Exits are evaluated first. Reading a position before checking its stop
+      // would show a trade as open that a closed candle already ended.
+      var exits = await evaluateExits();
+
       var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
       state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
 
       var orders = await fetch('/api/orders', { headers: { 'Accept': 'application/json' } });
       state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
-      setStatus(
-        'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.',
-        false);
+      var message = 'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
+
+      if (exits && exits.closed) {
+        message += ' ' + exits.closed + ' position closed by a stop or target.';
+
+        var ambiguous = (exits.fills || []).filter(function (f) { return f.bothLevelsTouched; });
+        if (ambiguous.length) {
+          message += ' ' + ambiguous.length + ' reached both levels inside one candle; the order of ' +
+            'events cannot be recovered from a candle, so the stop was taken.';
+        }
+      }
+
+      setStatus(message, false);
 
       draw();
       renderPositionTable();

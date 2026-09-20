@@ -183,6 +183,10 @@ builder.Services.AddScoped<PaperTradingService>();
 // and changes no position.
 builder.Services.AddScoped<IPositionValuationService, PositionValuationService>();
 
+// Enforces stop and target levels on paper positions. Without this the levels
+// would be decorative, which is worse than not offering them at all.
+builder.Services.AddScoped<IProtectiveExitEvaluator, ProtectiveExitEvaluator>();
+
 // The tradable pair list is public reference data shared by every user, so it
 // is a singleton with its own short-lived cache. It holds no user, account,
 // balance or credential, so nothing leaks between users.
@@ -1676,10 +1680,112 @@ app.MapGet("/api/paper/positions", async (
             unrealisedPnl = item.UnrealisedPnl,
             unrealisedPercent = item.UnrealisedPercent,
             breakEvenPrice = item.BreakEvenPriceExcludingFees,
+            stopLossPrice = item.Position.StopLossPrice,
+            takeProfitPrice = item.Position.TakeProfitPrice,
             pricedAtUtc = item.PricedAtUtc,
             priceIsStale = item.PriceIsStale,
             priceUnavailableReason = item.PriceUnavailableReason,
             item.Position.OpenedAtUtc
+        })
+    });
+}).RequireAuthorization();
+
+// Sets or clears the stop and target on an open paper position. The levels are
+// validated against the position's direction, so a stop on the profitable side
+// is refused rather than stored and triggered immediately.
+app.MapPost("/api/paper/positions/{positionId:guid}/exits", async (
+    Guid positionId,
+    SetProtectiveExitsRequest request,
+    ClaimsPrincipal principal,
+    IPositionRepository positions,
+    IAuditEventWriter auditWriter,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    // Read through the user-scoped list, so a position belonging to another
+    // user reads as not found rather than forbidden.
+    var open = await positions.ListOpenAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var position = open.FirstOrDefault(candidate => candidate.Id == positionId);
+
+    if (position is null)
+    {
+        return Results.NotFound(new { error = "PositionNotFound", message = "No open position with that id." });
+    }
+
+    try
+    {
+        position.SetProtectiveExits(request.StopLossPrice, request.TakeProfitPrice, timeProvider.GetUtcNow());
+    }
+    catch (ArgumentOutOfRangeException exception)
+    {
+        return Results.BadRequest(new { error = "InvalidExitLevel", message = exception.Message });
+    }
+    catch (InvalidOperationException exception)
+    {
+        return Results.BadRequest(new { error = "PositionNotOpen", message = exception.Message });
+    }
+
+    await positions.UpdateAsync(position, cancellationToken).ConfigureAwait(false);
+
+    await auditWriter.WriteAsync(
+        new AuditEvent(
+            Guid.NewGuid(),
+            userId.Value,
+            "PaperProtectiveExitsSet",
+            targetType: "PaperPosition",
+            targetId: positionId.ToString("D", System.Globalization.CultureInfo.InvariantCulture),
+            occurredAtUtc: timeProvider.GetUtcNow(),
+            before: null,
+            after: FormattableString.Invariant($"Stop {position.StopLossPrice}, target {position.TakeProfitPrice}."),
+            correlationId: null),
+        cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        position.Id,
+        stopLossPrice = position.StopLossPrice,
+        takeProfitPrice = position.TakeProfitPrice
+    });
+}).RequireAuthorization();
+
+// Runs the stop and target check over the user's open positions.
+//
+// This is an explicit call rather than a side effect of reading positions, so
+// a read never changes state. A background worker must own this before exits
+// can be relied on while nobody is looking at the page; until then a level is
+// only enforced when this route runs.
+app.MapPost("/api/paper/exits/evaluate", async (
+    ClaimsPrincipal principal,
+    IProtectiveExitEvaluator evaluator,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var fills = await evaluator.EvaluateAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Paper",
+        closed = fills.Count,
+        fills = fills.Select(fill => new
+        {
+            fill.Position.Id,
+            fill.Position.Symbol,
+            kind = fill.Kind.ToString(),
+            fill.ExitPrice,
+            fill.RealisedPnl,
+            fill.BothLevelsTouched,
+            fill.CandleCloseTimeUtc
         })
     });
 }).RequireAuthorization();
@@ -1868,6 +1974,49 @@ app.MapDelete("/api/exchange/accounts/{accountId:guid}", async (
 
     return Results.Ok(new { disconnected = true });
 }).RequireAuthorization();
+
+app.MapGet("/positions", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/positions.js"></script>
+      <title>Positions</title>
+    </head>
+    <body>
+      <main>
+        <h1>Open positions</h1>
+        <p class="lede">
+          Every pair you currently hold, valued at the last closed candle. Select a row to open
+          that pair on the chart.
+        </p>
+
+        <div class="notice">
+          <strong>Paper positions. Fake funds.</strong>
+          Fees, spread and slippage are not modelled, so break even is the raw entry price and
+          these results are an upper bound on what the same trades would have returned live.
+          Nothing here is a prediction and no strategy is guaranteed to be profitable.
+        </div>
+
+        <div class="toolbar">
+          <button id="refresh" type="button">Refresh</button>
+          <button id="evaluate" type="button" title="Check whether any stop or target was reached">
+            Check stops and targets
+          </button>
+        </div>
+
+        <div id="status" class="notice">Loading.</div>
+        <div id="summary"></div>
+        <div id="positions"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
 
 app.MapGet("/chart", () => Results.Content(
     """
@@ -2350,3 +2499,12 @@ internal sealed record SubmitPaperOrderRequest(
     string Side,
     decimal Quantity,
     string? ClientOrderId);
+
+/// <summary>
+/// Stop and target levels for an open position. Either may be null, which
+/// removes that level. The position id comes from the route, and ownership is
+/// checked against the signed-in principal.
+/// </summary>
+internal sealed record SetProtectiveExitsRequest(
+    decimal? StopLossPrice,
+    decimal? TakeProfitPrice);

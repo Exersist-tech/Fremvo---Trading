@@ -99,6 +99,89 @@ public sealed class Position
 
     public PositionStatus Status { get; private set; }
 
+    /// <summary>
+    /// Price at which the position should be closed to limit loss, if one is set.
+    /// </summary>
+    public decimal? StopLossPrice { get; private set; }
+
+    /// <summary>
+    /// Price at which the position should be closed to take profit, if one is set.
+    /// </summary>
+    public decimal? TakeProfitPrice { get; private set; }
+
+    public bool HasProtectiveExits => StopLossPrice.HasValue || TakeProfitPrice.HasValue;
+
+    /// <summary>
+    /// Sets the protective exit levels for the position.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Each level is validated against the direction of the position. A stop
+    /// placed on the profitable side, or a target placed on the losing side,
+    /// would trigger the moment it is evaluated and close the position at the
+    /// opposite of the intended outcome, so it is refused rather than stored.
+    /// </para>
+    /// <para>
+    /// Passing <see langword="null"/> for a level removes it. Removing a stop
+    /// is permitted but is a deliberate act: it is never removed implicitly by
+    /// another operation.
+    /// </para>
+    /// </remarks>
+    public void SetProtectiveExits(decimal? stopLossPrice, decimal? takeProfitPrice, DateTimeOffset occurredAtUtc)
+    {
+        if (Status is PositionStatus.Flat or PositionStatus.Liquidated)
+        {
+            throw new InvalidOperationException("A closed position cannot be given exit levels.");
+        }
+
+        if (stopLossPrice is <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stopLossPrice), "Stop price must be positive.");
+        }
+
+        if (takeProfitPrice is <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(takeProfitPrice), "Target price must be positive.");
+        }
+
+        if (Direction == PositionDirection.DirectionLong)
+        {
+            if (stopLossPrice >= EntryPrice)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(stopLossPrice),
+                    "A long position's stop must be below its entry price, otherwise it closes the position at a loss the moment it is evaluated.");
+            }
+
+            if (takeProfitPrice <= EntryPrice)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(takeProfitPrice),
+                    "A long position's target must be above its entry price.");
+            }
+        }
+        else
+        {
+            if (stopLossPrice <= EntryPrice)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(stopLossPrice),
+                    "A short position's stop must be above its entry price, otherwise it closes the position at a loss the moment it is evaluated.");
+            }
+
+            if (takeProfitPrice >= EntryPrice)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(takeProfitPrice),
+                    "A short position's target must be below its entry price.");
+            }
+        }
+
+        StopLossPrice = stopLossPrice;
+        TakeProfitPrice = takeProfitPrice;
+        Transition(occurredAtUtc);
+    }
+
     public int Version { get; private set; }
 
     public DateTimeOffset? LastTransitionAtUtc { get; private set; }

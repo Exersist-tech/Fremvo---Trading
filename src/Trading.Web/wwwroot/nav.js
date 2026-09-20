@@ -9,6 +9,7 @@
   var LINKS = [
     { href: '/', label: 'Overview' },
     { href: '/chart', label: 'Chart' },
+    { href: '/positions', label: 'Positions' },
     { href: '/orders', label: 'Orders' },
     { href: '/experiments', label: 'Experiments' },
     { href: '/optimization', label: 'Optimization' },
