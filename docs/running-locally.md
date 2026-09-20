@@ -37,8 +37,9 @@ dotnet run --launch-profile "Live Proving (Kraken)"
 ```
 
 This profile is deliberately separate from the default and permits only the
-development administrator, `SOLUSD` or `XBTUSD`, a maximum order notional of
-25, and a proving ceiling of 10. It is still a real Kraken route: connect only
+development administrator, `SOLUSD`, `SOLEUR`, or `XBTUSD`, a maximum order
+notional of 25 in the pair's quote currency, and a proving ceiling of 10. It is
+still a real Kraken route: connect only
 a read-and-trade key with withdrawal permission disabled, start at Proving,
 and submit a small order you are prepared to place. Wait for an observed,
 reconciled fill before promoting the account to Live. The seeded
