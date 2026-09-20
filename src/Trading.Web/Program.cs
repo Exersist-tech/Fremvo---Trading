@@ -2624,22 +2624,15 @@ app.MapGet("/chart", () => Results.Content(
       <title>Chart</title>
     </head>
     <body>
-      <main>
+      <main class="page-wide chart-page">
         <h1>Chart</h1>
         <p class="lede">
-          Price history from Kraken with your open positions and working orders marked on it.
-          Orders placed here are paper orders filled with fake funds against the last closed
-          candle. Nothing on this page can reach an exchange.
+          Price history from Kraken with confirmed positions and working orders marked on it.
+          The selected book determines whether an order is simulated or sent through the separately
+          enabled live route.
         </p>
 
-        <div class="notice">
-          <strong>The bar still forming is drawn dashed.</strong>
-          A partial bar looks like a finished one on most charts, which invites reading a signal
-          off a candle that has not closed. Strategies here only act on closed candles, and the
-          chart shows the same distinction.
-        </div>
-
-        <div id="status" class="notice">Loading.</div>
+        <div id="status" class="notice chart-status">Loading.</div>
 
         <div class="chart-workspace">
           <div class="chart-column">
@@ -2683,6 +2676,10 @@ app.MapGet("/chart", () => Results.Content(
           </div>
 
           <aside class="trade-panel" aria-label="Trade ticket">
+            <section class="pair-balance-card" aria-live="polite">
+              <span class="pair-balance-label">Exchange balance for this pair</span>
+              <div id="pairHolding" class="pair-balance-value">Loading current exchange holding.</div>
+            </section>
             <h2>Trade</h2>
 
             <!-- The chart is shared. Only the book and ticket change with the
@@ -2718,9 +2715,10 @@ app.MapGet("/chart", () => Results.Content(
         <p id="legend" class="empty"></p>
         <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
 
-        <h2>Position on this pair</h2>
-        <div id="pairHolding" class="notice">Loading current exchange holding.</div>
+        <h2>Confirmed position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
+        <h2>Active orders on this pair</h2>
+        <div id="activeOrders"><p class="empty">Loading.</p></div>
         <p id="pairFilters" class="empty"></p>
 
         <p class="empty">

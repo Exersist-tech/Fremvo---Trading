@@ -218,6 +218,38 @@ tbody tr:last-child td { border-bottom: none; }
   margin: 0 0 0.75rem;
 }
 
+.pair-balance-card {
+  margin: -1rem -1rem 1rem;
+  padding: 0.9rem 1rem;
+  background: linear-gradient(135deg, rgba(63, 185, 80, 0.18), rgba(79, 156, 249, 0.10));
+  border-bottom: 1px solid rgba(63, 185, 80, 0.35);
+  border-radius: 10px 10px 0 0;
+}
+
+.pair-balance-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.pair-balance-value {
+  margin-top: 0.35rem;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+.pair-balance-value.error { color: #ffb4b4; }
+
+.chart-status {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+}
+
 .trade-panel .tabs {
   margin-top: 0;
 }

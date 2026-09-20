@@ -571,6 +571,77 @@
     host.appendChild(note);
   }
 
+  function renderActiveOrderTable() {
+    var host = $('activeOrders');
+    host.textContent = '';
+
+    var activeOrders = state.orders.filter(function (order) {
+      if (String(order.symbol).toUpperCase() !== state.symbol.toUpperCase()) {
+        return false;
+      }
+
+      return order.state !== 'Filled'
+        && order.state !== 'Cancelled'
+        && order.state !== 'Rejected';
+    });
+
+    if (!activeOrders.length) {
+      var empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'No active ' + tradingMode.toLowerCase() + ' orders on ' + state.symbol + '.';
+      host.appendChild(empty);
+      return;
+    }
+
+    var table = document.createElement('table');
+    var header = document.createElement('tr');
+    ['State', 'Side', 'Quantity', 'Filled', 'Limit price', 'Submitted', 'Reconciliation']
+      .forEach(function (title) {
+        var th = document.createElement('th');
+        th.textContent = title;
+        header.appendChild(th);
+      });
+    table.appendChild(header);
+
+    activeOrders.forEach(function (order) {
+      var row = document.createElement('tr');
+      var stateLabel = order.state === 'Accepted'
+        ? 'Accepted - working'
+        : order.state;
+      var values = [
+        stateLabel,
+        order.side,
+        order.quantity,
+        order.filledQuantity || 0,
+        order.price === null || order.price === undefined ? 'unavailable' : formatPrice(order.price),
+        order.createdAtUtc ? formatTime(order.createdAtUtc) : 'unknown',
+        order.requiresReconciliation ? 'Required - do not resubmit' : 'Current'
+      ];
+
+      values.forEach(function (value, index) {
+        var td = document.createElement('td');
+        td.textContent = String(value);
+        if (index >= 2 && index <= 4) {
+          td.className = 'numeric';
+        }
+        if (index === 0 && order.state === 'Failed') {
+          td.style.color = '#ffb4b4';
+        }
+        row.appendChild(td);
+      });
+      table.appendChild(row);
+    });
+
+    host.appendChild(table);
+
+    var note = document.createElement('p');
+    note.className = 'empty';
+    note.textContent = tradingMode === 'Live'
+      ? 'Accepted means Kraken accepted the order request. It is confirmed only when Kraken reports a fill and it appears above as a position.'
+      : 'Paper orders are simulated and appear as positions once their simulated fill is recorded.';
+    host.appendChild(note);
+  }
+
   async function loadPairs() {
     var select = $('symbol');
 
@@ -859,13 +930,13 @@
     var pair = state.pairs.filter(function (item) { return item.symbol === state.symbol; })[0];
     if (!pair) {
       host.textContent = 'Current exchange holding is unavailable because the selected pair is unknown.';
-      host.className = 'notice error';
+      host.className = 'pair-balance-value error';
       return;
     }
 
     var target = normalizeAsset(pair.baseAsset);
     host.textContent = 'Loading current ' + target + ' holding from the exchange.';
-    host.className = 'notice';
+    host.className = 'pair-balance-value';
 
     try {
       var response = await fetch('/api/portfolio', { headers: { 'Accept': 'application/json' } });
@@ -898,10 +969,10 @@
       host.textContent = messages.length
         ? 'Current ' + target + ' exchange holding: ' + messages.join(' | ')
         : 'No connected exchange account is available for a current holding reading.';
-      host.className = hasUnavailableAccount ? 'notice error' : 'notice';
+      host.className = hasUnavailableAccount ? 'pair-balance-value error' : 'pair-balance-value';
     } catch (error) {
       host.textContent = 'Current exchange holding could not be read. No previous balance is shown.';
-      host.className = 'notice error';
+      host.className = 'pair-balance-value error';
     }
   }
 
@@ -1004,6 +1075,7 @@
 
       draw();
       renderPositionTable();
+      renderActiveOrderTable();
       renderPairFilters();
       await loadPairHolding();
     } catch (error) {
