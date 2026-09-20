@@ -117,13 +117,17 @@ public sealed class PaperExperimentTradeOrchestrator
     private readonly TradePipeline _pipeline;
     private readonly PaperExecutionAdapter _paperAdapter;
     private readonly decimal _openQuantity;
+    private readonly IPaperTradingLedgerRepository? _workerLedger;
+    private readonly IExperimentWorkerRepository? _workers;
 
     public PaperExperimentTradeOrchestrator(
         IExperimentDecisionLedger decisions,
         IExperimentPaperExecutionLedger executions,
         TradePipeline pipeline,
         PaperExecutionAdapter paperAdapter,
-        decimal openQuantity = 1m)
+        decimal openQuantity = 1m,
+        IPaperTradingLedgerRepository? workerLedger = null,
+        IExperimentWorkerRepository? workers = null)
     {
         _decisions = decisions ?? throw new ArgumentNullException(nameof(decisions));
         _executions = executions ?? throw new ArgumentNullException(nameof(executions));
@@ -131,6 +135,8 @@ public sealed class PaperExperimentTradeOrchestrator
         _paperAdapter = paperAdapter ?? throw new ArgumentNullException(nameof(paperAdapter));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(openQuantity, 0m);
         _openQuantity = openQuantity;
+        _workerLedger = workerLedger;
+        _workers = workers;
     }
 
     public async Task<ExperimentPaperTradeResult> ProcessAsync(
@@ -205,6 +211,25 @@ public sealed class PaperExperimentTradeOrchestrator
             // Persisted Claimed is intentionally terminal until investigated. Retrying after an
             // interrupted call could submit a second paper command if the interruption was late.
             throw;
+        }
+
+        if (result.Executed && _workerLedger is not null && _workers is not null)
+        {
+            var fill = _paperAdapter.Ledger.LastOrDefault(entry => entry.ExecutionCommandId == result.ExecutionCommandId);
+            if (fill is null)
+                throw new InvalidOperationException("A successful paper pipeline execution is missing its simulated fill.");
+
+            context.Worker.ApplyPaperTrade(
+                fill.Quantity,
+                fill.Price,
+                fill.Fees,
+                fill.Direction == TradeDirection.Buy ? "buy" : "sell",
+                fill.ExecutedAtUtc);
+            await _workerLedger.AddAsync(
+                context.Worker.UserId,
+                context.Worker.Ledger.Last(),
+                cancellationToken).ConfigureAwait(false);
+            await _workers.SaveAsync(context.Worker, cancellationToken).ConfigureAwait(false);
         }
 
         var status = result.RequiresReconciliation ? ExperimentPaperExecutionStatus.Unknown

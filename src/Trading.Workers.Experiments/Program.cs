@@ -77,7 +77,14 @@ if (paperTrainingEnabled)
     builder.Services.AddSingleton<RiskEngine>();
     builder.Services.AddSingleton<TradePipeline>();
     builder.Services.AddSingleton<ExperimentWorkerRiskEvaluator>();
-    builder.Services.AddSingleton<PaperExperimentTradeOrchestrator>();
+    builder.Services.AddSingleton<PaperExperimentTradeOrchestrator>(provider =>
+        new PaperExperimentTradeOrchestrator(
+            provider.GetRequiredService<IExperimentDecisionLedger>(),
+            provider.GetRequiredService<IExperimentPaperExecutionLedger>(),
+            provider.GetRequiredService<TradePipeline>(),
+            provider.GetRequiredService<PaperExecutionAdapter>(),
+            workerLedger: provider.GetRequiredService<IPaperTradingLedgerRepository>(),
+            workers: provider.GetRequiredService<IExperimentWorkerRepository>()));
     builder.Services.AddSingleton<IExperimentWorkerRunner, PaperTrainingSizedExecutionRunner>();
 }
 
