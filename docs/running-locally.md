@@ -84,7 +84,8 @@ slots for an owner through `POST /api/paper-training/{ownerId}/start`; an ordina
 user is limited to their own owner id. Use the disable or emergency-stop endpoints
 to stop it. With persisted closed candles available, the worker creates
 the fixed catalog workers, re-fetches and revalidates exactly fourteen
-chronological closed candles matching the attested identity, and writes
+chronological closed candles for plan geometry from the strategy's safe
+chronological evidence set (currently at least thirty one-hour candles), and writes
 decisions, execution claims, workers, and simulated paper ledger entries to
 the database. The platform-owned strategy-to-plan mapping, exchange filters,
 sizing ceilings, and risk evidence are constants; configuration and browser
