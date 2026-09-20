@@ -18,10 +18,12 @@ using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
 using Trading.Exchanges.Kraken;
+using Trading.Exchanges.Kraken.MarketData;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
 using Trading.Infrastructure.Data.ExchangeAccounts;
 using Trading.Infrastructure.Secrets;
+using Trading.MarketData;
 using Trading.Optimization;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
@@ -67,6 +69,16 @@ builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountCon
 // never performs a withdrawal: it only detects that the capability exists so a
 // withdrawal-capable key can be refused.
 builder.Services.AddHttpClient<IExchangePermissionProbe, KrakenPermissionProbe>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
+// Historical candles come from Kraken's public OHLC endpoint. It is registered
+// separately from the permission probe and deliberately carries no credential:
+// reading price history needs no permission on any user's account, so this
+// client must never be given one.
+builder.Services.AddHttpClient<IHistoricalCandleSource, KrakenHistoricalCandleSource>(client =>
 {
     client.BaseAddress = new Uri("https://api.kraken.com");
     client.Timeout = TimeSpan.FromSeconds(20);
@@ -1497,6 +1509,60 @@ app.MapGet("/api/exchange/accounts", async (
         createdAtUtc = account.CreatedAtUtc,
         lastValidatedAtUtc = account.LastValidatedAtUtc
     }));
+}).RequireAuthorization();
+
+// ---------------------------------------------------------------------------
+// Market data (Phase 3.2). Candles are read from the venue's public endpoint,
+// so this route involves no credential and no user-owned exchange account.
+// Every candle reports whether it is closed, because a bar still forming must
+// never be mistaken for a finished one by anything that draws or trades on it.
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/marketdata/candles", async (
+    string symbol,
+    string interval,
+    IHistoricalCandleSource candleSource,
+    CancellationToken cancellationToken) =>
+{
+    if (!Enum.TryParse<CandleInterval>(interval, ignoreCase: true, out var parsedInterval)
+        || parsedInterval == CandleInterval.None)
+    {
+        return Results.BadRequest(new { error = "UnknownInterval", message = "Supported intervals: OneMinute, FiveMinutes, TenMinutes, FifteenMinutes, ThirtyMinutes, OneHour, FourHours, OneDay." });
+    }
+
+    try
+    {
+        var candles = await candleSource
+            .FetchAsync(symbol, parsedInterval, DateTimeOffset.UnixEpoch, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(candles.Select(candle => new
+        {
+            openTimeUtc = candle.OpenTimeUtc,
+            closeTimeUtc = candle.CloseTimeUtc,
+            open = candle.Open,
+            high = candle.High,
+            low = candle.Low,
+            close = candle.Close,
+            volume = candle.Volume,
+            isClosed = candle.IsClosed,
+            isDerived = candle.IsDerived
+        }));
+    }
+    catch (MarketDataIntervalNotSupportedException exception)
+    {
+        // Reported distinctly so a caller can route to the derived-candle
+        // builder rather than believing the venue had no data.
+        return Results.BadRequest(new { error = "IntervalNotSupportedByVenue", message = exception.Message });
+    }
+    catch (MarketDataSourceException exception)
+    {
+        return Results.BadRequest(new { error = "MarketDataUnavailable", message = exception.Message });
+    }
+    catch (ArgumentException exception)
+    {
+        return Results.BadRequest(new { error = "InvalidRequest", message = exception.Message });
+    }
 }).RequireAuthorization();
 
 app.MapPost("/api/exchange/accounts", async (

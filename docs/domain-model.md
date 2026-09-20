@@ -66,6 +66,28 @@ Derived candles (e.g. 10-minute from ten closed 1-minute candles) are
 always explicitly marked `IsDerived = true` and only built from `IsClosed`
 source candles.
 
+### 3.1 Candle sources
+
+- `IHistoricalCandleSource` — fetches candles for a symbol and interval
+  from a venue in the neutral shape above. Implementations normalise; they
+  do not interpret. Judging whether the data is fit to trade on stays with
+  the quality evaluator.
+- A venue commonly returns the bar that is still forming alongside finished
+  ones. Such a bar is returned with `IsClosed = false` so no caller can
+  mistake a partial bar for a complete one. Whether a bar is closed is
+  decided from the venue's own marker rather than from local time, because a
+  host clock running slightly ahead would otherwise present a partial bar as
+  finished.
+- `MarketDataIntervalNotSupportedException` is raised when a venue has no
+  native bar of the requested size — Kraken has no 10-minute candle, for
+  example. It is a distinct failure so the caller can route to the derived
+  candle builder. Returning a nearby interval instead would hand back bars
+  of a materially different size than were asked for.
+- `MarketDataSourceException` covers a venue that cannot be reached or that
+  answers with something untrustworthy. A venue that reports failure while
+  returning HTTP 200 must surface as an error, never as an empty series,
+  because "no data" and "the request failed" lead to opposite decisions.
+
 ## 4. Indicators
 
 - `IIndicator<TResult>` — pure function over an ordered candle series,
