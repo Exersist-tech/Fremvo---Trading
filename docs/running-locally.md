@@ -79,7 +79,11 @@ RiskOfficer must approve with a nonempty reference through
 `POST /api/paper-training/{ownerId}/approve`. Use the disable or emergency-stop
 endpoints to stop it. With persisted closed candles available, the worker creates
 the fixed catalog workers, evaluates only their approved paper/spot evidence,
-and writes attested neutral or blocked decisions to the durable decision ledger.
+and writes attested decisions to the durable decision ledger. Each fixed slot
+is bound to its own strategy/version/parameter provenance. The EMA continuation
+family evaluates only its final three chronological closed candles; families
+that require cross-sectional, session, or classifier evidence remain explicitly
+blocked until their exact persisted evidence is available.
 It never substitutes live, futures, credential, or network components.
 
 ## Opt-in Kraken Live Proving profile

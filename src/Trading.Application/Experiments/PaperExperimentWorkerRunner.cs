@@ -145,7 +145,7 @@ internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEv
     public ApprovedExperimentStrategyDefinition Definition { get; }
     private string RequiredEvidence { get; }
 
-    public ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    public virtual ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
@@ -160,6 +160,23 @@ internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEv
 internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentAdapter
 {
     public EmaTrendContinuationExperimentAdapter() : base("platform.ema-trend-continuation", "ema-trend-parameters", "approved regime, signal, and execution timeframe series") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 3)
+            return ExperimentAnalysisResult.Blocked("EMA continuation requires three exact closed signal candles.");
+
+        // This intentionally uses only the final three persisted, chronological closed candles.
+        // No current/forming candle and no later observation is read.
+        var closes = series.Candles.TakeLast(3).Select(candle => candle.Close).ToArray();
+        var fast = (closes[1] * 2m + closes[0]) / 3m;
+        var latest = (closes[2] * 2m + closes[1]) / 3m;
+        return latest > fast && closes[2] > closes[1]
+            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle EMA continuation is bullish.", 1m)
+            : ExperimentAnalysisResult.NoCondition("Approved closed-candle EMA continuation is not bullish.");
+    }
 }
 internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperimentAdapter
 {

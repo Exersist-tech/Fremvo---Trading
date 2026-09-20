@@ -74,16 +74,14 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
         }
 
-        return ExperimentResearchGroupConfiguration.Create(
-            userId,
-            1,
-            workers.Select(worker => (worker, CreateProvenance(worker))));
+        var now = _time.GetUtcNow();
+        var provenances = workers.ToDictionary(worker => worker.Id, worker => CreateProvenance(worker, now));
+        return ExperimentResearchGroupConfiguration.Create(userId, 1, workers, provenances);
     }
 
-    private ExperimentResearchProvenance CreateProvenance(ExperimentWorker worker)
+    private ExperimentResearchProvenance CreateProvenance(ExperimentWorker worker, DateTimeOffset now)
     {
         var definition = _registry.Definitions.Single(x => x.FamilyId == worker.StrategyId);
-        var now = _time.GetUtcNow();
         var approval = StrategyApproval.CreateDraft(Guid.NewGuid(),
             new StrategyVersion(new StrategyTemplateVersionIdentity(definition.FamilyId, definition.Version),
                 new StrategyParameterSchemaReference(definition.ParameterSchemaId, definition.ParameterSchemaVersion, definition.ParameterSchemaFingerprint),
@@ -94,17 +92,16 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
                 new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.OneHour, CandleInterval.OneHour)));
         approval = approval.TransitionTo(StrategyApprovalState.UnderReview, approval.CreatedBy, now)
             .TransitionTo(StrategyApprovalState.Approved, approval.CreatedBy, now, approval.CreatedBy);
-        var dataset = new HistoricalDataset("paper-training-candles", "durable-candle-repository", worker.MarketSymbol,
+        var dataset = new HistoricalDataset($"paper-training-candles-{worker.Id:N}", "durable-candle-repository", worker.MarketSymbol,
             "1H", now.AddDays(-2), now, 3, Fingerprint, "catalog-v1", now);
         var evidence = new StrategyResearchEvidence(new ResearchEvidenceProvenance("durable-candle-repository", Fingerprint, now),
             new StrategyApprovalEvidence(s_instrument, AssetClass.Cryptocurrency, 3, 10m, .1m, .01m, now),
             true, 1m, 1m, true, 1m, 1m, 1m, Fingerprint);
         var gates = StrategyRejectionGateEngine.CreatePlatformDefault().Evaluate(
             new StrategyRejectionGateEvaluationInput(approval, approval.Requirements?.TimeframeConfiguration, TradingProductType.Spot, StrategyApprovalMode.Paper, evidence, now));
-        var provenance = new ExperimentResearchProvenance(approval,
+        return new ExperimentResearchProvenance(approval,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(worker.StrategyParameters.Trim()))),
             dataset, new ExperimentClassifierReference("platform-regime", 1, Fingerprint), evidence.Provenance, gates);
-        return provenance;
     }
 }
 

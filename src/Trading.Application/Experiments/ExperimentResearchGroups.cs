@@ -224,6 +224,37 @@ public sealed class ExperimentResearchGroupConfiguration
                 item.Provenance)));
     }
 
+    /// <summary>
+    /// Creates fixed assignments with provenance bound to the exact worker slot.  A catalog
+    /// strategy must never inherit another worker's parameter or approval fingerprint.
+    /// </summary>
+    public static ExperimentResearchGroupConfiguration Create(
+        Guid userId,
+        int version,
+        IEnumerable<ExperimentWorker> workers,
+        IReadOnlyDictionary<Guid, ExperimentResearchProvenance> provenances)
+    {
+        ArgumentNullException.ThrowIfNull(workers);
+        ArgumentNullException.ThrowIfNull(provenances);
+        var ordered = workers.OrderBy(worker => worker.Id).ToArray();
+        if (ordered.Length > ExperimentWorker.MaxWorkersPerUser
+            || ordered.Any(worker => worker.UserId != userId)
+            || ordered.Any(worker => !provenances.ContainsKey(worker.Id)))
+        {
+            throw new ArgumentException("Every worker must have exact owner-scoped provenance.", nameof(provenances));
+        }
+
+        return new ExperimentResearchGroupConfiguration(
+            userId,
+            version,
+            ordered.Select((worker, index) =>
+            {
+                var group = index < 4 ? ExperimentResearchGroup.A : index < 7 ? ExperimentResearchGroup.B : ExperimentResearchGroup.C;
+                return new ExperimentResearchGroupAssignment(
+                    userId, worker.Id, group, DeriveSeed(version, worker.Id, worker.RandomSeed, group), provenances[worker.Id]);
+            }));
+    }
+
     internal bool IsRunnableFor(ExperimentWorker worker, ExperimentResearchGroupAssignment assignment) =>
         worker.UserId == UserId
         && assignment.UserId == UserId

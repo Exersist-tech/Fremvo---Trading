@@ -1,5 +1,11 @@
 # Implementation Status
 
+## Paper-training evidence
+
+- Fixed catalog workers retain individual approval and parameter provenance.
+- The EMA continuation catalog family can evaluate exact chronological closed
+  candles. Evidence-dependent strategy families remain fail-closed.
+
 Tracks every task defined in `docs/implementation-plan.md`. All tasks start
 as **Not started**. Update this file (status + date + PR/commit reference)
 as each task is completed, per the "Working method" in
