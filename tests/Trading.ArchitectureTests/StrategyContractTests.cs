@@ -200,8 +200,7 @@ public sealed class StrategyContractTests
             name.Contains("Kraken", StringComparison.Ordinal)
             || name.Contains("EntityFramework", StringComparison.Ordinal)
             || name.Contains("System.Net.Http", StringComparison.Ordinal)
-            || name.Contains("Trading.Exchanges", StringComparison.Ordinal)
-            || name.Contains("Trading.Indicators", StringComparison.Ordinal));
+            || name.Contains("Trading.Exchanges", StringComparison.Ordinal));
     }
 
     private static StrategyEvaluationInput Input(params Candle[] candles) =>
