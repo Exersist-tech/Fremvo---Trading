@@ -289,7 +289,10 @@ public sealed class LiveTradingService : ILiveTradingService
         }
 
         var identifier = string.IsNullOrWhiteSpace(clientOrderId)
-            ? $"live-{Guid.NewGuid():N}"
+            // Kraken requires cl_ord_id to be a UUID v4. The durable order
+            // retains this exact value, so it remains the idempotency and
+            // reconciliation key end-to-end.
+            ? Guid.NewGuid().ToString("D")
             : clientOrderId.Trim();
 
         if (identifier.Length > Order.MaximumClientOrderIdLength)

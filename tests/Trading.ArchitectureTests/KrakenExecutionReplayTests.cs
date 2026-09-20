@@ -32,7 +32,7 @@ namespace Trading.ArchitectureTests;
 public sealed class KrakenExecutionReplayTests
 {
     private const string ReplayBaseAddress = "https://kraken.invalid";
-    private const string ClientOrderId = "fremvo-abc123";
+    private const string ClientOrderId = "a4fb4121-bc52-4f70-97fd-7ff27aac9ad3";
     private static readonly Guid AccountId = Guid.Parse("33333333-3333-3333-3333-333333333333");
     private static readonly DateTimeOffset Now = new(2024, 5, 1, 12, 0, 0, TimeSpan.Zero);
 

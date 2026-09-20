@@ -92,6 +92,16 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
         return body;
     }
 
+    /// <summary>
+    /// Kraken requires a canonical UUID v4 for <c>cl_ord_id</c>. Keeping this
+    /// validation at the connector boundary prevents an invalid idempotency
+    /// key from being persisted and then rejected after an attempted submit.
+    /// </summary>
+    internal static bool IsValidClientOrderId(string? clientOrderId) =>
+        clientOrderId is { Length: 36 }
+        && clientOrderId[14] == '4'
+        && Guid.TryParseExact(clientOrderId, "D", out _);
+
     public async Task<SpotOrderPlacement> PlaceAsync(
         ExchangeCredential credential,
         SpotOrderRequest request,
@@ -99,6 +109,13 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
     {
         ArgumentNullException.ThrowIfNull(credential);
         ArgumentNullException.ThrowIfNull(request);
+
+        if (!IsValidClientOrderId(request.ClientOrderId))
+        {
+            return SpotOrderPlacement.Rejected(
+                request.ClientOrderId,
+                ["Kraken requires cl_ord_id to be a UUID v4. The order was not sent."]);
+        }
 
         KrakenResponse response;
         try

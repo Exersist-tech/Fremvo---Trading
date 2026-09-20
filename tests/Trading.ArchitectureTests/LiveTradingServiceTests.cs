@@ -56,6 +56,8 @@ public sealed class LiveTradingServiceTests
 
         Assert.Equal(LiveTradeOutcome.Accepted, result.Outcome);
         Assert.True(result.Order!.ClientOrderId.Length <= Order.MaximumClientOrderIdLength);
+        Assert.True(Guid.TryParseExact(result.Order.ClientOrderId, "D", out _));
+        Assert.Equal('4', result.Order.ClientOrderId[14]);
     }
 
     [Fact]
