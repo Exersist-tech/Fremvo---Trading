@@ -2,6 +2,10 @@ using Trading.Application.Experiments;
 using Trading.Backtesting;
 using Trading.Domain.Execution;
 using Trading.Domain.Experiments;
+using Trading.Domain.Market;
+using Trading.Domain.Strategies;
+using Trading.Domain.Universe;
+using Trading.Risk;
 
 namespace Trading.ArchitectureTests;
 
@@ -15,7 +19,7 @@ public sealed class ExperimentPaperFillModelTests
         var worker = Worker(100m);
         var model = Model(new FeeModel(0m, 0.01m, 0m), new SlippageModel(0.03m));
 
-        var fill = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 2.37m, 10m, 0.5m));
+        var fill = Apply(model, worker, Request(TradeDirection.Buy, 2.37m, 10m, 0.5m));
 
         Assert.Equal(ExperimentPaperFillStatus.PartiallyFilled, fill.Status);
         Assert.Equal(2.3m, fill.NormalizedRequestedQuantity);
@@ -38,9 +42,9 @@ public sealed class ExperimentPaperFillModelTests
     {
         var worker = Worker(100m);
         var model = Model(new FeeModel(0m, 0.01m, 0m), new SlippageModel(0.03m));
-        model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 2m, 10m, 1m));
+        Apply(model, worker, Request(TradeDirection.Buy, 2m, 10m, 1m));
 
-        var fill = model.EvaluateAndApply(worker, Request(TradeDirection.Sell, 1m, 12m, 1m));
+        var fill = Apply(model, worker, Request(TradeDirection.Sell, 1m, 12m, 1m));
 
         Assert.Equal(ExperimentPaperFillStatus.Filled, fill.Status);
         Assert.Equal(11.97m, fill.ExecutionPrice);
@@ -60,9 +64,9 @@ public sealed class ExperimentPaperFillModelTests
         var worker = Worker(100m);
         var model = Model(new FeeModel(0m, 0m, 0m), new SlippageModel(0.006m), minNotional: 10m);
 
-        var adjusted = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 1.09m, 10m, 1m));
+        var adjusted = Apply(model, worker, Request(TradeDirection.Buy, 1.09m, 10m, 1m));
         var beforeCash = worker.CashBalance;
-        var rejected = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 0.19m, 10m, 1m));
+        var rejected = Apply(model, worker, Request(TradeDirection.Buy, 0.19m, 10m, 1m));
 
         Assert.Equal(ExperimentPaperFillStatus.Filled, adjusted.Status);
         Assert.Equal(1m, adjusted.FilledQuantity);
@@ -95,13 +99,13 @@ public sealed class ExperimentPaperFillModelTests
     {
         var worker = Worker(20m);
         var model = Model(new FeeModel(0m, 0.01m, 0m), SlippageModel.Zero);
-        model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 1m, 10m, 1m));
+        Apply(model, worker, Request(TradeDirection.Buy, 1m, 10m, 1m));
         var cash = worker.CashBalance;
         var quantity = worker.PositionQuantity;
         var cost = worker.AverageEntryPrice;
 
-        var unaffordable = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 2m, 10m, 1m));
-        var unsafeAdd = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 0.5m, 10m, 1m));
+        var unaffordable = Apply(model, worker, Request(TradeDirection.Buy, 2m, 10m, 1m));
+        var unsafeAdd = Apply(model, worker, Request(TradeDirection.Buy, 0.5m, 10m, 1m));
 
         Assert.Equal(ExperimentPaperFillStatus.Rejected, unaffordable.Status);
         Assert.Equal(ExperimentPaperFillStatus.Rejected, unsafeAdd.Status);
@@ -116,10 +120,10 @@ public sealed class ExperimentPaperFillModelTests
     {
         var worker = Worker(100m);
         var model = Model(new FeeModel(0m, 0.01m, 0m), SlippageModel.Zero);
-        model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 1m, 10m, 1m));
+        Apply(model, worker, Request(TradeDirection.Buy, 1m, 10m, 1m));
         worker.RecordFavorablePaperMark(11m);
 
-        var addition = model.EvaluateAndApply(worker, Request(TradeDirection.Buy, 1m, 12m, 1m));
+        var addition = Apply(model, worker, Request(TradeDirection.Buy, 1m, 12m, 1m));
 
         Assert.Equal(ExperimentPaperFillStatus.Filled, addition.Status);
         Assert.Equal(2m, worker.PositionQuantity);
@@ -133,6 +137,27 @@ public sealed class ExperimentPaperFillModelTests
 
     private static ExperimentPaperFillRequest Request(TradeDirection direction, decimal quantity, decimal price, decimal? ratio) =>
         new("BTC/USD", direction, quantity, price, false, ratio, Now);
+
+    private static ExperimentPaperFillRecord Apply(
+        ExperimentPaperFillModel model, ExperimentWorker worker, ExperimentPaperFillRequest request)
+    {
+        var instrumentId = Guid.NewGuid();
+        var scope = new EligibilityScope(EligibilityPurpose.Paper, CandleInterval.OneHour, TradingProductType.Spot);
+        var eligibility = new InstrumentEligibility(instrumentId);
+        eligibility.Grant(scope with { Purpose = EligibilityPurpose.Research }, Now, Now, TimeSpan.FromMinutes(5));
+        eligibility.Grant(scope with { Purpose = EligibilityPurpose.Backtest }, Now, Now, TimeSpan.FromMinutes(5));
+        eligibility.Grant(scope, Now, Now, TimeSpan.FromMinutes(5));
+        var action = request.Direction == TradeDirection.Buy ? ExperimentProposalAction.Open : ExperimentProposalAction.Reduce;
+        var evaluation = new ExperimentWorkerRiskEvaluationRequest(
+            worker,
+            new(worker.UserId, worker.Id, ExperimentResearchGroup.A, 1, worker.StrategyId, true),
+            new(100m, 100_000m, 5),
+            new(worker.UserId, worker.Id, worker.PositionQuantity, worker.PositionQuantity * request.ReferencePrice, worker.AdditionCount),
+            instrumentId, eligibility, scope, TimeSpan.FromMinutes(5), new StalenessPolicy(TimeSpan.FromMinutes(5)),
+            Now, Now, Now, new TradingModeFlags(), null, false, false, false, false,
+            new RiskLimitHierarchy(100_000m, 100m), action, request);
+        return model.EvaluateAndApply(worker, request, new ExperimentWorkerRiskEvaluator(new RiskEngine()), evaluation);
+    }
 
     private static ExperimentWorker Worker(decimal cash)
     {

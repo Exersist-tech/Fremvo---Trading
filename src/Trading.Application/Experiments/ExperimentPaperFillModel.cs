@@ -120,7 +120,39 @@ public sealed class ExperimentPaperFillModel
         ArgumentNullException.ThrowIfNull(request);
         if (!string.Equals(worker.MarketSymbol, request.Symbol, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("A paper fill may only apply to the worker's configured symbol.");
+        if (request.Direction == TradeDirection.Buy)
+            return DeniedBeforeEvaluation(request, "Position-increasing experiment fills require explicit worker risk evaluation.");
+        return EvaluateAndApplyAfterRisk(worker, request);
+    }
 
+    /// <summary>
+    /// Evaluates mandatory worker risk evidence before the fill model or worker ledger can observe
+    /// an increasing action. A denial intentionally does not append a simulated fill record.
+    /// </summary>
+    public ExperimentPaperFillRecord EvaluateAndApply(
+        ExperimentWorker worker,
+        ExperimentPaperFillRequest request,
+        ExperimentWorkerRiskEvaluator riskEvaluator,
+        ExperimentWorkerRiskEvaluationRequest riskRequest)
+    {
+        ArgumentNullException.ThrowIfNull(worker);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(riskEvaluator);
+        ArgumentNullException.ThrowIfNull(riskRequest);
+        if (!ReferenceEquals(worker, riskRequest.Worker) || riskRequest.ProposedFill != request)
+            return DeniedBeforeEvaluation(request, "Worker risk evidence does not bind this exact fill request and worker.");
+        if (!string.Equals(worker.MarketSymbol, request.Symbol, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A paper fill may only apply to the worker's configured symbol.");
+
+        var risk = riskEvaluator.Evaluate(riskRequest);
+        if (!risk.IsAllowed)
+            return DeniedBeforeEvaluation(request, risk.Reason);
+
+        return EvaluateAndApplyAfterRisk(worker, request);
+    }
+
+    private ExperimentPaperFillRecord EvaluateAndApplyAfterRisk(ExperimentWorker worker, ExperimentPaperFillRequest request)
+    {
         var record = Evaluate(request);
         if (record.Status == ExperimentPaperFillStatus.Rejected)
             return record;
@@ -146,6 +178,10 @@ public sealed class ExperimentPaperFillModel
             return ReplaceLast(Rejected(record, exception.Message));
         }
     }
+
+    private static ExperimentPaperFillRecord DeniedBeforeEvaluation(ExperimentPaperFillRequest request, string detail) =>
+        new(request, ExperimentPaperFillStatus.Rejected, request.RequestedQuantity, 0m, 0m, 0m, 0m, 0m,
+            false, false, detail);
 
     private ExperimentPaperFillRecord Record(ExperimentPaperFillRecord record)
     {
