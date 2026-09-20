@@ -72,6 +72,16 @@ public sealed class TradingDbContext : DbContext
                 .HasMaxLength(3)
                 .IsRequired();
 
+            // The password verifier, not the password. It is a one-way hash
+            // with its own salt and cost parameters embedded, so the stored
+            // value cannot be reversed and is useless if the database leaks
+            // without also brute-forcing each password individually.
+            //
+            // Nullable by design: an invited user has no password until they
+            // set one, and that account must not be able to sign in.
+            entity.Property(user => user.PasswordHash)
+                .HasMaxLength(256);
+
             entity.Property(user => user.Role)
                 .HasConversion<int>()
                 .IsRequired();
@@ -260,6 +270,13 @@ public sealed class TradingDbContext : DbContext
             entity.Property(position => position.EntryPrice).HasColumnType(MoneyColumnType).IsRequired();
             entity.Property(position => position.MarkPrice).HasColumnType(MoneyColumnType).IsRequired();
             entity.Property(position => position.UnrealizedPnl).HasColumnType(MoneyColumnType).IsRequired();
+
+            // Protective exit levels are prices and must use the same column
+            // type as every other price. Left to the provider default they
+            // would be silently truncated, which would move a stop away from
+            // where the user placed it.
+            entity.Property(position => position.StopLossPrice).HasColumnType(MoneyColumnType);
+            entity.Property(position => position.TakeProfitPrice).HasColumnType(MoneyColumnType);
 
             entity.Property(position => position.OpenedAtUtc).IsRequired();
             entity.Property(position => position.LastTransitionAtUtc).IsRequired(false);

@@ -56,6 +56,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddTradingInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IInvitationService, InvitationService>();
 builder.Services.AddScoped<IRegistrationService, RegistrationService>();
+// Password hashing is a singleton: it holds a lazily computed decoy hash used
+// to spend equal time on unknown accounts, and recomputing that per request
+// would waste the cost it exists to impose.
+builder.Services.AddSingleton<Pbkdf2PasswordHasher>();
+builder.Services.AddSingleton<IPasswordHasher>(sp => sp.GetRequiredService<Pbkdf2PasswordHasher>());
 builder.Services.AddScoped<ITradingAuthenticationService, TradingAuthenticationService>();
 builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolicyService>();
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
@@ -129,7 +134,7 @@ builder.Services
                 // absolute URL here would turn the sign-in page into an open
                 // redirect that could bounce a user to an attacker's site.
                 var returnPath = context.Request.Path.HasValue ? context.Request.Path.Value! : "/";
-                context.Response.Redirect("/account?returnUrl=" + Uri.EscapeDataString(returnPath));
+                context.Response.Redirect("/login?returnUrl=" + Uri.EscapeDataString(returnPath));
                 return Task.CompletedTask;
             }
 
@@ -497,9 +502,44 @@ app.MapPost("/api/register", async (
     return Results.Ok(new { user.Id, user.Email, user.DisplayName, user.Role });
 });
 
+// Tells the browser who it is signed in as. Without this the UI has no way to
+// know, which is why the navigation could not show a signed-in state and
+// signing out appeared to change nothing.
+//
+// It returns only what the interface needs to render. No credential, no
+// exchange key, no secret reference.
+app.MapGet("/api/me", (ClaimsPrincipal principal, TradingDbContext dbContext) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Json(new { signedIn = false }, statusCode: StatusCodes.Status200OK);
+    }
+
+    var user = dbContext.Users.SingleOrDefault(u => u.Id == userId.Value);
+    if (user is null)
+    {
+        // The cookie names a user that no longer exists. Report signed out
+        // rather than half-signed-in, so the UI offers a way back.
+        return Results.Json(new { signedIn = false }, statusCode: StatusCodes.Status200OK);
+    }
+
+    return Results.Ok(new
+    {
+        signedIn = true,
+        user.Id,
+        user.Email,
+        user.DisplayName,
+        role = user.Role.ToString(),
+        isAdministrator = user.Role == RoleType.Administrator,
+        requiresMfaSetup = user.RequiresMfaForAdministrator
+    });
+});
+
 app.MapPost("/api/login", async (
     HttpContext httpContext,
     ITradingAuthenticationService authService,
+    Pbkdf2PasswordHasher passwordHasher,
     TradingDbContext dbContext,
     LoginRequest request) =>
 {
@@ -508,9 +548,29 @@ app.MapPost("/api/login", async (
     var user = dbContext.Users
         .SingleOrDefault(u => u.Email == request.Email.Trim());
 
-    // The same response is returned for an unknown address and a wrong password so the endpoint
-    // cannot be used to discover which addresses are registered.
-    if (user is null || !authService.ValidateCredentials(user, request.Password))
+    // The user is passed in even when null so the service performs the same
+    // password verification either way. Short-circuiting here would make an
+    // unknown address measurably faster to reject than a known one, which on
+    // an invitation-only platform discloses who holds an account.
+    var outcome = authService.Authenticate(user, request.Password);
+
+    if (!outcome.Succeeded)
+    {
+        // One response for every failure. The specific reason is deliberately
+        // not returned: distinguishing "no such account" from "wrong password"
+        // or "suspended" turns this endpoint into a membership oracle.
+        return Results.BadRequest(new { error = "Invalid login" });
+    }
+
+    if (outcome.PasswordNeedsRehash && user is not null)
+    {
+        // The password was correct but stored under weaker parameters. Upgrade
+        // it now, while the plaintext is available, rather than leaving it.
+        user.SetPasswordHash(passwordHasher.Hash(request.Password));
+        await dbContext.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    if (user is null)
     {
         return Results.BadRequest(new { error = "Invalid login" });
     }
@@ -680,7 +740,7 @@ app.MapGet("/optimization", () => Results.Content(
     </body>
     </html>
     """,
-    "text/html"));
+    "text/html")).RequireAuthorization();
 
 app.MapGet("/api/experiments", async (
     ClaimsPrincipal principal,
@@ -844,7 +904,7 @@ app.MapGet("/experiments", () => Results.Content(
     </body>
     </html>
     """,
-    "text/html"));
+    "text/html")).RequireAuthorization();
 
 app.MapGet("/api/risk/halts", (InMemoryTradingHaltState halts) => Results.Ok(new
 {
@@ -1093,7 +1153,7 @@ app.MapGet("/admin/risk", () => Results.Content(
     </body>
     </html>
     """,
-    "text/html"));
+    "text/html")).RequireAuthorization();
 
 app.MapGet("/api/universe/instruments", async (
     UniverseAdminQueryService query,
@@ -1248,7 +1308,7 @@ app.MapGet("/admin/universe", () => Results.Content(
     </body>
     </html>
     """,
-    "text/html"));
+    "text/html")).RequireAuthorization();
 
 // Orders and positions for the signed-in user only. There is no user id parameter, so one
 // user cannot read another user's trading activity.
@@ -1513,7 +1573,7 @@ app.MapGet("/orders", () => Results.Content(
     </body>
     </html>
     """,
-    "text/html"));
+    "text/html")).RequireAuthorization();
 
 // ---------------------------------------------------------------------------
 // Exchange account connection (Phase 2.5)
@@ -2183,13 +2243,17 @@ app.MapGet("/exchange", () => Results.Content(
             <input id="connect-key" type="text" autocomplete="off" spellcheck="false" required />
           </div>
           <div class="field">
-            <label for="connect-secret">API secret</label>
+            <label for="connect-secret">Private key</label>
             <input id="connect-secret" type="password" autocomplete="off" spellcheck="false" required />
           </div>
           <button type="submit">Connect</button>
         </form>
 
-        <p id="status" class="empty"></p>
+        <p id="status" class="empty" role="status" aria-live="polite"></p>
+        <p class="empty">
+          The key is checked against Kraken before it is stored. A key that can withdraw funds
+          is refused outright.
+        </p>
 
         <h2>Connected accounts</h2>
         <table>
@@ -2207,7 +2271,9 @@ app.MapGet("/exchange", () => Results.Content(
         var status = document.getElementById('status');
         var tbody = document.getElementById('accounts');
 
-        function report(text) { status.textContent = text; }
+        function report(text) { status.textContent = text; status.className = 'empty'; }
+        function reportOk(text) { status.textContent = text; status.className = 'notice ok'; }
+        function reportError(text) { status.textContent = text; status.className = 'notice error'; }
 
         function cell(row, text, className) {
           var td = document.createElement('td');
@@ -2275,7 +2341,11 @@ app.MapGet("/exchange", () => Results.Content(
             button.addEventListener('click', async function () {
               report('Disconnecting.');
               var result = await fetch('/api/exchange/accounts/' + account.id, { method: 'DELETE' });
-              report(result.ok ? 'Disconnected and stored credential removed.' : 'Disconnect failed.');
+              if (result.ok) {
+                reportOk('Disconnected. The stored credential was deleted from the secret store.');
+              } else {
+                reportError('Disconnect failed. The credential is still stored.');
+              }
               await load();
             });
             actionCell.appendChild(button);
@@ -2287,29 +2357,75 @@ app.MapGet("/exchange", () => Results.Content(
 
         document.getElementById('connect-form').addEventListener('submit', async function (event) {
           event.preventDefault();
-          report('Checking the key with Kraken.');
 
+          var submit = event.target.querySelector('button[type=submit]');
           var secretField = document.getElementById('connect-secret');
-          var response = await fetch('/api/exchange/accounts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              displayName: document.getElementById('connect-name').value,
-              apiKey: document.getElementById('connect-key').value,
-              apiSecret: secretField.value
-            })
-          });
+          var keyField = document.getElementById('connect-key');
 
-          // The secret is cleared from the form immediately so it does not sit
-          // in the page after the request completes.
-          secretField.value = '';
+          if (!keyField.value.trim() || !secretField.value) {
+            reportError('Enter both the API key and the private key from Kraken.');
+            return;
+          }
+
+          report('Checking the key with Kraken. This contacts the exchange, so it can take a moment.');
+          submit.disabled = true;
+
+          var response;
+          try {
+            response = await fetch('/api/exchange/accounts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({
+                displayName: document.getElementById('connect-name').value,
+                apiKey: keyField.value.trim(),
+                apiSecret: secretField.value
+              })
+            });
+          } catch (error) {
+            secretField.value = '';
+            submit.disabled = false;
+            reportError('The key could not be checked because the request failed: ' + error.message);
+            return;
+          } finally {
+            // The secret is cleared from the form as soon as the request has
+            // been made, so it does not sit in the page afterwards.
+            secretField.value = '';
+            submit.disabled = false;
+          }
+
+          if (response.status === 401) {
+            reportError('Your session has ended. Sign in again before connecting a key.');
+            window.setTimeout(function () {
+              window.location.assign('/login?returnUrl=%2Fexchange');
+            }, 1500);
+            return;
+          }
+
+          var body = await response.json().catch(function () { return {}; });
 
           if (response.ok) {
-            report('Connected. The key is stored encrypted and stays connected between sign-ins.');
+            reportOk(
+              'Key accepted. Kraken confirmed it can read account data and place orders, and that it ' +
+              'cannot withdraw funds. It is stored encrypted and stays connected between sign-ins, so ' +
+              'you do not enter it again. The account starts in the ' + (body.stage || 'Paper') +
+              ' stage, where no order reaches Kraken.');
             document.getElementById('connect-form').reset();
+          } else if (body.outcome === 'WithdrawalPermissionPresent') {
+            reportError(
+              'Rejected: this key can withdraw funds, so it was refused and nothing was stored. ' +
+              'Create a new Kraken key with Query Funds and Create & Modify Orders only, and with ' +
+              'every withdrawal permission left off.');
+          } else if (body.outcome === 'MissingReadPermission') {
+            reportError('Rejected: this key cannot read account data. Enable Query Funds on the Kraken key.');
+          } else if (body.outcome === 'MissingTradePermission') {
+            reportError('Rejected: this key cannot place orders. Enable Create & Modify Orders on the Kraken key.');
+          } else if (body.outcome === 'ProbeFailed') {
+            reportError(
+              'Kraken did not accept the key when it was checked, so nothing was stored. ' +
+              (body.error || '') +
+              ' Check that the API key and private key were copied in full and are from the same key pair.');
           } else {
-            var body = await response.json().catch(function () { return {}; });
-            report(body.error || 'Could not connect this key.');
+            reportError(body.error || 'The key could not be connected and nothing was stored.');
           }
 
           await load();
@@ -2317,6 +2433,57 @@ app.MapGet("/exchange", () => Results.Content(
 
         load();
       </script>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+// A dedicated sign-in page. Sign-in is the only thing on it, so an
+// unauthenticated visitor lands somewhere with one obvious action rather than
+// on a page mixing sign-in, registration and account management.
+app.MapGet("/login", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/login.js"></script>
+      <title>Sign in</title>
+    </head>
+    <body>
+      <main class="signin">
+        <h1>Fremvo <span class="accent">Trading</span></h1>
+        <p class="lede">Invitation only. Sign in to reach the trading application.</p>
+
+        <div id="signed-out-note" class="notice" hidden>You are signed out.</div>
+
+        <form id="login-form" class="card">
+          <div class="field">
+            <label for="login-email">Email</label>
+            <input id="login-email" type="email" autocomplete="username" required autofocus />
+          </div>
+          <div class="field">
+            <label for="login-password">Password</label>
+            <input id="login-password" type="password" autocomplete="current-password" required />
+          </div>
+          <button id="login-submit" type="submit">Sign in</button>
+        </form>
+
+        <p id="status" class="empty" role="status" aria-live="polite"></p>
+
+        <p class="empty">
+          No account? Registration requires an invitation code from an administrator.
+          <a href="/account">Register with an invitation</a>.
+        </p>
+
+        <div class="notice">
+          <strong>Live trading is disabled.</strong>
+          Every account starts in paper trading with fake funds. The platform never holds,
+          transfers or withdraws funds, and no withdrawal capability exists in the product.
+        </div>
+      </main>
     </body>
     </html>
     """,
@@ -2348,18 +2515,10 @@ app.MapGet("/account", () => Results.Content(
           and no withdrawal capability exists anywhere in the product.
         </div>
 
-        <h2>Sign in</h2>
-        <form id="login-form" class="card">
-          <div class="field">
-            <label for="login-email">Email</label>
-            <input id="login-email" type="email" autocomplete="username" required />
-          </div>
-          <div class="field">
-            <label for="login-password">Password</label>
-            <input id="login-password" type="password" autocomplete="current-password" required />
-          </div>
-          <button type="submit">Sign in</button>
-        </form>
+        <h2>Signed in as</h2>
+        <div id="identity" class="card">
+          <p class="empty">Checking your session.</p>
+        </div>
 
         <h2>Register with an invitation</h2>
         <form id="register-form" class="card">
@@ -2382,10 +2541,7 @@ app.MapGet("/account", () => Results.Content(
           <button type="submit">Register</button>
         </form>
 
-        <p id="status" class="empty"></p>
-
-        <h2>Sign out</h2>
-        <button id="logout" class="secondary" type="button">Sign out</button>
+        <p id="status" class="empty" role="status" aria-live="polite"></p>
       </main>
 
       <script>
@@ -2393,12 +2549,23 @@ app.MapGet("/account", () => Results.Content(
 
         function report(text) {
           status.textContent = text;
+          status.className = 'empty';
+        }
+
+        function reportOk(text) {
+          status.textContent = text;
+          status.className = 'notice ok';
+        }
+
+        function reportError(text) {
+          status.textContent = text;
+          status.className = 'notice error';
         }
 
         async function post(url, body) {
           var response = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify(body)
           });
 
@@ -2409,27 +2576,52 @@ app.MapGet("/account", () => Results.Content(
           return { ok: false, status: response.status };
         }
 
-        document.getElementById('login-form').addEventListener('submit', async function (event) {
-          event.preventDefault();
-          report('Signing in.');
-          var result = await post('/api/login', {
-            email: document.getElementById('login-email').value,
-            password: document.getElementById('login-password').value
-          });
-          report(result.ok ? 'Signed in.' : 'Sign in failed.');
-          document.getElementById('login-password').value = '';
+        // Renders the current session so the page states plainly whether you
+        // are signed in. Without this the page looked identical either way.
+        async function renderIdentity() {
+          var host = document.getElementById('identity');
+          host.textContent = '';
 
-          if (result.ok) {
-            // Return to the page that required sign-in. Only a same-site
-            // relative path is honoured, so a crafted returnUrl cannot bounce
-            // the signed-in user to another origin.
-            var requested = new URLSearchParams(window.location.search).get('returnUrl');
-            var safe = requested && requested.charAt(0) === '/' && requested.charAt(1) !== '/'
-              ? requested
-              : '/';
-            window.location.assign(safe);
+          var me = null;
+          try {
+            var response = await fetch('/api/me', { headers: { 'Accept': 'application/json' } });
+            if (response.ok) { me = await response.json(); }
+          } catch (error) { me = null; }
+
+          if (!me || me.signedIn !== true) {
+            var p = document.createElement('p');
+            p.textContent = 'You are not signed in.';
+            host.appendChild(p);
+
+            var link = document.createElement('a');
+            link.href = '/login';
+            link.textContent = 'Go to the sign-in page';
+            host.appendChild(link);
+            return;
           }
-        });
+
+          var name = document.createElement('p');
+          name.textContent = me.displayName + ' (' + me.email + ')';
+          host.appendChild(name);
+
+          var role = document.createElement('p');
+          role.className = 'empty';
+          role.textContent = 'Role: ' + me.role;
+          host.appendChild(role);
+
+          var out = document.createElement('button');
+          out.type = 'button';
+          out.className = 'secondary';
+          out.textContent = 'Sign out';
+          out.addEventListener('click', async function () {
+            out.disabled = true;
+            await fetch('/api/logout', { method: 'POST' }).catch(function () { });
+            // A full navigation, so no page keeps data loaded under the
+            // session that was just ended.
+            window.location.assign('/login?signedOut=1');
+          });
+          host.appendChild(out);
+        }
 
         document.getElementById('register-form').addEventListener('submit', async function (event) {
           event.preventDefault();
@@ -2440,14 +2632,17 @@ app.MapGet("/account", () => Results.Content(
             displayName: document.getElementById('register-name').value,
             password: document.getElementById('register-password').value
           });
-          report(result.ok ? 'Registered. You can now sign in.' : 'Registration failed.');
           document.getElementById('register-password').value = '';
+
+          if (result.ok) {
+            reportOk('Registered. You can now sign in.');
+            document.getElementById('register-form').reset();
+          } else {
+            reportError('Registration failed. Check the invitation code and that the password is long enough.');
+          }
         });
 
-        document.getElementById('logout').addEventListener('click', async function () {
-          await fetch('/api/logout', { method: 'POST' });
-          report('Signed out.');
-        });
+        renderIdentity();
       </script>
     </body>
     </html>

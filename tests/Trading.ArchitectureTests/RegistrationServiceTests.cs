@@ -8,7 +8,7 @@ public sealed class RegistrationServiceTests
     [Fact]
     public void RegistrationServiceRequiresStrongPasswordAndRequiredProfileData()
     {
-        var service = new RegistrationService();
+        var service = new RegistrationService(new Pbkdf2PasswordHasher());
         var request = new RegisterUserRequest(
             "alice@example.com",
             "Alice",
@@ -28,7 +28,7 @@ public sealed class RegistrationServiceTests
     [Fact]
     public void RegistrationServiceRejectsShortPassword()
     {
-        var service = new RegistrationService();
+        var service = new RegistrationService(new Pbkdf2PasswordHasher());
         var request = new RegisterUserRequest(
             "alice@example.com",
             "Alice",

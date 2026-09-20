@@ -62,7 +62,18 @@ Development seeds two accounts:
 | Trader | `trader@fremvo.local` | `DemoPassword123!` |
 | Administrator | `admin@fremvo.local` | `DemoPassword123!` |
 
-These exist for local development only. Password verification is **not yet
-implemented** (see `docs/implementation-status.md`), so any password of
-sufficient length signs in an active user. That must be closed before the
-application is deployed anywhere reachable by anyone else.
+These exist for local development only. The passwords are verified: they are
+stored as PBKDF2-SHA256 hashes and an incorrect password is refused.
+
+Sign in at `/login`. That page does nothing but authenticate, and on success it
+forwards you to `/chart`, or back to whichever page sent you there. Every
+application page (`/chart`, `/positions`, `/orders`, `/exchange`,
+`/experiments`, `/optimization`, `/admin/*`) redirects to `/login` when you have
+no session. The navigation bar shows the signed-in account and a **Sign out**
+button on every page.
+
+If the development database was created before a schema change, the seeder
+detects the missing tables **or columns** on startup, drops the database and
+recreates it with the demo data. Locally seeded data is therefore disposable.
+This exists only because there are no EF migrations yet and must never be used
+in a deployed environment.

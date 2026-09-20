@@ -10,6 +10,11 @@ public interface IRegistrationService
 
 public sealed class RegistrationService : IRegistrationService
 {
+    private readonly IPasswordHasher _passwordHasher;
+
+    public RegistrationService(IPasswordHasher passwordHasher) =>
+        _passwordHasher = passwordHasher ?? throw new ArgumentNullException(nameof(passwordHasher));
+
     public User Register(RegisterUserRequest request, Guid invitationId, Guid userId)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -68,6 +73,10 @@ public sealed class RegistrationService : IRegistrationService
             request.ReportingCurrency.Trim(),
             RoleType.User,
             false,
-            UserStatus.Active);
+            UserStatus.Active,
+            // The password was previously validated and then discarded, so a
+            // registered account held no credential at all. It is hashed here;
+            // the plaintext is never stored and never leaves this method.
+            passwordHash: _passwordHasher.Hash(request.Password));
     }
 }

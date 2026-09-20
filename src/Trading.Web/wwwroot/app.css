@@ -244,3 +244,58 @@ footer.app-footer {
   max-width: 1120px;
   margin: 0 auto;
 }
+
+/* Signed-in state in the navigation bar. The interface previously looked
+   identical whether or not you were signed in, which made signing out appear
+   to do nothing. */
+.app-nav .nav-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: 1rem;
+}
+
+.app-nav .nav-user {
+  color: var(--text);
+  font-size: 0.85rem;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-nav .nav-role {
+  background: var(--accent);
+  border-radius: 999px;
+  color: #06121f;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.5rem;
+  text-transform: uppercase;
+}
+
+.app-nav .nav-signout {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.7rem;
+}
+
+.app-nav a.nav-signin {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+}
+
+.notice.ok { border-left-color: var(--ok); }
+
+/* The dedicated sign-in page is narrow so the single action on it is
+   unmistakable. */
+main.signin {
+  max-width: 28rem;
+}
+
+main.signin h1 {
+  margin-bottom: 0.25rem;
+}
+
+main.signin .accent { color: var(--accent); }

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Trading.Application.UseCases.Identity;
 using Trading.Domain.Identity;
 using Trading.Domain.Users;
 using Trading.Infrastructure.Data;
@@ -45,17 +46,27 @@ internal static class DevelopmentDataSeeder
         LoggerMessage.Define<string>(
             LogLevel.Warning,
             new EventId(2, "RebuildingDevelopmentDatabase"),
-            "The development database is missing tables ({MissingTables}) because EnsureCreated does not alter an " +
-            "existing database. Rebuilding it and reseeding demo data. This path is development only.");
+            "The development database is missing tables or columns ({MissingSchema}) because EnsureCreated does not " +
+            "alter an existing database. Rebuilding it and reseeding demo data. This path is development only.");
     /// <summary>
-    /// The demo administrator's address. No password is stored here or
-    /// anywhere else: the current authentication service accepts any
-    /// password of sufficient length for an active user, which is a known
-    /// gap tracked for the credential-hardening task.
+    /// The demo administrator's address. The password is hashed like any
+    /// other and stored only as a verifier; the plaintext below exists solely
+    /// so a developer can sign in to a local instance.
     /// </summary>
     internal const string AdministratorEmail = "admin@fremvo.local";
 
     internal const string TraderEmail = "trader@fremvo.local";
+
+    /// <summary>
+    /// The password given to both demo accounts.
+    /// </summary>
+    /// <remarks>
+    /// A known constant is acceptable only because this seeder refuses to run
+    /// outside Development and only when explicitly opted in. It is hashed
+    /// with the same hasher used everywhere else, so the demo accounts
+    /// exercise the real authentication path rather than a bypass.
+    /// </remarks>
+    internal const string DemoPassword = "DemoPassword123!";
 
     internal const string InvitationCode = "FREMVO-DEMO-INVITE";
 
@@ -78,6 +89,7 @@ internal static class DevelopmentDataSeeder
 
         using var scope = app.Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
+        var passwordHasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher>();
 
         await dbContext.Database.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
 
@@ -89,7 +101,7 @@ internal static class DevelopmentDataSeeder
         //
         // This is a direct consequence of having no migrations yet and is not a
         // pattern any deployed environment may use.
-        var missingTables = await FindMissingTablesAsync(dbContext, cancellationToken).ConfigureAwait(false);
+        var missingTables = await FindMissingSchemaAsync(dbContext, cancellationToken).ConfigureAwait(false);
         if (missingTables.Count > 0)
         {
             s_rebuilding(app.Logger, string.Join(", ", missingTables), null);
@@ -116,7 +128,11 @@ internal static class DevelopmentDataSeeder
             "USD",
             RoleType.Administrator,
             multiFactorAuthenticationEnabled: true,
-            UserStatus.Active);
+            UserStatus.Active,
+            // Hashed separately from the trader's, so the two rows carry
+            // different salts exactly as two real users choosing the same
+            // password would.
+            passwordHash: passwordHasher.Hash(DemoPassword));
 
         var trader = User.CreateWithMfa(
             Guid.NewGuid(),
@@ -127,7 +143,8 @@ internal static class DevelopmentDataSeeder
             "USD",
             RoleType.User,
             multiFactorAuthenticationEnabled: false,
-            UserStatus.Active);
+            UserStatus.Active,
+            passwordHash: passwordHasher.Hash(DemoPassword));
 
         dbContext.Users.AddRange(administrator, trader);
 
@@ -148,27 +165,73 @@ internal static class DevelopmentDataSeeder
     }
 
     /// <summary>
-    /// Returns the tables the model expects but the database does not have.
+    /// Returns the tables and columns the model expects but the database does
+    /// not have.
     /// </summary>
-    private static async Task<IReadOnlyList<string>> FindMissingTablesAsync(
+    /// <remarks>
+    /// Columns are checked as well as tables because a schema change that adds
+    /// a column to an existing table leaves the table present and the column
+    /// absent. <c>EnsureCreated</c> does nothing in that case, and the first
+    /// symptom is "Invalid column name" from a query far away from the change.
+    /// </remarks>
+    private static async Task<IReadOnlyList<string>> FindMissingSchemaAsync(
         TradingDbContext dbContext,
         CancellationToken cancellationToken)
     {
-        var expected = dbContext.Model
-            .GetEntityTypes()
-            .Select(entityType => entityType.GetTableName())
-            .Where(name => !string.IsNullOrEmpty(name))
-            .Select(name => name!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var existingTables = new HashSet<string>(
+            await dbContext.Database
+                .SqlQueryRaw<string>("SELECT name AS Value FROM sys.tables")
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false),
+            StringComparer.OrdinalIgnoreCase);
 
-        var existing = await dbContext.Database
-            .SqlQueryRaw<string>("SELECT name AS Value FROM sys.tables")
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
+        var existingColumns = new HashSet<string>(
+            await dbContext.Database
+                .SqlQueryRaw<string>(
+                    "SELECT t.name + '.' + c.name AS Value " +
+                    "FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id")
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false),
+            StringComparer.OrdinalIgnoreCase);
 
-        var existingSet = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
+        var missing = new List<string>();
 
-        return expected.Where(table => !existingSet.Contains(table)).ToList();
+        foreach (var entityType in dbContext.Model.GetEntityTypes())
+        {
+            var table = entityType.GetTableName();
+            if (string.IsNullOrEmpty(table))
+            {
+                continue;
+            }
+
+            if (!existingTables.Contains(table))
+            {
+                if (!missing.Contains(table, StringComparer.OrdinalIgnoreCase))
+                {
+                    missing.Add(table);
+                }
+
+                // No point listing every column of a table that is absent.
+                continue;
+            }
+
+            foreach (var property in entityType.GetProperties())
+            {
+                var column = property.GetColumnName();
+                if (string.IsNullOrEmpty(column))
+                {
+                    continue;
+                }
+
+                var qualified = $"{table}.{column}";
+                if (!existingColumns.Contains(qualified)
+                    && !missing.Contains(qualified, StringComparer.OrdinalIgnoreCase))
+                {
+                    missing.Add(qualified);
+                }
+            }
+        }
+
+        return missing;
     }
 }
