@@ -185,21 +185,43 @@ public sealed class ExperimentResearchGroupConfiguration
     {
         ArgumentNullException.ThrowIfNull(workers);
         ArgumentNullException.ThrowIfNull(provenance);
-        var ordered = workers.OrderBy(worker => worker.Id).ToArray();
-        if (ordered.Length > ExperimentWorker.MaxWorkersPerUser || ordered.Any(worker => worker.UserId != userId))
+        return Create(
+            userId,
+            version,
+            workers.Select(worker => (Worker: worker, Provenance: provenance)));
+    }
+
+    /// <summary>
+    /// Creates an immutable configuration with provenance bound to each exact worker. A shared
+    /// provenance is insufficient for the fixed catalog because each worker has its own approved
+    /// strategy identity and parameter schema.
+    /// </summary>
+    public static ExperimentResearchGroupConfiguration Create(
+        Guid userId,
+        int version,
+        IEnumerable<(ExperimentWorker Worker, ExperimentResearchProvenance Provenance)> workerProvenance)
+    {
+        ArgumentNullException.ThrowIfNull(workerProvenance);
+        var ordered = workerProvenance
+            .Select(item => (
+                Worker: item.Worker ?? throw new ArgumentException("A worker is required.", nameof(workerProvenance)),
+                Provenance: item.Provenance ?? throw new ArgumentException("Worker provenance is required.", nameof(workerProvenance))))
+            .OrderBy(item => item.Worker.Id)
+            .ToArray();
+        if (ordered.Length > ExperimentWorker.MaxWorkersPerUser || ordered.Any(item => item.Worker.UserId != userId))
         {
-            throw new ArgumentException("Workers must belong to the configuration user and be limited to ten.", nameof(workers));
+            throw new ArgumentException("Workers must belong to the configuration user and be limited to ten.", nameof(workerProvenance));
         }
 
         return new ExperimentResearchGroupConfiguration(
             userId,
             version,
-            ordered.Select((worker, index) => new ExperimentResearchGroupAssignment(
+            ordered.Select((item, index) => new ExperimentResearchGroupAssignment(
                 userId,
-                worker.Id,
+                item.Worker.Id,
                 index < 4 ? ExperimentResearchGroup.A : index < 7 ? ExperimentResearchGroup.B : ExperimentResearchGroup.C,
-                DeriveSeed(version, worker.Id, worker.RandomSeed, index < 4 ? ExperimentResearchGroup.A : index < 7 ? ExperimentResearchGroup.B : ExperimentResearchGroup.C),
-                provenance)));
+                DeriveSeed(version, item.Worker.Id, item.Worker.RandomSeed, index < 4 ? ExperimentResearchGroup.A : index < 7 ? ExperimentResearchGroup.B : ExperimentResearchGroup.C),
+                item.Provenance)));
     }
 
     internal bool IsRunnableFor(ExperimentWorker worker, ExperimentResearchGroupAssignment assignment) =>

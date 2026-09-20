@@ -74,9 +74,14 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
         }
 
-        // The catalog itself is the production-controlled provenance source. It is deterministic,
-        // paper/spot-only, and records neutral decisions if an adapter lacks required evidence.
-        var worker = workers.OrderBy(x => x.Id).First();
+        return ExperimentResearchGroupConfiguration.Create(
+            userId,
+            1,
+            workers.Select(worker => (worker, CreateProvenance(worker))));
+    }
+
+    private ExperimentResearchProvenance CreateProvenance(ExperimentWorker worker)
+    {
         var definition = _registry.Definitions.Single(x => x.FamilyId == worker.StrategyId);
         var now = _time.GetUtcNow();
         var approval = StrategyApproval.CreateDraft(Guid.NewGuid(),
@@ -99,7 +104,7 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
         var provenance = new ExperimentResearchProvenance(approval,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(worker.StrategyParameters.Trim()))),
             dataset, new ExperimentClassifierReference("platform-regime", 1, Fingerprint), evidence.Provenance, gates);
-        return ExperimentResearchGroupConfiguration.Create(userId, 1, workers, provenance);
+        return provenance;
     }
 }
 
