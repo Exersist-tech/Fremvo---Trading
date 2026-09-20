@@ -26,6 +26,26 @@ cd src/Trading.Web
 dotnet run --launch-profile https
 ```
 
+## Opt-in Kraken Live Proving profile
+
+The normal `https` profile cannot send a real order. To exercise the
+supervised real-money path locally, explicitly select **Live Proving (Kraken)**
+in Visual Studio or run:
+
+```
+dotnet run --launch-profile "Live Proving (Kraken)"
+```
+
+This profile is deliberately separate from the default and permits only the
+development administrator, `SOLUSD` or `XBTUSD`, a maximum order notional of
+25, and a proving ceiling of 10. It is still a real Kraken route: connect only
+a read-and-trade key with withdrawal permission disabled, start at Proving,
+and submit a small order you are prepared to place. Wait for an observed,
+reconciled fill before promoting the account to Live. The seeded
+administrator's stable rollout ID is
+`8dd8e906-4ae0-4190-9082-64ec755c2913`; it is a local development identity,
+not a secret or production authorization mechanism.
+
 ## HTTPS is the default profile
 
 The launch profile binds `https://localhost:5200` first and

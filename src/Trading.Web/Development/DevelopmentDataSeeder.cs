@@ -36,6 +36,14 @@ namespace Trading.Web.Development;
 /// </remarks>
 internal static class DevelopmentDataSeeder
 {
+    // Stable development-only identities let the opt-in Live Proving launch
+    // profile target the seeded administrator after a local schema rebuild.
+    // These identities have no meaning outside Development, where this seeder
+    // refuses to run.
+    internal static readonly Guid AdministratorId = new("8dd8e906-4ae0-4190-9082-64ec755c2913");
+
+    internal static readonly Guid TraderId = new("6a9bc9b5-9c48-45f9-934d-2cef61fe37ce");
+
     private static readonly Action<ILogger, string, string, string, Exception?> s_seeded =
         LoggerMessage.Define<string, string, string>(
             LogLevel.Information,
@@ -120,7 +128,7 @@ internal static class DevelopmentDataSeeder
         // administrator with it disabled would create an account that cannot
         // perform the actions it appears to have.
         var administrator = User.CreateWithMfa(
-            Guid.NewGuid(),
+            AdministratorId,
             AdministratorEmail,
             "Demo Administrator",
             "en-US",
@@ -135,7 +143,7 @@ internal static class DevelopmentDataSeeder
             passwordHash: passwordHasher.Hash(DemoPassword));
 
         var trader = User.CreateWithMfa(
-            Guid.NewGuid(),
+            TraderId,
             TraderEmail,
             "Demo Trader",
             "en-US",
