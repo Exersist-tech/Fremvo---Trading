@@ -219,6 +219,33 @@ button.secondary {
 
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+button.danger {
+  background: #3a1d1d;
+  border-color: #7a3030;
+  color: #ffb4b4;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid #2a2d31;
+  margin: 0.75rem 0 1rem;
+}
+
+button.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 1rem;
+  color: #9aa0a6;
+}
+
+button.tab.active {
+  color: #f5f6f7;
+  border-bottom-color: #4c8dff;
+}
+
 input, select {
   background: var(--panel-2);
   color: var(--text);

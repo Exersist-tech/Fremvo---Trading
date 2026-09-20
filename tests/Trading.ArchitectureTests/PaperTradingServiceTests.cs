@@ -2,6 +2,7 @@ using Trading.Application.Execution;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
+using Trading.Domain.Execution;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
@@ -148,6 +149,39 @@ public sealed class PaperTradingServiceTests
                 ClosedCandle(Now.AddMinutes(-1), lastClose),
             ],
             exchangeConnected: false);
+
+    [Fact]
+    public async Task APaperFillIsRecordedInThePaperBook()
+    {
+        var harness = FreshMarket();
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        // The mode is carried on the records themselves, so a live book can
+        // never be assembled by reading rows that merely happen to be there.
+        Assert.Equal(TradingMode.Paper, result.Order!.Mode);
+        Assert.Equal(TradingMode.Paper, result.Position!.Mode);
+    }
+
+    [Fact]
+    public void AnOrderDefaultsToThePaperBook()
+    {
+        // Failing safe: a caller that omits the mode produces a simulated
+        // record, never one that claims to have reached a venue.
+        var order = new Order(
+            Guid.NewGuid(),
+            UserId,
+            Guid.NewGuid(),
+            Symbol,
+            OrderSide.Buy,
+            OrderType.Market,
+            1m,
+            30000m,
+            Now,
+            "client-1");
+
+        Assert.Equal(TradingMode.Paper, order.Mode);
+    }
 
     [Fact]
     public async Task AnOrderIsRefusedWhenNoExchangeAccountIsConnected()

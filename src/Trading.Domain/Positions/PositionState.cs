@@ -1,3 +1,5 @@
+using Trading.Domain.Execution;
+
 namespace Trading.Domain.Positions;
 
 public enum PositionDirection
@@ -27,7 +29,8 @@ public sealed class Position
         decimal entryPrice,
         decimal markPrice,
         DateTimeOffset openedAtUtc,
-        decimal unrealizedPnl = 0m)
+        decimal unrealizedPnl = 0m,
+        TradingMode mode = TradingMode.Paper)
     {
         if (id == Guid.Empty)
         {
@@ -74,6 +77,7 @@ public sealed class Position
         MarkPrice = markPrice;
         OpenedAtUtc = openedAtUtc;
         UnrealizedPnl = unrealizedPnl;
+        Mode = mode;
         Status = PositionStatus.Open;
     }
 
@@ -94,6 +98,15 @@ public sealed class Position
     public decimal MarkPrice { get; private set; }
 
     public DateTimeOffset OpenedAtUtc { get; }
+
+    /// <summary>
+    /// Which book this position belongs to. Simulated and real positions are
+    /// never mixed in one list: a paper position shown beside a real one, or
+    /// summed with it, would misstate actual exposure. The default is
+    /// <see cref="TradingMode.Paper"/> so a caller that omits it produces a
+    /// simulated record rather than one that claims to be real.
+    /// </summary>
+    public TradingMode Mode { get; }
 
     public decimal UnrealizedPnl { get; private set; }
 

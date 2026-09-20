@@ -1,3 +1,5 @@
+using Trading.Domain.Execution;
+
 namespace Trading.Domain.Orders;
 
 public enum OrderState
@@ -45,7 +47,8 @@ public sealed class Order
         DateTimeOffset createdAtUtc,
         string clientOrderId,
         bool reduceOnly = false,
-        bool closeOnly = false)
+        bool closeOnly = false,
+        TradingMode mode = TradingMode.Paper)
     {
         if (id == Guid.Empty)
         {
@@ -94,6 +97,7 @@ public sealed class Order
         ClientOrderId = clientOrderId.Trim();
         ReduceOnly = reduceOnly;
         CloseOnly = closeOnly;
+        Mode = mode;
         State = OrderState.Draft;
         Version = 0;
     }
@@ -121,6 +125,13 @@ public sealed class Order
     public bool ReduceOnly { get; }
 
     public bool CloseOnly { get; }
+
+    /// <summary>
+    /// Which book this order belongs to. The default is
+    /// <see cref="TradingMode.Paper"/> so an omitted argument produces a
+    /// simulated order rather than one that claims to have reached a venue.
+    /// </summary>
+    public TradingMode Mode { get; }
 
     public OrderState State { get; private set; }
 

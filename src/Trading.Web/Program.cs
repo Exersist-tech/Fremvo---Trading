@@ -11,6 +11,7 @@ using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
 using Trading.Application.Universe;
 using Trading.Domain.Audit;
+using Trading.Domain.Execution;
 using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
 using Trading.Domain.Market;
@@ -51,6 +52,14 @@ const string OrdersDisclaimer =
     "Live trading is disabled. Orders shown here are paper orders placed with fake funds. " +
     "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
 
+// The live book is empty because no order has ever been sent to a venue from
+// this deployment. Saying so is more useful than describing it as paper, which
+// the list is not.
+const string LiveBookDisclaimer =
+    "This deployment has no execution route to any exchange, so no order has ever reached a venue. " +
+    "This list is empty for that reason, not because of a filter. " +
+    "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddTradingInfrastructure(builder.Configuration);
@@ -70,6 +79,13 @@ builder.Services.AddScoped<IAuditQueryService>(provider =>
 builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
 builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
+
+// No ILiveExecutionRoute is registered, so LiveExecutionRouteProvider reports
+// that nothing can reach a venue and promotion out of paper is refused. This is
+// the single place real trading becomes possible: registering a route for an
+// exchange is what opens the ladder for it, and nothing else needs to change.
+builder.Services.AddSingleton<ILiveExecutionRouteProvider, LiveExecutionRouteProvider>();
+builder.Services.AddScoped<IExchangeAccountStageService, ExchangeAccountStageService>();
 
 // The Kraken permission probe talks to Kraken's private API to establish what a
 // user's key may do. It is the only component that sees a credential, and it
@@ -1332,6 +1348,7 @@ app.MapGet("/api/orders", async (
     ClaimsPrincipal principal,
     IOrderRepository orders,
     IPositionRepository positions,
+    string? mode,
     CancellationToken cancellationToken) =>
 {
     var userId = CurrentUser.TryGetUserId(principal);
@@ -1340,13 +1357,24 @@ app.MapGet("/api/orders", async (
         return Results.Unauthorized();
     }
 
-    var ownedOrders = await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
-    var ownedPositions = await positions.ListOpenAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    // An unrecognised mode resolves to Paper rather than to "everything". A
+    // request that cannot be understood must not be answered with the real
+    // book alongside the simulated one.
+    var selectedMode = Enum.TryParse<TradingMode>(mode, ignoreCase: true, out var parsedMode)
+        ? parsedMode
+        : TradingMode.Paper;
+
+    var ownedOrders = (await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false))
+        .Where(order => order.Mode == selectedMode)
+        .ToList();
+    var ownedPositions = (await positions.ListOpenAsync(userId.Value, cancellationToken).ConfigureAwait(false))
+        .Where(position => position.Mode == selectedMode)
+        .ToList();
 
     return Results.Ok(new
     {
-        tradingMode = "Paper",
-        disclaimer = OrdersDisclaimer,
+        tradingMode = selectedMode.ToString(),
+        disclaimer = selectedMode == TradingMode.Paper ? OrdersDisclaimer : LiveBookDisclaimer,
         frozen = ownedOrders.Count(order => order.RequiresReconciliation),
         orders = ownedOrders.Select(order => new
         {
@@ -1744,7 +1772,9 @@ app.MapGet("/api/paper/positions", async (
     {
         tradingMode = "Paper",
         disclaimer = OrdersDisclaimer,
-        positions = valued.Select(item => new
+        // This endpoint is the paper book by name, so it is filtered to the
+        // paper book by value. A real position must never be listed here.
+        positions = valued.Where(item => item.Position.Mode == TradingMode.Paper).Select(item => new
         {
             item.Position.Id,
             item.Position.Symbol,
@@ -1933,6 +1963,110 @@ app.MapPost("/api/paper/orders", async (
             status = result.Position.Status.ToString()
         }
     });
+}).RequireAuthorization();
+
+// What this deployment can actually do, per mode. The page asks rather than
+// assumes, so the tab it offers matches what the server will accept.
+app.MapGet("/api/trading/modes", async (
+    ClaimsPrincipal principal,
+    IExchangeAccountConnectionService connections,
+    ILiveExecutionRouteProvider routes,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var accounts = await connections.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var connected = accounts.Where(account => account.CanTrade).ToList();
+    var liveRoute = connected.Exists(account => routes.HasRouteFor(account.ExchangeKind));
+
+    return Results.Ok(new
+    {
+        paper = new
+        {
+            available = connected.Count > 0,
+            reason = connected.Count > 0
+                ? null
+                : "Connect an exchange account to enable paper trading."
+        },
+        live = new
+        {
+            available = liveRoute && connected.Exists(account => account.CanReachExchange),
+            // Stated plainly rather than as "coming soon". No order can reach a
+            // venue from this deployment, and saying anything softer would
+            // imply a capability that does not exist.
+            reason = liveRoute
+                ? "No account has been promoted out of paper."
+                : "Live trading is unavailable: this deployment has no execution route to the exchange, so no order could reach it."
+        },
+        accounts = connected.Select(account => new
+        {
+            id = account.Id,
+            displayName = account.DisplayName,
+            exchange = account.ExchangeKind.ToString(),
+            stage = account.Stage.ToString(),
+            canReachExchange = account.CanReachExchange
+        })
+    });
+}).RequireAuthorization();
+
+app.MapPost("/api/exchange/accounts/{accountId:guid}/stage", async (
+    Guid accountId,
+    ChangeTradingStageRequest request,
+    ClaimsPrincipal principal,
+    IExchangeAccountStageService stages,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    ArgumentNullException.ThrowIfNull(request);
+
+    // Returning to paper is a risk-reducing action and is always available.
+    if (string.Equals(request.Stage, "Paper", StringComparison.OrdinalIgnoreCase))
+    {
+        var reverted = await stages
+            .ReturnToPaperAsync(userId.Value, accountId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return reverted.IsSuccess
+            ? Results.Ok(new { stage = reverted.Stage.ToString(), message = reverted.Message })
+            : Results.NotFound(new { error = reverted.Outcome.ToString(), message = reverted.Message });
+    }
+
+    if (!Enum.TryParse<TradingStage>(request.Stage, ignoreCase: true, out var target))
+    {
+        return Results.BadRequest(new { error = "InvalidStage", message = "Stage must be Paper, Proving or Live." });
+    }
+
+    var result = await stages
+        .PromoteAsync(userId.Value, accountId, target, cancellationToken)
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
+    {
+        return Results.Ok(new { stage = result.Stage.ToString(), message = result.Message });
+    }
+
+    var status = result.Outcome switch
+    {
+        TradingStageChangeOutcome.AccountNotFound => StatusCodes.Status404NotFound,
+        // The capability is genuinely absent rather than forbidden to this
+        // user, so it is reported as unimplemented rather than as a refusal
+        // they could argue with.
+        TradingStageChangeOutcome.LiveRouteUnavailable => StatusCodes.Status501NotImplemented,
+        _ => StatusCodes.Status409Conflict
+    };
+
+    return Results.Json(
+        new { error = result.Outcome.ToString(), message = result.Message, stage = result.Stage.ToString() },
+        statusCode: status);
 }).RequireAuthorization();
 
 app.MapPost("/api/exchange/accounts", async (
@@ -2157,15 +2291,24 @@ app.MapGet("/chart", () => Results.Content(
         <div id="positions"><p class="empty">Loading.</p></div>
         <p id="pairFilters" class="empty"></p>
 
-        <h2>Place a paper trade</h2>
-        <div class="notice">
+        <h2>Trade</h2>
+
+        <!-- The chart above is shared. Only the book and the ticket change
+             with the tab, because the market data is the same market data
+             whichever book you are trading into. -->
+        <div class="tabs" role="tablist">
+          <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
+          <button id="modeLive" class="tab" type="button" role="tab">Live</button>
+        </div>
+
+        <div id="modeNotice" class="notice">
           <strong>Fake funds. No exchange is contacted.</strong>
           The fill is priced at the close of the last closed candle, so it reflects a price that
           actually settled. It does not model spread, slippage, fees or partial fills, so a paper
           result is an upper bound on what the same decision would have returned live.
         </div>
 
-        <div class="toolbar">
+        <div class="toolbar" id="tradeTicket">
           <label for="tradeSide">Side</label>
           <select id="tradeSide">
             <option value="Buy">Buy</option>
@@ -2690,6 +2833,8 @@ internal sealed record ConnectExchangeAccountRequest(
     string DisplayName,
     string ApiKey,
     string ApiSecret);
+
+internal sealed record ChangeTradingStageRequest(string Stage);
 
 /// <summary>
 /// Creation request for a paper experiment worker. It deliberately carries no user id: the owner

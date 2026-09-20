@@ -358,6 +358,13 @@
     });
     wrap.appendChild(save);
 
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'Close position';
+    close.className = 'danger';
+    close.addEventListener('click', function () { closePosition(position, close); });
+    wrap.appendChild(close);
+
     var note = document.createElement('span');
     note.className = 'empty';
     note.textContent = 'Checked on closed candles only. A candle that reaches both levels is settled as the stop.';
@@ -366,6 +373,61 @@
     td.appendChild(wrap);
     tr.appendChild(td);
     return tr;
+  }
+
+  // Closing is an exposure-reducing order for the whole open quantity in the
+  // opposite direction. It deliberately goes through the same submission path
+  // as any other order rather than mutating the position directly, so a halt,
+  // a stale price or a duplicate is judged by the same rules and the close
+  // leaves an order and an audit trail behind like any other fill.
+  async function closePosition(position, button) {
+    var side = isShort(position.direction) ? 'Buy' : 'Sell';
+
+    var confirmed = window.confirm(
+      'Close the ' + (isShort(position.direction) ? 'short' : 'long') + ' position of ' +
+      position.quantity + ' ' + position.symbol + '?\n\n' +
+      'This submits a ' + side.toLowerCase() + ' order for the full quantity. Fake funds only.');
+
+    if (!confirmed) { return; }
+
+    button.disabled = true;
+    setTradeStatus('Closing ' + position.symbol + '.', false);
+
+    try {
+      var response = await fetch('/api/paper/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          symbol: position.symbol,
+          side: side,
+          quantity: position.quantity,
+          clientOrderId: null
+        })
+      });
+
+      var payload = await response.json();
+
+      if (!response.ok) {
+        setTradeStatus(
+          (payload && payload.error ? payload.error + ': ' : 'Refused: ') +
+          (payload && payload.message ? payload.message : 'The position was not closed.'),
+          true);
+        return;
+      }
+
+      setTradeStatus(
+        'Closed ' + payload.order.quantity + ' ' + payload.order.symbol +
+        ' at ' + formatPrice(payload.order.fillPrice) + '. Fake funds only.',
+        false);
+
+      await load();
+    } catch (error) {
+      // The position is left exactly as it was. Reporting a close that may not
+      // have happened would be worse than reporting nothing.
+      setTradeStatus('The position could not be closed. ' + error.message, true);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   async function evaluateExits() {
@@ -395,7 +457,9 @@
     if (!rows.length) {
       var p = document.createElement('p');
       p.className = 'empty';
-      p.textContent = 'No open position on ' + state.symbol + '. Positions appear here once paper trading opens one.';
+      p.textContent = tradingMode === 'Paper'
+        ? 'No open position on ' + state.symbol + '. Positions appear here once paper trading opens one.'
+        : 'No live book exists. No order has ever been sent to an exchange from this deployment.';
       host.appendChild(p);
       return;
     }
@@ -595,15 +659,24 @@
       //
       // Exits are evaluated first. Reading a position before checking its stop
       // would show a trade as open that a closed candle already ended.
-      var exits = await evaluateExits();
+      var exits = tradingMode === 'Paper' ? await evaluateExits() : null;
 
-      var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
-      state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
+      if (tradingMode === 'Paper') {
+        var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
+        state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
+      } else {
+        // There is no live book to read. Showing the paper book here would
+        // present simulated exposure as real, which is the single most
+        // dangerous thing this page could do.
+        state.positions = [];
+      }
 
-      var orders = await fetch('/api/orders', { headers: { 'Accept': 'application/json' } });
+      var orders = await fetch(
+        '/api/orders?mode=' + encodeURIComponent(tradingMode),
+        { headers: { 'Accept': 'application/json' } });
       state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
-      var message = 'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
+      var message = tradingMode + ' trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
 
       if (exits && exits.closed) {
         message += ' ' + exits.closed + ' position closed by a stop or target.';
@@ -658,6 +731,69 @@
       setTradeStatus('Exchange connection could not be checked. ' + error.message, true);
       return false;
     }
+  }
+
+  // The selected book. The chart never changes with it: candles are the same
+  // market data whichever book you trade into, and drawing them twice would
+  // invite the two tabs to disagree about what the market did.
+  var tradingMode = 'Paper';
+  var modeCapability = null;
+
+  function applyMode() {
+    var paper = tradingMode === 'Paper';
+
+    $('modePaper').className = paper ? 'tab active' : 'tab';
+    $('modeLive').className = paper ? 'tab' : 'tab active';
+
+    var notice = $('modeNotice');
+    var ticket = $('tradeTicket');
+    var submit = $('submitTrade');
+
+    if (paper) {
+      notice.className = 'notice';
+      notice.innerHTML = '<strong>Fake funds. No exchange is contacted.</strong> ' +
+        'The fill is priced at the close of the last closed candle. It does not model spread, ' +
+        'slippage, fees or partial fills, so a paper result is an upper bound on what the same ' +
+        'decision would have returned live.';
+      ticket.style.display = '';
+      submit.textContent = 'Submit paper order';
+      return;
+    }
+
+    notice.className = 'notice error';
+    notice.innerHTML = '<strong>Live trading is not available.</strong> ' +
+      (modeCapability && modeCapability.live && modeCapability.live.reason
+        ? escapeHtml(modeCapability.live.reason)
+        : 'This deployment has no execution route to the exchange.') +
+      ' Connecting an exchange key does not by itself create that route.';
+
+    // The ticket is removed rather than disabled. A greyed-out live ticket
+    // reads as "not yet configured", which would suggest the capability is a
+    // setting away. It is not: the code that sends an order does not exist.
+    ticket.style.display = 'none';
+  }
+
+  function escapeHtml(value) {
+    var div = document.createElement('div');
+    div.textContent = String(value);
+    return div.innerHTML;
+  }
+
+  async function selectMode(mode) {
+    tradingMode = mode;
+    applyMode();
+    await load();
+  }
+
+  async function refreshModeCapability() {
+    try {
+      var response = await fetch('/api/trading/modes', { headers: { 'Accept': 'application/json' } });
+      if (response.ok) { modeCapability = await response.json(); }
+    } catch (error) {
+      modeCapability = null;
+    }
+
+    applyMode();
   }
 
   function setTradeStatus(message, isError) {    var element = $('tradeStatus');
@@ -797,6 +933,8 @@
     $('interval').addEventListener('change', load);
     $('symbol').addEventListener('change', load);
     $('submitTrade').addEventListener('click', submitTrade);
+    $('modePaper').addEventListener('click', function () { selectMode('Paper'); });
+    $('modeLive').addEventListener('click', function () { selectMode('Live'); });
 
     $('zoomIn').addEventListener('click', function () { zoom(1 / 1.4); });
     $('zoomOut').addEventListener('click', function () { zoom(1.4); });
@@ -811,6 +949,7 @@
     // Whether an exchange is connected decides whether the ticket is usable at
     // all, so it is resolved before the first candle is drawn.
     await refreshExchangeConnection();
+    await refreshModeCapability();
 
     // The pair list has to arrive before the first load, otherwise there is no
     // symbol to request.

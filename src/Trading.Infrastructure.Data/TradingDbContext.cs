@@ -206,6 +206,10 @@ public sealed class TradingDbContext : DbContext
 
             entity.Property(order => order.UserId).IsRequired();
             entity.Property(order => order.StrategyId).IsRequired();
+            // Stored as text so the paper and live books stay distinguishable
+            // in the database itself, not only in application code.
+            entity.Property(order => order.Mode).HasConversion<string>().HasMaxLength(16).IsRequired();
+            entity.HasIndex(order => new { order.UserId, order.Mode });
 
             entity.Property(order => order.Symbol)
                 .HasMaxLength(32)
@@ -258,6 +262,8 @@ public sealed class TradingDbContext : DbContext
 
             entity.Property(position => position.UserId).IsRequired();
             entity.Property(position => position.StrategyId).IsRequired();
+            entity.Property(position => position.Mode).HasConversion<string>().HasMaxLength(16).IsRequired();
+            entity.HasIndex(position => new { position.UserId, position.Mode });
 
             entity.Property(position => position.Symbol)
                 .HasMaxLength(32)
