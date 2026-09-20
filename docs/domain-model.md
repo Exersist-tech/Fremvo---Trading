@@ -226,9 +226,12 @@ Full detail: `docs/strategy-research-plan.md`.
   account, symbol, market type Spot/Futures, side, type, quantity, price,
   reduce-only flag, status, timestamps UTC).
 - `OrderStatus` (state machine, §9).
-- `Position` (account, symbol, market type, side (for Futures: long/short),
-  quantity, average entry price, unrealized/realized P&L, margin info for
-  Futures, status).
+- `Position` (Spot account, symbol, side, quantity, average entry price,
+  unrealized/realized P&L, status).
+- `FuturesPosition` (separate exchange-neutral aggregate for a futures
+  contract, long/short side, decimal quantity, entry/mark/margin/liquidation
+  values, explicit funding, realized/unrealized P&L, fixed observed leverage,
+  margin mode, UTC valuation timestamp, and terminal status).
 - `PositionStatus` (state machine, §10).
 - `Fill` (order id, quantity, price, fee, fee asset, timestamp UTC).
 
@@ -258,8 +261,9 @@ Any -> Liquidated (Futures only, exchange-reported)
 ```
 
 Rules:
-- Futures positions additionally track `MarginMode`, `Leverage` (never
-  auto-increased), `LiquidationPrice`, `MarkPrice`, `FundingAccrued`.
+- `FuturesPosition` is never an extension of Spot `Position`. Its leverage is
+  fixed observation context and is never changed by position tracking;
+  funding is recorded only from an explicit observed event.
 - Increasing exposure is blocked whenever required market/account data is
   stale (see Risk engine).
 - `ReduceOnly`/`CloseOnly` modes constrain which transitions are legal
