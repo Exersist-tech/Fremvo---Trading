@@ -1,0 +1,22 @@
+[
+  {
+    "Name": "Trading.Web",
+    "Projects": [
+      {
+        "Path": "src\\Trading.Web\\Trading.Web.csproj",
+        "Action": "StartWithoutDebugging",
+        "DebugTarget": "https"
+      }
+    ]
+  },
+  {
+    "Name": "Trading.Web (debug)",
+    "Projects": [
+      {
+        "Path": "src\\Trading.Web\\Trading.Web.csproj",
+        "Action": "Start",
+        "DebugTarget": "https"
+      }
+    ]
+  }
+]

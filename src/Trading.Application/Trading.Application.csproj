@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trading.Domain\Trading.Domain.csproj" />
+    <ProjectReference Include="..\Trading.Exchanges.Abstractions\Trading.Exchanges.Abstractions.csproj" />
+    <ProjectReference Include="..\Trading.Infrastructure.Secrets\Trading.Infrastructure.Secrets.csproj" />
+    <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
+    <ProjectReference Include="..\Trading.Risk\Trading.Risk.csproj" />
+  </ItemGroup>
+
+</Project>

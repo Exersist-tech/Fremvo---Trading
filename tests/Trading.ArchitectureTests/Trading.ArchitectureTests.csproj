@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <NoWarn>$(NoWarn);CA1515;CA2007</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.8" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Trading.Domain\Trading.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Application\Trading.Application.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Infrastructure.Data\Trading.Infrastructure.Data.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Exchanges.Abstractions\Trading.Exchanges.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Infrastructure.Secrets\Trading.Infrastructure.Secrets.csproj" />
+    <ProjectReference Include="..\..\src\Trading.MarketData\Trading.MarketData.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Indicators\Trading.Indicators.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Strategies\Trading.Strategies.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Exchanges.Kraken\Trading.Exchanges.Kraken.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Risk\Trading.Risk.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Backtesting\Trading.Backtesting.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Optimization\Trading.Optimization.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

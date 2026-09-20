@@ -1,0 +1,47 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+
+# Test and coverage output
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+*.coverlet.json
+coverage*.json
+coverage*.xml
+coverage*.info
+
+# IDE and editor state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local configuration and anything credential-shaped.
+# Exchange API keys belong in the secret store, never in the working tree,
+# and a developer secrets file must never become a commit.
+appsettings.*.local.json
+*.local.json
+secrets.json
+development-secrets.json
+*.pfx
+*.p12
+*.key
+*.pem

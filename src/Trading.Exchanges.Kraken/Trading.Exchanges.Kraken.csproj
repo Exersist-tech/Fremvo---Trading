@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Trading.Exchanges.Abstractions\Trading.Exchanges.Abstractions.csproj" />
+    <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The probe's internals are asserted directly by the architecture tests,
+         in particular that the trade-permission check always carries Kraken's
+         validate-only flag so it can never place a real order. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Trading.ArchitectureTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

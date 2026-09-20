@@ -1,0 +1,567 @@
+:root {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1c2330;
+  --line: #2b3441;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #4f9cf9;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+a { color: var(--accent); }
+
+.app-nav {
+  --panel: #161b22;
+  --line: #2b3441;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #4f9cf9;
+  --warn: #d29922;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.85rem 1.5rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-wrap: wrap;
+}
+
+.app-nav .brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-decoration: none;
+  margin-right: 0.5rem;
+}
+
+.app-nav .brand span { color: var(--accent); }
+
+.app-nav a.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.92rem;
+  padding: 0.2rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.app-nav a.nav-link:hover { color: var(--text); }
+
+.app-nav a.nav-link.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.app-nav .spacer { flex: 1; }
+
+.app-nav .mode-badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+}
+
+main, .page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 4rem;
+}
+
+h1 { font-size: 1.6rem; margin: 0 0 0.35rem; }
+h2 { font-size: 1.15rem; margin: 2rem 0 0.75rem; }
+
+.lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 70ch; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.card h3 { margin: 0 0 0.35rem; font-size: 1rem; }
+.card p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.card-link { text-decoration: none; color: inherit; display: block; }
+.card-link:hover .card { border-color: var(--accent); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+
+.pill {
+  display: inline-block;
+  font-size: 0.74rem;
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.warn { color: var(--warn); border-color: var(--warn); }
+.pill.bad { color: var(--bad); border-color: var(--bad); }
+
+.notice {
+  border-left: 3px solid var(--warn);
+  background: var(--panel);
+  padding: 0.8rem 1rem;
+  border-radius: 0 8px 8px 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin-bottom: 1.25rem;
+}
+
+.notice strong { color: var(--text); }
+
+.notice.error { border-left-color: var(--bad); }
+
+/* Chart controls. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.toolbar label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.toolbar .spacer {
+  flex: 1 1 auto;
+}
+
+#chart {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.chart-stage {
+  position: relative;
+}
+
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.pair-selector,
+.chart-actions {
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.pair-selector {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  width: min(22rem, 100%);
+}
+
+.chart-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pair-selector label,
+.chart-actions label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pair-selector input,
+.chart-actions select {
+  min-height: 2.2rem;
+}
+
+.pair-results {
+  display: none;
+  max-height: 14rem;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.pair-results.has-results {
+  display: block;
+}
+
+.pair-result {
+  display: block;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.pair-result:last-child { border-bottom: 0; }
+.pair-result:hover,
+.pair-result:focus { background: var(--panel-2); }
+
+.pair-result small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 400;
+}
+
+.pair-search-empty {
+  display: none;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pair-search-empty.has-message {
+  display: block;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.toolbar input, .toolbar select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line, #2a2d31);
+  border-radius: 6px;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.9rem;
+}
+
+button, .button {
+  background: var(--accent);
+  color: #06121f;
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.danger {
+  background: #3a1d1d;
+  border-color: #7a3030;
+  color: #ffb4b4;
+}
+
+@media (max-width: 780px) {
+  .chart-toolbar { align-items: stretch; flex-direction: column; }
+  .pair-selector { width: 100%; }
+  .chart-actions { justify-content: flex-start; }
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid #2a2d31;
+  margin: 0.75rem 0 1rem;
+}
+
+button.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 1rem;
+  color: #9aa0a6;
+}
+
+button.tab.active {
+  color: #f5f6f7;
+  border-bottom-color: #4c8dff;
+}
+
+input, select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.9rem;
+}
+
+label { display: block; font-size: 0.82rem; color: var(--muted); margin-bottom: 0.25rem; }
+
+.field { margin-bottom: 0.9rem; }
+
+.empty { color: var(--muted); font-size: 0.9rem; padding: 1rem 0; }
+
+footer.app-footer {
+  --line: #2b3441;
+  --muted: #8b98a9;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 1.25rem 1.5rem;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+/* Signed-in state in the navigation bar. The interface previously looked
+   identical whether or not you were signed in, which made signing out appear
+   to do nothing. */
+.app-nav .nav-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: 1rem;
+}
+
+.app-nav .nav-user {
+  color: var(--text);
+  font-size: 0.85rem;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-nav .nav-role {
+  background: var(--accent);
+  border-radius: 999px;
+  color: #06121f;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.5rem;
+  text-transform: uppercase;
+}
+
+.app-nav .nav-signout {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.7rem;
+}
+
+.app-nav a.nav-signin {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+}
+
+.notice.ok { border-left-color: var(--ok); }
+
+/* The sign-in page. It carries no navigation bar, because every link on it
+   would lead somewhere the visitor cannot go. The product statement sits
+   beside the form rather than above it, so the form stays the first thing in
+   reach on a narrow screen while the claims stay visible on a wide one. */
+body.signin-body {
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 520px at 12% -10%, rgba(79, 156, 249, 0.16), transparent 60%),
+    radial-gradient(900px 480px at 100% 110%, rgba(63, 185, 80, 0.10), transparent 60%),
+    var(--bg);
+}
+
+main.signin {
+  max-width: 62rem;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  align-items: center;
+  gap: 3.5rem;
+  padding: 2.5rem 1.5rem;
+}
+
+.signin-brand .brand-mark {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 1.05rem;
+  margin-bottom: 1.75rem;
+}
+
+.signin-brand h1 {
+  font-size: clamp(1.8rem, 3.2vw, 2.5rem);
+  line-height: 1.2;
+  margin-bottom: 0.75rem;
+}
+
+.signin .accent { color: var(--accent); }
+
+.brand-points {
+  list-style: none;
+  margin: 1.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.brand-points li {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  border-left: 2px solid var(--line);
+  padding-left: 0.9rem;
+}
+
+.brand-points strong { color: var(--text); }
+
+.signin-panel { min-width: 0; }
+
+.signin-card {
+  padding: 1.6rem 1.6rem 1.4rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.signin-card h2 { margin: 0 0 0.2rem; font-size: 1.25rem; }
+
+.signin-sub {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0 0 1.25rem;
+}
+
+.signin-card input[type="email"],
+.signin-card input[type="password"] {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.95rem;
+}
+
+.signin-card input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.input-with-action { position: relative; display: flex; align-items: center; }
+
+.input-with-action input { padding-right: 4.25rem; }
+
+button.link-button {
+  position: absolute;
+  right: 0.35rem;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.25rem 0.5rem;
+}
+
+button.link-button:hover { color: var(--accent); }
+
+.hint { color: var(--warn); font-size: 0.78rem; margin: 0.35rem 0 0; }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+button.wide { width: 100%; padding: 0.6rem 1rem; font-size: 0.95rem; }
+
+.signin-card #status { padding: 0.75rem 0 0; }
+
+.signin-alt {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 1.1rem 0 0;
+  padding-top: 1rem;
+}
+
+.demo-hint { margin-bottom: 0; }
+.demo-hint code { color: var(--text); font-size: 0.85rem; }
+
+@media (max-width: 860px) {
+  main.signin {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    align-items: start;
+    min-height: 0;
+  }
+
+  /* The form comes first when there is no room to show both side by side. */
+  .signin-panel { order: -1; }
+  .brand-points { gap: 0.6rem; }
+}
