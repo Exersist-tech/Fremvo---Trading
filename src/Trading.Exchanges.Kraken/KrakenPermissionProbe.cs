@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Trading.Exchanges.Abstractions;
@@ -45,11 +45,20 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
 
     private readonly HttpClient _httpClient;
     private readonly TimeProvider _timeProvider;
+    private readonly IKrakenNonceSource _nonceSource;
 
-    public KrakenPermissionProbe(HttpClient httpClient, TimeProvider timeProvider)
+    public KrakenPermissionProbe(
+        HttpClient httpClient,
+        TimeProvider timeProvider,
+        IKrakenNonceSource? nonceSource = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+
+        // A probe makes three private calls in sequence, so it needs a nonce
+        // source that advances between them. One is created here when none is
+        // supplied so a probe is never constructed without one.
+        _nonceSource = nonceSource ?? new KrakenNonceSource(_timeProvider);
     }
 
     public ExchangeKind Exchange => ExchangeKind.Kraken;
@@ -104,9 +113,25 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
         Func<string, string> buildBody,
         CancellationToken cancellationToken)
     {
-        var nonce = KrakenRequestSigner.CreateNonce(_timeProvider.GetUtcNow());
+        var nonce = _nonceSource.NextNonce();
         var body = buildBody(nonce);
-        var signature = KrakenRequestSigner.Sign(path, nonce, body, credential.ApiSecret);
+
+        string signature;
+        try
+        {
+            signature = KrakenRequestSigner.Sign(path, nonce, body, credential.ApiSecret);
+        }
+        catch (FormatException exception)
+        {
+            // A secret that is not base64 is a paste problem, not a fault. It
+            // is reported as an expected outcome so the user is told what to
+            // fix rather than being shown a server error.
+            throw new ExchangeCredentialFormatException(
+                "The private key is not in the format Kraken issues. Kraken shows it as a base64 string, " +
+                "usually ending in '=='. Copy the whole value, with no spaces or line breaks, from the " +
+                "private key field shown when the key was created.",
+                exception);
+        }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
@@ -198,11 +223,32 @@ public sealed class KrakenPermissionProbe : IExchangePermissionProbe
                 // "permission absent" because that would be misleading.
                 if (text is not null
                     && (text.Contains("Invalid key", StringComparison.Ordinal)
-                        || text.Contains("Invalid signature", StringComparison.Ordinal)
-                        || text.Contains("Invalid nonce", StringComparison.Ordinal)))
+                        || text.Contains("Invalid signature", StringComparison.Ordinal)))
                 {
                     throw new ExchangePermissionProbeException(
-                        "Kraken rejected this API key or its signature. Check that the key and secret were copied exactly.");
+                        "Kraken rejected this API key or its signature. Check that the API key and the private " +
+                        "key are both copied in full and come from the same key pair.");
+                }
+
+                // A nonce problem says nothing about the key. Reporting it as
+                // a bad key would send the user to re-copy a credential that is
+                // correct.
+                if (text is not null && text.Contains("Invalid nonce", StringComparison.Ordinal))
+                {
+                    throw new ExchangePermissionProbeException(
+                        "Kraken rejected the request because of its nonce, not because of the key. This happens " +
+                        "when the same key has already been used with a higher nonce, for example by another " +
+                        "application or an earlier version of this one. Wait a moment and try again, or create a " +
+                        "new API key for this platform.");
+                }
+
+                // Kraken reports a key that is disabled, expired or restricted
+                // to other addresses separately from a wrong key.
+                if (text is not null
+                    && (text.Contains("Permission denied", StringComparison.Ordinal)
+                        || text.Contains("Invalid arguments", StringComparison.Ordinal)))
+                {
+                    continue;
                 }
             }
 

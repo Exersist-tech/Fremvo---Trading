@@ -71,6 +71,33 @@ public sealed class ExchangePermissionProbeException : Exception
 }
 
 /// <summary>
+/// Raised by a connector when the supplied credential is not usable as a
+/// credential at all, for example when the secret is not in the format the
+/// exchange issues. This is a user input problem rather than a fault, and is
+/// separate from <see cref="ExchangePermissionProbeException"/> so the connect
+/// flow can tell the user what to correct.
+/// </summary>
+/// <remarks>
+/// Implementations must ensure the message contains no credential material.
+/// </remarks>
+public sealed class ExchangeCredentialFormatException : Exception
+{
+    public ExchangeCredentialFormatException()
+    {
+    }
+
+    public ExchangeCredentialFormatException(string message)
+        : base(message)
+    {
+    }
+
+    public ExchangeCredentialFormatException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
 /// Checks what an exchange API credential is actually allowed to do.
 /// </summary>
 /// <remarks>

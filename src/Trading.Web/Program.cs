@@ -75,6 +75,12 @@ builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountCon
 // user's key may do. It is the only component that sees a credential, and it
 // never performs a withdrawal: it only detects that the capability exists so a
 // withdrawal-capable key can be refused.
+// Kraken rejects a private request whose nonce is not strictly greater than the
+// last one used with that key. A single probe makes three private calls, so the
+// source is registered once for the process rather than derived from the clock
+// at each call site.
+builder.Services.AddSingleton<IKrakenNonceSource, KrakenNonceSource>();
+
 builder.Services.AddHttpClient<IExchangePermissionProbe, KrakenPermissionProbe>(client =>
 {
     client.BaseAddress = new Uri("https://api.kraken.com");
@@ -2271,9 +2277,18 @@ app.MapGet("/exchange", () => Results.Content(
         var status = document.getElementById('status');
         var tbody = document.getElementById('accounts');
 
-        function report(text) { status.textContent = text; status.className = 'empty'; }
-        function reportOk(text) { status.textContent = text; status.className = 'notice ok'; }
-        function reportError(text) { status.textContent = text; status.className = 'notice error'; }
+        function report(text) { status.textContent = text; status.className = 'empty'; show(); }
+        function reportOk(text) { status.textContent = text; status.className = 'notice ok'; show(); }
+        function reportError(text) { status.textContent = text; status.className = 'notice error'; show(); }
+
+        // The result sits below the form, so on a short window the page could
+        // change without anything visibly happening. Bringing it into view
+        // means an answer is never missed.
+        function show() {
+          if (status.scrollIntoView) {
+            status.scrollIntoView({ block: 'nearest' });
+          }
+        }
 
         function cell(row, text, className) {
           var td = document.createElement('td');
@@ -2419,11 +2434,12 @@ app.MapGet("/exchange", () => Results.Content(
             reportError('Rejected: this key cannot read account data. Enable Query Funds on the Kraken key.');
           } else if (body.outcome === 'MissingTradePermission') {
             reportError('Rejected: this key cannot place orders. Enable Create & Modify Orders on the Kraken key.');
+          } else if (body.outcome === 'CredentialNotUsable') {
+            reportError('Rejected: ' + (body.error || 'those values are not a usable Kraken key.') +
+              ' Nothing was stored.');
           } else if (body.outcome === 'ProbeFailed') {
-            reportError(
-              'Kraken did not accept the key when it was checked, so nothing was stored. ' +
-              (body.error || '') +
-              ' Check that the API key and private key were copied in full and are from the same key pair.');
+            reportError((body.error || 'Kraken did not accept the key when it was checked.') +
+              ' Nothing was stored.');
           } else {
             reportError(body.error || 'The key could not be connected and nothing was stored.');
           }

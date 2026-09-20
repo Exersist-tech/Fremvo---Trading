@@ -26,7 +26,13 @@ public enum ExchangeConnectionOutcome
     WithdrawalPermissionPresent = 3,
 
     /// <summary>The exchange could not be reached to check the credential.</summary>
-    ProbeFailed = 4
+    ProbeFailed = 4,
+
+    /// <summary>
+    /// The supplied values are not a usable credential, for example a private
+    /// key that is not in the format the exchange issues. Nothing was stored.
+    /// </summary>
+    CredentialNotUsable = 5
 }
 
 /// <summary>
@@ -135,6 +141,15 @@ public sealed class ExchangeAccountConnectionService : IExchangeAccountConnectio
         try
         {
             permissions = await probe.ProbeAsync(credential, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ExchangeCredentialFormatException exception)
+        {
+            // The values supplied are not a credential. This is an expected
+            // user input failure, so it is returned rather than thrown. The
+            // connector guarantees the message carries no credential material.
+            return ExchangeConnectionResult.Failure(
+                ExchangeConnectionOutcome.CredentialNotUsable,
+                exception.Message);
         }
         catch (ExchangePermissionProbeException exception)
         {
