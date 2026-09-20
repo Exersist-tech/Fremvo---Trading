@@ -1,4 +1,5 @@
 using Trading.Application.Universe;
+using Trading.Application.Scanner;
 using Trading.Domain.Universe;
 using Trading.Workers.Scanner;
 
@@ -8,6 +9,9 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new UniverseRecalculationOptions());
 builder.Services.AddSingleton<IUniverseWorkSource, UnconfiguredUniverseWorkSource>();
 builder.Services.AddSingleton<IUniverseEvidenceSource, UnconfiguredUniverseEvidenceSource>();
+builder.Services.AddSingleton(new ScannerSchedulingOptions());
+builder.Services.AddSingleton<IScanWorkSource, UnconfiguredScanWorkSource>();
+builder.Services.AddSingleton<IScanResultRepository, UnconfiguredScanResultRepository>();
 
 // The mandatory platform floor. Operator configuration is combined with this
 // and may only ever be stricter, never more permissive.
@@ -33,6 +37,7 @@ builder.Services.AddSingleton(provider => new UniverseRecalculationService(
     provider.GetRequiredService<TimeProvider>()));
 
 builder.Services.AddHostedService<UniverseRecalculationWorker>();
+builder.Services.AddHostedService<ScannerSchedulingWorker>();
 
 var host = builder.Build();
 host.Run();

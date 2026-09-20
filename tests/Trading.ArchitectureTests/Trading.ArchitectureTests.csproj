@@ -33,6 +33,7 @@
     <ProjectReference Include="..\..\src\Trading.Backtesting\Trading.Backtesting.csproj" />
     <ProjectReference Include="..\..\src\Trading.Optimization\Trading.Optimization.csproj" />
     <ProjectReference Include="..\..\src\Trading.Workers.MarketData\Trading.Workers.MarketData.csproj" />
+    <ProjectReference Include="..\..\src\Trading.Workers.Scanner\Trading.Workers.Scanner.csproj" />
     <ProjectReference Include="..\..\src\Trading.Web\Trading.Web.csproj" Aliases="WebApp" />
   </ItemGroup>
 
