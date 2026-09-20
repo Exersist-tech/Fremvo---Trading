@@ -117,31 +117,25 @@ public static class OptimizationPlanValidator
 
         try
         {
-            var training = new DatasetSplit(
-                "training",
-                DatasetSplitType.Training,
-                request.Symbol,
-                request.TrainingFromUtc,
-                request.TrainingToUtc,
-                0);
+            RequireUtc(request.TrainingFromUtc, nameof(request.TrainingFromUtc));
+            RequireUtc(request.TrainingToUtc, nameof(request.TrainingToUtc));
+            RequireUtc(request.ValidationFromUtc, nameof(request.ValidationFromUtc));
+            RequireUtc(request.ValidationToUtc, nameof(request.ValidationToUtc));
+            RequireUtc(request.HoldoutFromUtc, nameof(request.HoldoutFromUtc));
+            RequireUtc(request.HoldoutToUtc, nameof(request.HoldoutToUtc));
 
-            var validation = new DatasetSplit(
-                "validation",
-                DatasetSplitType.Validation,
-                request.Symbol,
-                request.ValidationFromUtc,
-                request.ValidationToUtc,
-                0);
+            if (request.TrainingToUtc <= request.TrainingFromUtc ||
+                request.ValidationToUtc <= request.ValidationFromUtc ||
+                request.HoldoutToUtc <= request.HoldoutFromUtc)
+            {
+                throw new ArgumentException("Each split end time must be after its start time.");
+            }
 
-            var holdout = new DatasetSplit(
-                "holdout",
-                DatasetSplitType.Holdout,
-                request.Symbol,
-                request.HoldoutFromUtc,
-                request.HoldoutToUtc,
-                0);
-
-            _ = new OptimizationRun("plan-validation", training, validation, holdout, request.Definitions);
+            if (request.ValidationFromUtc < request.TrainingToUtc ||
+                request.HoldoutFromUtc < request.ValidationToUtc)
+            {
+                throw new InvalidOperationException("Optimization splits must be non-overlapping and time-ordered to prevent look-ahead bias.");
+            }
         }
         catch (ArgumentException ex)
         {
@@ -155,5 +149,13 @@ public static class OptimizationPlanValidator
         return errors.Count == 0
             ? OptimizationPlanValidationResult.Valid()
             : OptimizationPlanValidationResult.Invalid(errors);
+    }
+
+    private static void RequireUtc(DateTimeOffset timestamp, string parameterName)
+    {
+        if (timestamp.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("Split timestamps must be expressed explicitly in UTC.", parameterName);
+        }
     }
 }

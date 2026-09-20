@@ -10,7 +10,7 @@ public sealed class HoldoutVerificationGuardTests
         var holdout = new DatasetSplit(
             "holdout",
             DatasetSplitType.Holdout,
-            "BTCUSDT",
+            DatasetSplitTestFactory.Create("BTCUSDT"),
             new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 5, 10, 0, 0, 0, TimeSpan.Zero),
             200);
@@ -19,7 +19,7 @@ public sealed class HoldoutVerificationGuardTests
         var training = new DatasetSplit(
             "train",
             DatasetSplitType.Training,
-            "BTCUSDT",
+            DatasetSplitTestFactory.Create("BTCUSDT"),
             new DateTimeOffset(2026, 4, 28, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 5, 7, 0, 0, 0, TimeSpan.Zero),
             500);
@@ -34,7 +34,7 @@ public sealed class HoldoutVerificationGuardTests
         var holdout = new DatasetSplit(
             "holdout",
             DatasetSplitType.Holdout,
-            "ETHUSDT",
+            DatasetSplitTestFactory.Create("ETHUSDT"),
             new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 6, 10, 0, 0, 0, TimeSpan.Zero),
             200);
@@ -46,5 +46,22 @@ public sealed class HoldoutVerificationGuardTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => guard.VerifyOnce());
         Assert.Contains("already been performed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GuardRejectsHoldoutAsASelectionCandidate()
+    {
+        var holdout = new DatasetSplit(
+            "holdout",
+            DatasetSplitType.Holdout,
+            DatasetSplitTestFactory.Create("BTCUSDT"),
+            new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 6, 10, 0, 0, 0, TimeSpan.Zero),
+            200);
+
+        var guard = new HoldoutVerificationGuard(holdout);
+        var ex = Assert.Throws<InvalidOperationException>(() => guard.RegisterSelectionCandidate(holdout));
+
+        Assert.Contains("cannot be used for parameter selection", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 }

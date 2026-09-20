@@ -30,12 +30,9 @@ public sealed class WalkForwardFold
             throw new ArgumentException("Validation fold must use a validation split.", nameof(validationSplit));
         }
 
-        if (trainingSplit.Symbol != validationSplit.Symbol)
-        {
-            throw new ArgumentException("Training and validation folds must evaluate the same symbol.", nameof(validationSplit));
-        }
+        trainingSplit.EnsureSameDataset(validationSplit);
 
-        if (validationSplit.FromUtc <= trainingSplit.ToUtc)
+        if (!validationSplit.IsTimeOrderedAfter(trainingSplit))
         {
             throw new InvalidOperationException("Walk-forward validation folds must begin after the training split ends to avoid future-data leakage.");
         }
@@ -80,7 +77,8 @@ public sealed class WalkForwardEvaluationResult
             var previous = ordered[i - 1];
             var current = ordered[i];
 
-            if (current.ValidationSplit.FromUtc <= previous.ValidationSplit.ToUtc)
+            current.ValidationSplit.EnsureSameDataset(previous.ValidationSplit);
+            if (!current.ValidationSplit.IsTimeOrderedAfter(previous.ValidationSplit))
             {
                 throw new InvalidOperationException("Walk-forward validation folds must be non-overlapping and time-ordered.");
             }

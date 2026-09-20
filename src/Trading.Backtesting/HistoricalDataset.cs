@@ -156,6 +156,20 @@ public sealed class HistoricalDataset : IEquatable<HistoricalDataset>
         return normalized;
     }
 
+    /// <summary>Returns the fixed duration represented by a supported candle interval.</summary>
+    public static TimeSpan GetIntervalDuration(string interval) => CanonicalizeInterval(interval) switch
+    {
+        "1M" => TimeSpan.FromMinutes(1),
+        "5M" => TimeSpan.FromMinutes(5),
+        "10M" => TimeSpan.FromMinutes(10),
+        "15M" => TimeSpan.FromMinutes(15),
+        "30M" => TimeSpan.FromMinutes(30),
+        "1H" => TimeSpan.FromHours(1),
+        "4H" => TimeSpan.FromHours(4),
+        "1D" => TimeSpan.FromDays(1),
+        _ => throw new InvalidOperationException("Unsupported candle interval.")
+    };
+
     private static string Required(string value, string parameterName, int maximumLength)
     {
         if (string.IsNullOrWhiteSpace(value))

@@ -15,7 +15,6 @@ public sealed class HoldoutVerificationGuard
         }
 
         _holdout = holdout;
-        _holdout.LockForEvaluation();
     }
 
     public bool IsVerified { get; private set; }
@@ -31,15 +30,12 @@ public sealed class HoldoutVerificationGuard
             throw new InvalidOperationException("Holdout verification is complete; no further parameter selection is allowed on the holdout data.");
         }
 
-        if (candidate.Symbol != _holdout.Symbol)
+        if (!candidate.IsAvailableForSelection)
         {
-            return;
+            throw new InvalidOperationException("Holdout data cannot be used for parameter selection.");
         }
 
-        if (candidate.FromUtc < _holdout.ToUtc && candidate.ToUtc > _holdout.FromUtc)
-        {
-            throw new InvalidOperationException("Selection candidates must not overlap the holdout window.");
-        }
+        _holdout.ValidateNoFutureLeakage(candidate);
 
         _usedForSelection.Add(candidate);
     }

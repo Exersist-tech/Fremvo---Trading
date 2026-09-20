@@ -11,7 +11,7 @@ public sealed class WalkForwardEvaluationTests
         var training = new DatasetSplit(
             "train-1",
             DatasetSplitType.Training,
-            "BTCUSDT",
+            DatasetSplitTestFactory.Create("BTCUSDT"),
             new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2024, 1, 15, 0, 0, 0, TimeSpan.Zero),
             500);
@@ -19,7 +19,7 @@ public sealed class WalkForwardEvaluationTests
         var validation = new DatasetSplit(
             "validate-1",
             DatasetSplitType.Validation,
-            "BTCUSDT",
+            DatasetSplitTestFactory.Create("BTCUSDT"),
             new DateTimeOffset(2024, 1, 10, 0, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2024, 1, 20, 0, 0, 0, TimeSpan.Zero),
             300);
@@ -48,14 +48,14 @@ public sealed class WalkForwardEvaluationTests
             new DatasetSplit(
                 "train-a",
                 DatasetSplitType.Training,
-                "ETHUSDT",
+                DatasetSplitTestFactory.Create("ETHUSDT"),
                 new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero),
                 new DateTimeOffset(2024, 1, 15, 0, 0, 0, TimeSpan.Zero),
                 500),
             new DatasetSplit(
                 "validate-a",
                 DatasetSplitType.Validation,
-                "ETHUSDT",
+                DatasetSplitTestFactory.Create("ETHUSDT"),
                 new DateTimeOffset(2024, 1, 16, 0, 0, 0, TimeSpan.Zero),
                 new DateTimeOffset(2024, 1, 31, 0, 0, 0, TimeSpan.Zero),
                 300),
@@ -67,14 +67,14 @@ public sealed class WalkForwardEvaluationTests
             new DatasetSplit(
                 "train-b",
                 DatasetSplitType.Training,
-                "ETHUSDT",
+                DatasetSplitTestFactory.Create("ETHUSDT"),
                 new DateTimeOffset(2024, 2, 1, 0, 0, 0, TimeSpan.Zero),
                 new DateTimeOffset(2024, 2, 15, 0, 0, 0, TimeSpan.Zero),
                 500),
             new DatasetSplit(
                 "validate-b",
                 DatasetSplitType.Validation,
-                "ETHUSDT",
+                DatasetSplitTestFactory.Create("ETHUSDT"),
                 new DateTimeOffset(2024, 2, 16, 0, 0, 0, TimeSpan.Zero),
                 new DateTimeOffset(2024, 3, 2, 0, 0, 0, TimeSpan.Zero),
                 300),
