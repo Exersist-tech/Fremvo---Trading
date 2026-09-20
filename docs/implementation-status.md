@@ -94,7 +94,7 @@ See `docs/market-universe.md`. All 50 seed pairs are `Tracked` only; none is liv
 See `docs/strategy-research-plan.md`. These are falsifiable research templates, not strategies expected to be profitable. All start as `Draft`.
 | Task | Status | Notes |
 |---|---|---|
-| 5B.1 Strategy approval state machine + immutable versioned approvals | Not started | |
+| 5B.1 Strategy approval state machine + immutable versioned approvals | Done | 2026-09-20 — Pure immutable platform-governance domain models define stable template/version and parameter-schema references, validated SHA-256 content fingerprints, UTC-only auditable Draft → UnderReview → Approved/Rejected/Retired transitions, and human-only approval. Approval neither grants trading eligibility nor exposes user code or execution. |
 | 5B.2 Strategy approval requirements (instrument/history/liquidity/spread/slippage/timeframes/product/modes) | Not started | |
 | 5B.3 Regime/signal/execution timeframe separation | Not started | |
 | 5B.4 Rejection-gate engine with recorded per-gate results | Not started | |
