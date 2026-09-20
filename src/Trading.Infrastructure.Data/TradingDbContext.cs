@@ -178,6 +178,13 @@ public sealed class TradingDbContext : DbContext
                 .HasConversion<int>()
                 .IsRequired();
 
+            entity.Property(account => account.Stage)
+                .HasConversion<int>()
+                .IsRequired();
+
+            entity.Property(account => account.StageChangedAtUtc)
+                .IsRequired(false);
+
             entity.HasIndex(account => new { account.UserId, account.ExchangeKind })
                 .IsUnique(false);
         });

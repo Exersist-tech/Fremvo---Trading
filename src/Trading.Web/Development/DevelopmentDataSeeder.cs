@@ -40,6 +40,13 @@ internal static class DevelopmentDataSeeder
             LogLevel.Information,
             new EventId(1, nameof(SeedAsync)),
             "Development demo data seeded. Administrator {Administrator}, trader {Trader}, invitation code {InvitationCode}.");
+
+    private static readonly Action<ILogger, string, Exception?> s_rebuilding =
+        LoggerMessage.Define<string>(
+            LogLevel.Warning,
+            new EventId(2, "RebuildingDevelopmentDatabase"),
+            "The development database is missing tables ({MissingTables}) because EnsureCreated does not alter an " +
+            "existing database. Rebuilding it and reseeding demo data. This path is development only.");
     /// <summary>
     /// The demo administrator's address. No password is stored here or
     /// anywhere else: the current authentication service accepts any
@@ -73,6 +80,23 @@ internal static class DevelopmentDataSeeder
         var dbContext = scope.ServiceProvider.GetRequiredService<TradingDbContext>();
 
         await dbContext.Database.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
+
+        // EnsureCreated decides at the database level, not the table level, so a
+        // database left over from an earlier build keeps its old schema and
+        // silently lacks any table added since. That surfaces later as
+        // "Invalid object name", far from the cause. Because this is local demo
+        // data only, an incomplete development database is rebuilt instead.
+        //
+        // This is a direct consequence of having no migrations yet and is not a
+        // pattern any deployed environment may use.
+        var missingTables = await FindMissingTablesAsync(dbContext, cancellationToken).ConfigureAwait(false);
+        if (missingTables.Count > 0)
+        {
+            s_rebuilding(app.Logger, string.Join(", ", missingTables), null);
+
+            await dbContext.Database.EnsureDeletedAsync(cancellationToken).ConfigureAwait(false);
+            await dbContext.Database.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         if (await dbContext.Users.AnyAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -121,5 +145,30 @@ internal static class DevelopmentDataSeeder
         await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         s_seeded(app.Logger, AdministratorEmail, TraderEmail, InvitationCode, null);
+    }
+
+    /// <summary>
+    /// Returns the tables the model expects but the database does not have.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> FindMissingTablesAsync(
+        TradingDbContext dbContext,
+        CancellationToken cancellationToken)
+    {
+        var expected = dbContext.Model
+            .GetEntityTypes()
+            .Select(entityType => entityType.GetTableName())
+            .Where(name => !string.IsNullOrEmpty(name))
+            .Select(name => name!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var existing = await dbContext.Database
+            .SqlQueryRaw<string>("SELECT name AS Value FROM sys.tables")
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var existingSet = new HashSet<string>(existing, StringComparer.OrdinalIgnoreCase);
+
+        return expected.Where(table => !existingSet.Contains(table)).ToList();
     }
 }

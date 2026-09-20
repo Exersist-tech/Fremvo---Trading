@@ -10,10 +10,11 @@
 using System;
 using System.Reflection;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleToAttribute("Trading.ArchitectureTests")]
 [assembly: System.Reflection.AssemblyCompanyAttribute("Trading.Exchanges.Kraken")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+82877e40116c20e9bb6a9989bef53a5b472f8392")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+03790744144e80e3ff91cb04e48d484d85339612")]
 [assembly: System.Reflection.AssemblyProductAttribute("Trading.Exchanges.Kraken")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Trading.Exchanges.Kraken")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

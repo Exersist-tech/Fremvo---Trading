@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Trading.Application\Trading.Application.csproj" />
+    <ProjectReference Include="..\Trading.Exchanges.Kraken\Trading.Exchanges.Kraken.csproj" />
     <ProjectReference Include="..\Trading.Infrastructure.Data\Trading.Infrastructure.Data.csproj" />
     <ProjectReference Include="..\Trading.Optimization\Trading.Optimization.csproj" />
   </ItemGroup>

@@ -18,9 +18,26 @@ Kraken types, EF Core, Azure SDKs, or ASP.NET Core.
 ## 2. Exchange accounts & secrets
 
 - `ExchangeAccount` (id, owner `UserId`, exchange identifier e.g.
-  `Kraken`, environment: `Paper`/`Proving`/`Live`, market type capability flags:
-  Spot/Futures, status: `PendingValidation`/`Active`/`Suspended`/`Revoked`,
-  granted-permission summary, `SecretReferenceId`).
+  `Kraken`, `Stage`: `Paper`/`Proving`/`Live`, status:
+  `PendingValidation`/`Connected`/`Suspended`/`Disconnected`,
+  `CredentialReference`).
+  - **`Stage` is a property of the account, not a display option.** A user
+    interface toggle between simulated and real money would imply the same
+    account can move between them freely, which is how accidental real orders
+    happen. `Paper` is the default, stages advance one step at a time and
+    cannot be skipped, and an account that is not connected and validated
+    cannot be promoted at all.
+  - `CanReachExchange` is false for every `Paper` account regardless of how
+    healthy its connection is, so a simulated account can never emit a real
+    order.
+  - Returning to `Paper` is always permitted: a safety action must never be
+    blocked by the state it is correcting.
+- `ExchangeCredential` — an API key and secret **in transit only**. Never
+  persisted to SQL, never logged, never serialized into a response. Its
+  `ToString` is redacted so an accidental interpolation cannot leak it.
+- `IExchangePermissionProbe` — the neutral port that reports what a credential
+  may do. Implemented per exchange inside that exchange's connector, so no
+  exchange-specific type reaches the application layer.
 - `SecretReference` (opaque pointer to a Key Vault secret — never the
   secret value itself; includes vault URI/name and version, not the key).
 - `ApiPermissionSnapshot` (validated permissions returned by exchange at

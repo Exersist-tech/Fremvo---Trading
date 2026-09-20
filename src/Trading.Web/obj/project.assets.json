@@ -1121,6 +1121,19 @@
           "bin/placeholder/Trading.Exchanges.Abstractions.dll": {}
         }
       },
+      "Trading.Exchanges.Kraken/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "dependencies": {
+          "Trading.Exchanges.Abstractions": "1.0.0"
+        },
+        "compile": {
+          "bin/placeholder/Trading.Exchanges.Kraken.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Trading.Exchanges.Kraken.dll": {}
+        }
+      },
       "Trading.Infrastructure.Data/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v8.0",
@@ -3060,6 +3073,11 @@
       "path": "../Trading.Exchanges.Abstractions/Trading.Exchanges.Abstractions.csproj",
       "msbuildProject": "../Trading.Exchanges.Abstractions/Trading.Exchanges.Abstractions.csproj"
     },
+    "Trading.Exchanges.Kraken/1.0.0": {
+      "type": "project",
+      "path": "../Trading.Exchanges.Kraken/Trading.Exchanges.Kraken.csproj",
+      "msbuildProject": "../Trading.Exchanges.Kraken/Trading.Exchanges.Kraken.csproj"
+    },
     "Trading.Infrastructure.Data/1.0.0": {
       "type": "project",
       "path": "../Trading.Infrastructure.Data/Trading.Infrastructure.Data.csproj",
@@ -3090,6 +3108,7 @@
     "net8.0": [
       "Microsoft.EntityFrameworkCore.InMemory >= 8.0.8",
       "Trading.Application >= 1.0.0",
+      "Trading.Exchanges.Kraken >= 1.0.0",
       "Trading.Infrastructure.Data >= 1.0.0",
       "Trading.Optimization >= 1.0.0"
     ]
@@ -3129,6 +3148,9 @@
           "projectReferences": {
             "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Application\\Trading.Application.csproj": {
               "projectPath": "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Application\\Trading.Application.csproj"
+            },
+            "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Exchanges.Kraken\\Trading.Exchanges.Kraken.csproj": {
+              "projectPath": "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Exchanges.Kraken\\Trading.Exchanges.Kraken.csproj"
             },
             "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Infrastructure.Data\\Trading.Infrastructure.Data.csproj": {
               "projectPath": "C:\\Users\\empty\\.copilot\\repos\\copilot-worktrees\\Fremvo---Trading\\exersist-tech-automatic-eureka\\src\\Trading.Infrastructure.Data\\Trading.Infrastructure.Data.csproj"

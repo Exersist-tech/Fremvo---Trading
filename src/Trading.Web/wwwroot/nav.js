@@ -13,6 +13,7 @@
     { href: '/optimization', label: 'Optimization' },
     { href: '/admin/universe', label: 'Universe' },
     { href: '/admin/risk', label: 'Risk' },
+    { href: '/exchange', label: 'Exchange' },
     { href: '/account', label: 'Account' }
   ];
 

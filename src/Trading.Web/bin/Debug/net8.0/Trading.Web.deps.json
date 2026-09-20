@@ -10,6 +10,7 @@
         "dependencies": {
           "Microsoft.EntityFrameworkCore.InMemory": "8.0.8",
           "Trading.Application": "1.0.0",
+          "Trading.Exchanges.Kraken": "1.0.0",
           "Trading.Infrastructure.Data": "1.0.0",
           "Trading.Optimization": "1.0.0"
         },
@@ -486,6 +487,17 @@
           }
         }
       },
+      "Trading.Exchanges.Kraken/1.0.0": {
+        "dependencies": {
+          "Trading.Exchanges.Abstractions": "1.0.0"
+        },
+        "runtime": {
+          "Trading.Exchanges.Kraken.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
       "Trading.Infrastructure.Data/1.0.0": {
         "dependencies": {
           "Microsoft.AspNetCore.Identity.EntityFrameworkCore": "8.0.8",
@@ -797,6 +809,11 @@
       "sha512": ""
     },
     "Trading.Exchanges.Abstractions/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Trading.Exchanges.Kraken/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

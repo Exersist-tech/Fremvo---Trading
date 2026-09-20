@@ -33,6 +33,40 @@
   known secret-shaped fields (API key, secret, signature, Authorization
   headers) before anything reaches Application Insights.
 
+### 2.1 Implemented credential handling (Phase 2.5)
+
+- The credential enters the platform at exactly one place, the connect
+  endpoint, and is carried by `ExchangeCredential`, a transit-only type that is
+  never persisted, never logged, and never serialized into a response. Its
+  `ToString` is redacted so an accidental log or string interpolation cannot
+  leak it.
+- The secret is handed to the secret store and dropped. SQL holds only the
+  secret's **name**, scoped per user as
+  `exchange-credential/{userId}/{accountId}`, so two users' credentials can
+  never collide and a database compromise alone yields no tradable key.
+- **There is no endpoint that reads a credential back out.** Once stored, a
+  secret leaves only through the connector that signs a request with it. The
+  account list projects safe metadata only and deliberately omits the
+  credential reference, so the browser never learns where a credential lives.
+- A withdrawal-capable key is refused **before anything is written**, leaving
+  no account row and no stored secret. Withdrawal capability is detected by
+  calling Kraken's `WithdrawMethods`, which lists methods and moves no funds;
+  the call exists solely so such a key can be rejected.
+- Permission checks never place an order. The trade check uses Kraken's
+  `validate` flag, held as a hard-coded constant with no parameter that can
+  switch it off, and tests assert every generated request body carries it.
+- Kraken answers HTTP 200 even on failure, so responses are judged by the
+  `error` array rather than the status code. An unrecognised error is read as
+  "permission absent", which fails closed.
+- Ownership is always taken from the signed-in principal, never from the
+  request body. Acting on another user's account reports **absent** rather than
+  forbidden, so the endpoint cannot be used to discover which account
+  identifiers exist.
+- **Local development only:** a developer machine has no Key Vault, so the
+  Development environment uses a Data Protection encrypted file held under the
+  user's local application data, never the repository working tree. It refuses
+  to construct outside Development. It is not a Key Vault substitute.
+
 ## 3. AuthN/AuthZ
 
 - Invitation-only registration; invitation codes are single-use or capped,

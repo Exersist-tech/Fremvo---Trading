@@ -19,10 +19,18 @@ mutable tables also have `RowVersion` (concurrency token).
 
 ## 2. Exchange accounts & secrets (Phase 2)
 
-- `ExchangeAccounts` (Id, UserId FK, Exchange, Environment
-  [Paper/Proving/Live], SupportsSpot bit, SupportsFutures bit, Status,
-  SecretReferenceId FK, LastValidatedAtUtc, GrantedPermissionsJson
-  [safe metadata only, never secret values])
+- `ExchangeAccounts` (Id, UserId FK, ExchangeKind, DisplayName,
+  CredentialReference, CreatedAtUtc, LastValidatedAtUtc, Status,
+  **Stage [Paper/Proving/Live], StageChangedAtUtc**)
+  - `Stage` is an integer where `0` is `Paper`. The safe value is the default
+    value on purpose: a row written without an explicit stage falls back to the
+    one that cannot reach the exchange.
+  - `CredentialReference` holds the secret's **name**, never a secret value.
+    The name is scoped per user (`exchange-credential/{userId}/{accountId}`) so
+    two users' credentials can never collide, and a database compromise alone
+    does not yield a tradable key.
+  - Disconnecting or suspending an account resets `Stage` to `Paper`, so
+    re-connecting a key never silently restores a previous live clearance.
 - `SecretReferences` (Id, KeyVaultName, KeyVaultSecretName,
   KeyVaultSecretVersion, CreatedAtUtc, RotatedAtUtc nullable) — **no secret
   value column exists in SQL at all.**

@@ -1,11 +1,13 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
+using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
 using Trading.Application.Universe;
 using Trading.Domain.Audit;
@@ -14,8 +16,12 @@ using Trading.Domain.Identity;
 using Trading.Domain.Market;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
+using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Kraken;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
+using Trading.Infrastructure.Data.ExchangeAccounts;
+using Trading.Infrastructure.Secrets;
 using Trading.Optimization;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
@@ -51,6 +57,37 @@ builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolic
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
     new AuditQueryService(provider.GetRequiredService<TradingDbContext>().AuditEvents));
+
+builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
+builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
+builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
+
+// The Kraken permission probe talks to Kraken's private API to establish what a
+// user's key may do. It is the only component that sees a credential, and it
+// never performs a withdrawal: it only detects that the capability exists so a
+// withdrawal-capable key can be refused.
+builder.Services.AddHttpClient<IExchangePermissionProbe, KrakenPermissionProbe>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
+// Credential storage. Azure uses Key Vault through a managed identity. A
+// developer machine has no Key Vault, so Development uses a Data Protection
+// encrypted file outside the repository; it refuses to construct in any other
+// environment.
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddDataProtection();
+    builder.Services.AddSingleton<ISecretStore>(provider => new DevelopmentFileSecretStore(
+        provider.GetRequiredService<IDataProtectionProvider>(),
+        provider.GetRequiredService<IHostEnvironment>(),
+        DevelopmentFileSecretStore.DefaultFilePath));
+}
+else
+{
+    builder.Services.AddSingleton<ISecretStore, InMemorySecretStore>();
+}
 
 // Sign-in state is held in a cookie that the browser cannot read, so no identity or session
 // material is ever exposed to client-side script.
@@ -1422,6 +1459,371 @@ app.MapGet("/orders", () => Results.Content(
     """,
     "text/html"));
 
+// ---------------------------------------------------------------------------
+// Exchange account connection (Phase 2.5)
+//
+// These endpoints are the only place a user's API credential enters the
+// platform. The secret is handed straight to the secret store and a reference
+// is kept in SQL. No endpoint here returns a credential, and there is no
+// endpoint that reads one back out: once stored, a secret leaves only through
+// the connector that signs a request with it.
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/exchange/accounts", async (
+    ClaimsPrincipal principal,
+    IExchangeAccountConnectionService connections,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var accounts = await connections.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+
+    // Only safe metadata is projected. CredentialReference is the secret's
+    // name and is deliberately omitted so the browser never learns where a
+    // credential lives.
+    return Results.Ok(accounts.Select(account => new
+    {
+        id = account.Id,
+        exchange = account.ExchangeKind.ToString(),
+        displayName = account.DisplayName,
+        status = account.Status.ToString(),
+        stage = account.Stage.ToString(),
+        canTrade = account.CanTrade,
+        canReachExchange = account.CanReachExchange,
+        createdAtUtc = account.CreatedAtUtc,
+        lastValidatedAtUtc = account.LastValidatedAtUtc
+    }));
+}).RequireAuthorization();
+
+app.MapPost("/api/exchange/accounts", async (
+    ConnectExchangeAccountRequest request,
+    ClaimsPrincipal principal,
+    IExchangeAccountConnectionService connections,
+    IAuditEventWriter auditWriter,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (request is null
+        || string.IsNullOrWhiteSpace(request.DisplayName)
+        || string.IsNullOrWhiteSpace(request.ApiKey)
+        || string.IsNullOrWhiteSpace(request.ApiSecret))
+    {
+        return Results.BadRequest(new { error = "Display name, API key and API secret are required." });
+    }
+
+    var credential = new ExchangeCredential(request.ApiKey, request.ApiSecret);
+
+    var result = await connections.ConnectAsync(
+        userId.Value,
+        ExchangeKind.Kraken,
+        request.DisplayName,
+        credential,
+        cancellationToken).ConfigureAwait(false);
+
+    if (!result.IsSuccess)
+    {
+        // The reason is written by the application layer and carries no
+        // credential material, so it is safe to show the user.
+        await auditWriter.WriteAsync(
+            new AuditEvent(
+                Guid.NewGuid(),
+                userId.Value,
+                "ExchangeAccountConnectionRejected",
+                "ExchangeAccount",
+                result.Outcome.ToString(),
+                DateTimeOffset.UtcNow,
+                null,
+                result.FailureReason,
+                Guid.NewGuid().ToString()),
+            cancellationToken).ConfigureAwait(false);
+
+        return Results.BadRequest(new
+        {
+            outcome = result.Outcome.ToString(),
+            error = result.FailureReason
+        });
+    }
+
+    var account = result.Account!;
+
+    await auditWriter.WriteAsync(
+        new AuditEvent(
+            Guid.NewGuid(),
+            userId.Value,
+            "ExchangeAccountConnected",
+            "ExchangeAccount",
+            account.Id.ToString(),
+            DateTimeOffset.UtcNow,
+            null,
+            $"{account.ExchangeKind} account connected in {account.Stage} stage.",
+            Guid.NewGuid().ToString()),
+        cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        id = account.Id,
+        exchange = account.ExchangeKind.ToString(),
+        displayName = account.DisplayName,
+        status = account.Status.ToString(),
+        stage = account.Stage.ToString()
+    });
+}).RequireAuthorization();
+
+app.MapDelete("/api/exchange/accounts/{accountId:guid}", async (
+    Guid accountId,
+    ClaimsPrincipal principal,
+    IExchangeAccountConnectionService connections,
+    IAuditEventWriter auditWriter,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var removed = await connections
+        .DisconnectAsync(userId.Value, accountId, cancellationToken)
+        .ConfigureAwait(false);
+
+    if (!removed)
+    {
+        return Results.NotFound();
+    }
+
+    await auditWriter.WriteAsync(
+        new AuditEvent(
+            Guid.NewGuid(),
+            userId.Value,
+            "ExchangeAccountDisconnected",
+            "ExchangeAccount",
+            accountId.ToString(),
+            DateTimeOffset.UtcNow,
+            null,
+            "Account disconnected and stored credential removed.",
+            Guid.NewGuid().ToString()),
+        cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new { disconnected = true });
+}).RequireAuthorization();
+
+app.MapGet("/exchange", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <title>Exchange accounts</title>
+    </head>
+    <body>
+      <main>
+        <h1>Exchange accounts</h1>
+        <p class="lede">
+          Connect your own Kraken account with an API key. You enter the key once. It is
+          encrypted and stored server side, so it is still connected the next time you sign in.
+        </p>
+
+        <div class="notice">
+          <strong>Create the key without withdrawal permission.</strong>
+          Fremvo Trading never holds, transfers or withdraws funds, and no withdrawal code
+          exists anywhere in the product. A key that carries withdrawal permission is refused
+          outright rather than stored. Your secret is never written to the database, never
+          logged, and never sent back to the browser.
+        </div>
+
+        <h2>Trading stage</h2>
+        <p>
+          Simulated and real money are a property of the account, not a display option, so a
+          view toggle can never turn fake orders into real ones.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Stage</th><th>Money at risk</th><th>Reaches Kraken</th><th>Availability</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="badge badge-ok">Paper</span></td>
+              <td>Simulated only</td>
+              <td>No</td>
+              <td>Available now. Every account starts here.</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-warn">Proving</span></td>
+              <td>Real, minimum size</td>
+              <td>Yes</td>
+              <td>Locked until the risk engine, idempotency and reconciliation are complete.</td>
+            </tr>
+            <tr>
+              <td><span class="badge badge-bad">Live</span></td>
+              <td>Real</td>
+              <td>Yes</td>
+              <td>Locked until the proving stage has run cleanly.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Connect a Kraken account</h2>
+        <form id="connect-form" class="card">
+          <div class="field">
+            <label for="connect-name">Name for this connection</label>
+            <input id="connect-name" type="text" required placeholder="Kraken main" />
+          </div>
+          <div class="field">
+            <label for="connect-key">API key</label>
+            <input id="connect-key" type="text" autocomplete="off" spellcheck="false" required />
+          </div>
+          <div class="field">
+            <label for="connect-secret">API secret</label>
+            <input id="connect-secret" type="password" autocomplete="off" spellcheck="false" required />
+          </div>
+          <button type="submit">Connect</button>
+        </form>
+
+        <p id="status" class="empty"></p>
+
+        <h2>Connected accounts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th><th>Exchange</th><th>Status</th><th>Stage</th>
+              <th>Last validated</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="accounts"><tr><td colspan="6" class="empty">Loading.</td></tr></tbody>
+        </table>
+      </main>
+
+      <script>
+        var status = document.getElementById('status');
+        var tbody = document.getElementById('accounts');
+
+        function report(text) { status.textContent = text; }
+
+        function cell(row, text, className) {
+          var td = document.createElement('td');
+          td.textContent = text;
+          if (className) { td.className = className; }
+          row.appendChild(td);
+          return td;
+        }
+
+        function stageClass(stage) {
+          if (stage === 'Paper') { return 'badge badge-ok'; }
+          if (stage === 'Proving') { return 'badge badge-warn'; }
+          return 'badge badge-bad';
+        }
+
+        async function load() {
+          var response = await fetch('/api/exchange/accounts');
+          tbody.textContent = '';
+
+          if (response.status === 401) {
+            var authRow = document.createElement('tr');
+            cell(authRow, 'Sign in to manage exchange accounts.', 'empty').colSpan = 6;
+            tbody.appendChild(authRow);
+            return;
+          }
+
+          if (!response.ok) {
+            var errRow = document.createElement('tr');
+            cell(errRow, 'Could not load accounts.', 'empty').colSpan = 6;
+            tbody.appendChild(errRow);
+            return;
+          }
+
+          var accounts = await response.json();
+
+          if (!accounts.length) {
+            var emptyRow = document.createElement('tr');
+            cell(emptyRow, 'No exchange account connected yet.', 'empty').colSpan = 6;
+            tbody.appendChild(emptyRow);
+            return;
+          }
+
+          accounts.forEach(function (account) {
+            var row = document.createElement('tr');
+            cell(row, account.displayName);
+            cell(row, account.exchange);
+            cell(row, account.status);
+
+            var stageCell = document.createElement('td');
+            var badge = document.createElement('span');
+            badge.className = stageClass(account.stage);
+            badge.textContent = account.stage;
+            stageCell.appendChild(badge);
+            row.appendChild(stageCell);
+
+            cell(row, account.lastValidatedAtUtc
+              ? new Date(account.lastValidatedAtUtc).toLocaleString()
+              : 'Never');
+
+            var actionCell = document.createElement('td');
+            var button = document.createElement('button');
+            button.className = 'secondary';
+            button.type = 'button';
+            button.textContent = 'Disconnect';
+            button.addEventListener('click', async function () {
+              report('Disconnecting.');
+              var result = await fetch('/api/exchange/accounts/' + account.id, { method: 'DELETE' });
+              report(result.ok ? 'Disconnected and stored credential removed.' : 'Disconnect failed.');
+              await load();
+            });
+            actionCell.appendChild(button);
+            row.appendChild(actionCell);
+
+            tbody.appendChild(row);
+          });
+        }
+
+        document.getElementById('connect-form').addEventListener('submit', async function (event) {
+          event.preventDefault();
+          report('Checking the key with Kraken.');
+
+          var secretField = document.getElementById('connect-secret');
+          var response = await fetch('/api/exchange/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              displayName: document.getElementById('connect-name').value,
+              apiKey: document.getElementById('connect-key').value,
+              apiSecret: secretField.value
+            })
+          });
+
+          // The secret is cleared from the form immediately so it does not sit
+          // in the page after the request completes.
+          secretField.value = '';
+
+          if (response.ok) {
+            report('Connected. The key is stored encrypted and stays connected between sign-ins.');
+            document.getElementById('connect-form').reset();
+          } else {
+            var body = await response.json().catch(function () { return {}; });
+            report(body.error || 'Could not connect this key.');
+          }
+
+          await load();
+        });
+
+        load();
+      </script>
+    </body>
+    </html>
+    """,
+    "text/html"));
+
 app.MapGet("/account", () => Results.Content(
     """
     <!DOCTYPE html>
@@ -1544,6 +1946,19 @@ app.MapGet("/account", () => Results.Content(
     "text/html"));
 
 await app.RunAsync().ConfigureAwait(false);
+
+/// <summary>
+/// A request to connect an exchange account.
+/// </summary>
+/// <remarks>
+/// This record carries the credential from the browser to the secret store and
+/// nowhere else. It is never persisted, never logged, and never returned. The
+/// secret is deliberately not exposed on any response model.
+/// </remarks>
+internal sealed record ConnectExchangeAccountRequest(
+    string DisplayName,
+    string ApiKey,
+    string ApiSecret);
 
 /// <summary>
 /// Creation request for a paper experiment worker. It deliberately carries no user id: the owner
