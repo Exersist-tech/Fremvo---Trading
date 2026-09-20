@@ -10,6 +10,7 @@
     { href: '/', label: 'Overview' },
     { href: '/chart', label: 'Chart' },
     { href: '/scanner', label: 'Scanner' },
+    { href: '/backtests', label: 'Backtests' },
     { href: '/portfolio', label: 'Portfolio' },
     { href: '/positions', label: 'Positions' },
     { href: '/orders', label: 'Orders' },

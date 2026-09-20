@@ -13,6 +13,7 @@
     <ProjectReference Include="..\Trading.MarketData\Trading.MarketData.csproj" />
     <ProjectReference Include="..\Trading.Indicators\Trading.Indicators.csproj" />
     <ProjectReference Include="..\Trading.Risk\Trading.Risk.csproj" />
+    <ProjectReference Include="..\Trading.Backtesting\Trading.Backtesting.csproj" />
   </ItemGroup>
 
 </Project>

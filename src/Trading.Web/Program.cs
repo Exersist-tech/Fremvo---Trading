@@ -9,6 +9,7 @@ using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Application.Scanner;
+using Trading.Application.Backtesting;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
@@ -98,6 +99,11 @@ builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountReposito
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
 builder.Services.AddScoped<IPortfolioQueryService, PortfolioQueryService>();
 builder.Services.AddSingleton<ChartIndicatorOverlayService>();
+// There is no durable completed-backtest store yet. This deliberately empty
+// source keeps the reporting surface read-only and prevents a page load from
+// running an in-memory backtest or inventing results.
+builder.Services.AddSingleton<IBacktestResultSource, UnavailableBacktestResultSource>();
+builder.Services.AddScoped<BacktestResultsQueryService>();
 
 // Whether this deployment can reach a real venue. Registering an
 // ILiveExecutionRoute is the single act that opens the promotion ladder out of
@@ -352,6 +358,33 @@ app.MapGet("/api/audit", async (IAuditQueryService queryService, CancellationTok
         e.CorrelationId
     }));
 });
+
+// Completed backtest reports are a read-only projection. The signed-in user is
+// the only owner selector; platform-owned (ownerless) evidence is not a user
+// result and is excluded by the query service.
+app.MapGet("/api/backtests/results", async (
+    ClaimsPrincipal principal,
+    BacktestResultsQueryService queryService,
+    int? page,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var requestedPage = page.GetValueOrDefault();
+    if (requestedPage < 0 || requestedPage > 10_000)
+    {
+        return Results.BadRequest(new { error = "The requested report page is outside the supported range." });
+    }
+
+    var reports = await queryService
+        .ListAsync(userId.Value, requestedPage, cancellationToken)
+        .ConfigureAwait(false);
+    return Results.Ok(reports);
+}).RequireAuthorization();
 
 // Scanner evidence is read-only. Ownership comes exclusively from the signed-in
 // principal; identifiers only select a scan and run within that owner's records.
@@ -2682,6 +2715,37 @@ app.MapGet("/positions", () => Results.Content(
         <div id="status" class="notice">Loading.</div>
         <div id="summary"></div>
         <div id="positions"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/backtests", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/backtest-results.js"></script>
+      <title>Backtest results</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Backtest results</h1>
+        <p class="lede">Read-only reporting for completed, reproducible historical analysis.</p>
+
+        <div class="notice">
+          <strong>Hypothetical historical results.</strong> These results include model assumptions
+          and do not guarantee profitability or provide advice. They do not represent an order or
+          a live or paper execution. Results are analysis and research only.
+        </div>
+
+        <div id="status" class="notice">Loading completed backtest reports.</div>
+        <div id="results"><p class="empty">Loading.</p></div>
       </main>
     </body>
     </html>
