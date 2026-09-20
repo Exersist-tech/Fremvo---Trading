@@ -7,6 +7,7 @@ using Trading.Domain.Universe;
 using Trading.MarketData;
 using Trading.Risk;
 using Trading.Strategies;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Trading.Workers.Experiments;
 
@@ -30,13 +31,13 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
         ["platform.regime-switching-ensemble"] = "regime-switching-ensemble-v1"
     };
     private static readonly Guid s_instrumentId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
-    private readonly ICandleRepository _candles;
+    private readonly IServiceScopeFactory _scopes;
     private readonly ApprovedPaperExecutionPlanCatalog _plans;
     private readonly TimeProvider _time;
 
-    public DurablePaperTrainingSizingSnapshotSource(ICandleRepository candles, TimeProvider time)
+    public DurablePaperTrainingSizingSnapshotSource(IServiceScopeFactory scopes, TimeProvider time)
     {
-        _candles = candles ?? throw new ArgumentNullException(nameof(candles));
+        _scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
         _plans = new ApprovedPaperExecutionPlanCatalog();
         _time = time ?? throw new ArgumentNullException(nameof(time));
     }
@@ -57,7 +58,8 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
         var duration = evidence.CloseTimeUtc - evidence.OpenTimeUtc;
         if (duration <= TimeSpan.Zero)
             return null;
-        var series = await _candles.ListAsync(worker.MarketSymbol, evidence.Interval, evidence.OpenTimeUtc - TimeSpan.FromTicks(duration.Ticks * 13),
+        using var scope = _scopes.CreateScope();
+        var series = await scope.ServiceProvider.GetRequiredService<ICandleRepository>().ListAsync(worker.MarketSymbol, evidence.Interval, evidence.OpenTimeUtc - TimeSpan.FromTicks(duration.Ticks * 13),
             evidence.CloseTimeUtc, cancellationToken).ConfigureAwait(false);
         var candles = series.OrderBy(candle => candle.OpenTimeUtc).ThenBy(candle => candle.CloseTimeUtc).ToArray();
         if (!HasExactClosedEvidence(candles, evidence, duration))
