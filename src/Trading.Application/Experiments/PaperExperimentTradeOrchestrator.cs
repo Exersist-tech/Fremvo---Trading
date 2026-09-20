@@ -134,6 +134,21 @@ public sealed class PaperExperimentTradeOrchestrator
         ExperimentDecisionRecord proposal,
         ExperimentPaperWorkerContext context,
         CancellationToken cancellationToken = default)
+        => await ProcessCoreAsync(proposal, context, null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Submits an opening decision using the exact already-approved sizer output.</summary>
+    public async Task<ExperimentPaperTradeResult> ProcessSizedAsync(
+        ExperimentDecisionRecord proposal,
+        ExperimentPaperWorkerContext context,
+        decimal exactOpenQuantity,
+        CancellationToken cancellationToken = default)
+        => await ProcessCoreAsync(proposal, context, exactOpenQuantity, cancellationToken).ConfigureAwait(false);
+
+    private async Task<ExperimentPaperTradeResult> ProcessCoreAsync(
+        ExperimentDecisionRecord proposal,
+        ExperimentPaperWorkerContext context,
+        decimal? exactOpenQuantity,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(proposal);
         ArgumentNullException.ThrowIfNull(context);
@@ -150,6 +165,9 @@ public sealed class PaperExperimentTradeOrchestrator
             return ExperimentPaperTradeResult.Skipped("No actionable experimental condition.");
         if (proposal.Proposal.Action is not (ExperimentProposalAction.Open or ExperimentProposalAction.Reduce or ExperimentProposalAction.Close))
             return ExperimentPaperTradeResult.Skipped("Experimental proposal action is not permitted.");
+        if (exactOpenQuantity is not null && proposal.Proposal.Action == ExperimentProposalAction.Open
+            && exactOpenQuantity is not > 0m)
+            return ExperimentPaperTradeResult.Skipped("Opening paper proposals require an exact approved sizing quantity.");
 
         var correlationId = $"paper-experiment-{Fingerprint(proposal.Key)}";
         var claim = new ExperimentPaperExecutionAssociation(proposal.Key, correlationId, ExperimentPaperExecutionStatus.Claimed);
@@ -174,7 +192,7 @@ public sealed class PaperExperimentTradeOrchestrator
             result = await _pipeline.ProcessAsync(
                 marketEvent,
                 new PipelineContext(proposal.Key.UserId, TradingMode.Paper, correlationId),
-                new ProposalStrategy(proposal, context.Portfolio.PositionQuantity, _openQuantity),
+                new ProposalStrategy(proposal, context.Portfolio.PositionQuantity, exactOpenQuantity ?? _openQuantity),
                 ToPipelinePortfolio(context.Portfolio),
                 _paperAdapter,
                 cancellationToken).ConfigureAwait(false);
