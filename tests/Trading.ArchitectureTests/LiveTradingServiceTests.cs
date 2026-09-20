@@ -47,6 +47,18 @@ public sealed class LiveTradingServiceTests
     }
 
     [Fact]
+    public async Task AGeneratedLiveClientOrderIdFitsTheDurableColumn()
+    {
+        var harness = new Harness(TradingStage.Live);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, clientOrderId: null);
+
+        Assert.Equal(LiveTradeOutcome.Accepted, result.Outcome);
+        Assert.True(result.Order!.ClientOrderId.Length <= Order.MaximumClientOrderIdLength);
+    }
+
+    [Fact]
     public async Task ALiveOrderIsAlwaysALimitOrder()
     {
         var harness = new Harness(TradingStage.Live);

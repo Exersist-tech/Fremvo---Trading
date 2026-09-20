@@ -235,7 +235,7 @@ public sealed class TradingDbContext : DbContext
             entity.Property(order => order.LastTransitionAtUtc).IsRequired(false);
 
             entity.Property(order => order.ClientOrderId)
-                .HasMaxLength(64)
+                .HasMaxLength(Order.MaximumClientOrderIdLength)
                 .IsRequired();
 
             // Durable duplicate-order protection. An in-memory idempotency

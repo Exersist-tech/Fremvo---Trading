@@ -289,10 +289,15 @@ public sealed class LiveTradingService : ILiveTradingService
         }
 
         var identifier = string.IsNullOrWhiteSpace(clientOrderId)
-            ? string.Create(
-                CultureInfo.InvariantCulture,
-                $"live-{userId:N}-{now.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}")
+            ? $"live-{Guid.NewGuid():N}"
             : clientOrderId.Trim();
+
+        if (identifier.Length > Order.MaximumClientOrderIdLength)
+        {
+            return LiveTradeResult.Failure(
+                LiveTradeOutcome.Invalid,
+                $"Client order id must be at most {Order.MaximumClientOrderIdLength} characters.");
+        }
 
         // Checked against stored orders rather than an in-memory guard, so a
         // resubmitted identifier is refused even after a restart. The exchange

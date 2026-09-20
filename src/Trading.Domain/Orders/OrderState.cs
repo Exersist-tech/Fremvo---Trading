@@ -35,6 +35,13 @@ public enum OrderType
 
 public sealed class Order
 {
+    /// <summary>
+    /// The portable limit accepted by the durable store and supported venues.
+    /// A caller receives a clear refusal rather than discovering it after an
+    /// order write has already failed.
+    /// </summary>
+    public const int MaximumClientOrderIdLength = 64;
+
     public Order(
         Guid id,
         Guid userId,
@@ -84,6 +91,13 @@ public sealed class Order
         if (string.IsNullOrWhiteSpace(clientOrderId))
         {
             throw new ArgumentException("Client order id is required.", nameof(clientOrderId));
+        }
+
+        if (clientOrderId.Trim().Length > MaximumClientOrderIdLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(clientOrderId),
+                $"Client order id must be at most {MaximumClientOrderIdLength} characters.");
         }
 
         if (mode == TradingMode.Live && (exchangeAccountId is null || exchangeAccountId == Guid.Empty))

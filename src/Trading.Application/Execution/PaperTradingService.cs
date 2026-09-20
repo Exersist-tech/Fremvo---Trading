@@ -213,10 +213,15 @@ public sealed class PaperTradingService : IPaperTradingService
         // orders placed within the same millisecond are distinct intents and
         // must not collide into a false duplicate.
         var identifier = string.IsNullOrWhiteSpace(clientOrderId)
-            ? string.Create(
-                CultureInfo.InvariantCulture,
-                $"paper-{userId:N}-{now.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}")
+            ? $"paper-{Guid.NewGuid():N}"
             : clientOrderId.Trim();
+
+        if (identifier.Length > Order.MaximumClientOrderIdLength)
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                $"Client order id must be at most {Order.MaximumClientOrderIdLength} characters.");
+        }
 
         // Idempotency is checked against stored orders rather than an in-memory
         // guard, so a resubmitted identifier is refused even after a restart.

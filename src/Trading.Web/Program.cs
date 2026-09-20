@@ -2193,6 +2193,7 @@ app.MapPost("/api/live/orders", async (
     SubmitLiveOrderRequest request,
     ClaimsPrincipal principal,
     ILiveTradingService liveTrading,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     var userId = CurrentUser.TryGetUserId(principal);
@@ -2208,16 +2209,37 @@ app.MapPost("/api/live/orders", async (
         return Results.BadRequest(new { error = "InvalidSide", message = "Side must be Buy or Sell." });
     }
 
-    var result = await liveTrading
-        .SubmitAsync(
-            userId.Value,
-            request.ExchangeAccountId,
-            request.Symbol,
-            side,
-            request.Quantity,
-            request.ClientOrderId,
-            cancellationToken)
-        .ConfigureAwait(false);
+    LiveTradeResult result;
+    try
+    {
+        result = await liveTrading
+            .SubmitAsync(
+                userId.Value,
+                request.ExchangeAccountId,
+                request.Symbol,
+                side,
+                request.Quantity,
+                request.ClientOrderId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+    catch (DbUpdateException exception)
+    {
+        // A durable-record failure may occur before or after the exchange
+        // call. The browser cannot establish which, so it must not retry;
+        // this is treated as an unknown outcome and logged for an operator.
+        Trading.Web.LiveOrderEndpointLog.PersistenceFailure(
+            loggerFactory.CreateLogger("Trading.Web.LiveOrderEndpoint"),
+            exception);
+        return Results.Json(
+            new
+            {
+                error = "Unknown",
+                message = "The live order could not be recorded reliably. It may or may not exist at Kraken. Do not submit it again; check Orders and reconcile it first.",
+                action = "Do not resubmit this order."
+            },
+            statusCode: StatusCodes.Status202Accepted);
+    }
 
     if (result.Outcome == LiveTradeOutcome.Unknown)
     {

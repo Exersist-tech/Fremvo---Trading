@@ -576,7 +576,7 @@
 
     try {
       var response = await fetch('/api/marketdata/pairs', { headers: { 'Accept': 'application/json' } });
-      var payload = await response.json();
+      var payload = await readJsonResponse(response);
 
       if (!response.ok) {
         setStatus(payload && payload.message ? payload.message : 'The pair list could not be loaded.', true);

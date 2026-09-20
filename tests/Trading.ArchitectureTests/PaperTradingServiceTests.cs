@@ -164,6 +164,17 @@ public sealed class PaperTradingServiceTests
     }
 
     [Fact]
+    public async Task AGeneratedPaperClientOrderIdFitsTheDurableColumn()
+    {
+        var harness = FreshMarket();
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.Order!.ClientOrderId.Length <= Order.MaximumClientOrderIdLength);
+    }
+
+    [Fact]
     public async Task ALivePositionOnTheSamePairDoesNotBlockAPaperOrder()
     {
         var harness = FreshMarket();
