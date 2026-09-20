@@ -23,7 +23,8 @@ public sealed record ExperimentProtectiveExitPosition(
     decimal EntryPrice,
     DateTimeOffset OpenedAtUtc,
     decimal? StopLossPrice,
-    decimal? TakeProfitPrice);
+    decimal? TakeProfitPrice,
+    ExperimentWorker? Worker = null);
 
 public interface IExperimentProtectiveExitPositionSource
 {
@@ -215,7 +216,7 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
                     return results;
                 }
 
-                var worker = CreateWorkerView(position);
+                var worker = position.Worker ?? CreateWorkerView(position);
                 var context = new ExperimentPaperWorkerContext(
                     worker,
                     new ExperimentWorkerPortfolioSnapshot(position.UserId, position.WorkerId, position.Quantity, asOfUtc),

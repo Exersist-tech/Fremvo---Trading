@@ -67,12 +67,14 @@ public sealed class ExperimentProtectiveExitWorkerTests
         var ownerTwo = Guid.NewGuid();
         var evaluator = new RecordingOwnerEvaluator(ownerOne);
         using var disabled = new ProtectiveExitWorker(NullLogger<ProtectiveExitWorker>.Instance, evaluator,
+            new ActiveOwners(ownerOne, ownerTwo),
             Options.Create(new ExperimentProtectiveExitWorkerOptions { Enabled = false, EnabledUserIds = { ownerOne } }),
             new FixedTimeProvider(Now));
         Assert.Equal(0, await disabled.RunTickAsync());
         Assert.Empty(evaluator.Owners);
 
         using var enabled = new ProtectiveExitWorker(NullLogger<ProtectiveExitWorker>.Instance, evaluator,
+            new ActiveOwners(ownerOne, ownerTwo),
             Options.Create(new ExperimentProtectiveExitWorkerOptions { Enabled = true, EnabledUserIds = { ownerOne, ownerTwo } }),
             new FixedTimeProvider(Now));
         await enabled.RunTickAsync();
@@ -81,10 +83,25 @@ public sealed class ExperimentProtectiveExitWorkerTests
     }
 
     [Fact]
+    public async Task EnabledScheduleSkipsOwnersWithoutDurableTrainingActivation()
+    {
+        var owner = Guid.NewGuid();
+        var evaluator = new RecordingOwnerEvaluator();
+        using var worker = new ProtectiveExitWorker(NullLogger<ProtectiveExitWorker>.Instance, evaluator,
+            new ActiveOwners(),
+            Options.Create(new ExperimentProtectiveExitWorkerOptions { Enabled = true, EnabledUserIds = { owner } }),
+            new FixedTimeProvider(Now));
+
+        Assert.Equal(0, await worker.RunTickAsync());
+        Assert.Empty(evaluator.Owners);
+    }
+
+    [Fact]
     public async Task CancellationPropagatesAndHostHasNoLiveOrFuturesDependencies()
     {
         var evaluator = new RecordingOwnerEvaluator();
         using var worker = new ProtectiveExitWorker(NullLogger<ProtectiveExitWorker>.Instance, evaluator,
+            new ActiveOwners(),
             Options.Create(new ExperimentProtectiveExitWorkerOptions { Enabled = true, EnabledUserIds = { Guid.NewGuid() } }),
             new FixedTimeProvider(Now));
         using var cancelled = new CancellationTokenSource();
@@ -156,6 +173,12 @@ public sealed class ExperimentProtectiveExitWorkerTests
                 throw new InvalidOperationException("isolated");
             return Task.FromResult<IReadOnlyList<ExperimentProtectiveExitEvaluationResult>>([]);
         }
+    }
+
+    private sealed class ActiveOwners(params Guid[] owners) : IPaperTrainingActivationSource
+    {
+        public Task<IReadOnlyCollection<Guid>> GetActiveOwnerIdsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyCollection<Guid>>(owners);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

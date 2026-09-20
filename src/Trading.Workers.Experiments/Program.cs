@@ -56,6 +56,7 @@ if (paperTrainingEnabled)
     builder.Services.AddSingleton<IPaperTradingLedgerRepository>(provider => provider.GetRequiredService<ScopedExperimentWorkerRepository>());
     builder.Services.AddScoped<EfExperimentDecisionLedger>();
     builder.Services.AddScoped<EfExperimentPaperExecutionLedger>();
+    builder.Services.AddScoped<EfExperimentPaperPlanEvidenceRepository>();
     builder.Services.AddSingleton<IExperimentCandleSeriesSource, ScopedDurableCandleSource>();
     builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
     // Supplemental multi-input evidence is deliberately registered only on the explicit durable
@@ -67,6 +68,7 @@ if (paperTrainingEnabled)
     builder.Services.AddSingleton<ExperimentDecisionPolicy>();
     builder.Services.AddSingleton<IPaperTrainingSizingSnapshotSource, DurablePaperTrainingSizingSnapshotSource>();
     builder.Services.AddSingleton<IExperimentPaperExecutionLedger, ScopedPaperExecutionLedger>();
+    builder.Services.AddSingleton<IExperimentPaperPlanEvidenceRepository, ScopedPaperPlanEvidenceRepository>();
     builder.Services.AddSingleton<PaperExecutionAdapter>();
     builder.Services.AddSingleton<IMarketEventRepository, InMemoryMarketEventRepository>();
     builder.Services.AddSingleton<IStrategyDecisionRepository, InMemoryStrategyDecisionRepository>();
@@ -89,14 +91,20 @@ if (paperTrainingEnabled)
             workerLedger: provider.GetRequiredService<IPaperTradingLedgerRepository>(),
             workers: provider.GetRequiredService<IExperimentWorkerRepository>()));
     builder.Services.AddSingleton<IExperimentWorkerRunner, PaperTrainingSizedExecutionRunner>();
+    builder.Services.AddSingleton<IExperimentProtectiveExitPositionSource, DurablePaperTrainingProtectiveExitPositionSource>();
+    builder.Services.AddSingleton<IExperimentProtectiveExitLedger, DurablePaperTrainingProtectiveExitLedger>();
+    builder.Services.AddSingleton<IExperimentProtectiveExitOwnerEvaluator, ExperimentProtectiveExitOrchestrator>();
 }
 
 // Protective exits have an independent, explicitly disabled schedule. This inert evaluator is
 // intentional: enabling the schedule alone cannot activate broader experiment training.
 builder.Services.Configure<ExperimentProtectiveExitWorkerOptions>(
     builder.Configuration.GetSection(ExperimentProtectiveExitWorkerOptions.SectionName));
-builder.Services.AddSingleton<IExperimentProtectiveExitPositionSource, UnconfiguredExperimentProtectiveExitPositionSource>();
-builder.Services.AddSingleton<IExperimentProtectiveExitOwnerEvaluator, UnconfiguredExperimentProtectiveExitOwnerEvaluator>();
+if (!paperTrainingEnabled)
+{
+    builder.Services.AddSingleton<IExperimentProtectiveExitPositionSource, UnconfiguredExperimentProtectiveExitPositionSource>();
+    builder.Services.AddSingleton<IExperimentProtectiveExitOwnerEvaluator, UnconfiguredExperimentProtectiveExitOwnerEvaluator>();
+}
 builder.Services.AddHostedService<ProtectiveExitWorker>();
 
 builder.Services.AddHostedService<Worker>();

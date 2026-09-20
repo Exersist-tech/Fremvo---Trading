@@ -87,12 +87,13 @@ public sealed class InMemoryExperimentPaperExecutionLedger : IExperimentPaperExe
 
 public sealed class ExperimentPaperTradeResult
 {
-    private ExperimentPaperTradeResult(bool submitted, string reason, TradePipelineResult? pipelineResult, PaperExecutionLedgerEntry? paperFill)
+    private ExperimentPaperTradeResult(bool submitted, string reason, TradePipelineResult? pipelineResult, PaperExecutionLedgerEntry? paperFill, bool workerStatePersisted)
     {
         Submitted = submitted;
         Reason = reason;
         PipelineResult = pipelineResult;
         PaperFill = paperFill;
+        WorkerStatePersisted = workerStatePersisted;
     }
 
     public bool Submitted { get; }
@@ -100,8 +101,11 @@ public sealed class ExperimentPaperTradeResult
     public TradePipelineResult? PipelineResult { get; }
     /// <summary>Fake paper-adapter result, present only after the mandatory pipeline completed.</summary>
     public PaperExecutionLedgerEntry? PaperFill { get; }
-    internal static ExperimentPaperTradeResult Skipped(string reason) => new(false, reason, null, null);
-    internal static ExperimentPaperTradeResult Processed(TradePipelineResult result, PaperExecutionLedgerEntry? paperFill) => new(true, string.Empty, result, paperFill);
+    /// <summary>True when the orchestrator durably applied the fill to the supplied worker.</summary>
+    public bool WorkerStatePersisted { get; }
+    internal static ExperimentPaperTradeResult Skipped(string reason) => new(false, reason, null, null, false);
+    internal static ExperimentPaperTradeResult Processed(TradePipelineResult result, PaperExecutionLedgerEntry? paperFill, bool workerStatePersisted) =>
+        new(true, string.Empty, result, paperFill, workerStatePersisted);
 }
 
 /// <summary>
@@ -213,6 +217,7 @@ public sealed class PaperExperimentTradeOrchestrator
             throw;
         }
 
+        var workerStatePersisted = false;
         if (result.Executed && _workerLedger is not null && _workers is not null)
         {
             var fill = _paperAdapter.Ledger.LastOrDefault(entry => entry.ExecutionCommandId == result.ExecutionCommandId);
@@ -230,6 +235,7 @@ public sealed class PaperExperimentTradeOrchestrator
                 context.Worker.Ledger.Last(),
                 cancellationToken).ConfigureAwait(false);
             await _workers.SaveAsync(context.Worker, cancellationToken).ConfigureAwait(false);
+            workerStatePersisted = true;
         }
 
         var status = result.RequiresReconciliation ? ExperimentPaperExecutionStatus.Unknown
@@ -242,7 +248,7 @@ public sealed class PaperExperimentTradeOrchestrator
         var paperFill = result.Executed && result.ExecutionCommandId is Guid executionCommandId
             ? _paperAdapter.Ledger.SingleOrDefault(entry => entry.ExecutionCommandId == executionCommandId)
             : null;
-        return ExperimentPaperTradeResult.Processed(result, paperFill);
+        return ExperimentPaperTradeResult.Processed(result, paperFill, workerStatePersisted);
     }
 
     private static PortfolioSnapshot ToPipelinePortfolio(ExperimentWorkerPortfolioSnapshot portfolio) =>

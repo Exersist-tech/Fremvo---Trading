@@ -68,6 +68,10 @@ scheduler prerequisites, configure the worker explicitly:
         "OutputLedger": true,
         "ProtectiveScheduler": true
       }
+    },
+    "ProtectiveExits": {
+      "Enabled": true,
+      "EnabledUserIds": [ "PUT-THE-SAME-OWNER-GUID-HERE" ]
     }
   }
 }
@@ -88,6 +92,15 @@ worker only after the mandatory paper pipeline has completed. Re-reading a
 worker replays its immutable ledger, so balances and positions are
 deterministic across restarts. It never registers a live/futures adapter,
 exchange client, credentials, or network dependency.
+
+Protective exits remain independently disabled unless `ProtectiveExits:Enabled`
+is set. When it is enabled alongside paper training, the scheduler intersects
+its configured owners with the durable active-training approvals. It reads an
+open replayed paper worker and its immutable approved-plan stop/target evidence,
+then only submits an exact closed-candle trigger through the durable
+decision-claim and paper pipeline. Missing, stale, malformed, or unapproved
+evidence is a no-op; a completed close is appended to the worker's durable
+paper ledger, so its balance and position replay correctly after restart.
 
 ## Opt-in Kraken Live Proving profile
 

@@ -55,17 +55,20 @@ public sealed class ProtectiveExitWorker : BackgroundService
 
     private readonly ILogger<ProtectiveExitWorker> _logger;
     private readonly IExperimentProtectiveExitOwnerEvaluator _orchestrator;
+    private readonly IPaperTrainingActivationSource _activations;
     private readonly ExperimentProtectiveExitWorkerOptions _options;
     private readonly TimeProvider _timeProvider;
 
     public ProtectiveExitWorker(
         ILogger<ProtectiveExitWorker> logger,
         IExperimentProtectiveExitOwnerEvaluator orchestrator,
+        IPaperTrainingActivationSource activations,
         IOptions<ExperimentProtectiveExitWorkerOptions> options,
         TimeProvider timeProvider)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
+        _activations = activations ?? throw new ArgumentNullException(nameof(activations));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
@@ -91,8 +94,10 @@ public sealed class ProtectiveExitWorker : BackgroundService
         if (!_options.Enabled)
             return 0;
 
+        cancellationToken.ThrowIfCancellationRequested();
         var submitted = 0;
-        foreach (var owner in _options.EnabledUserIds.Distinct())
+        var activeOwners = await _activations.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var owner in _options.EnabledUserIds.Intersect(activeOwners).Distinct())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (owner == Guid.Empty)

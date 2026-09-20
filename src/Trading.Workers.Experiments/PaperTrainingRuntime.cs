@@ -96,6 +96,136 @@ public sealed class ScopedPaperExecutionLedger : IExperimentPaperExecutionLedger
         }
 }
 
+public sealed class ScopedPaperPlanEvidenceRepository : IExperimentPaperPlanEvidenceRepository
+{
+    private readonly IServiceScopeFactory _scopes;
+    public ScopedPaperPlanEvidenceRepository(IServiceScopeFactory scopes) => _scopes = scopes ?? throw new ArgumentNullException(nameof(scopes));
+    public async Task SaveAsync(ExperimentPaperPlanEvidence evidence, CancellationToken cancellationToken = default)
+    {
+        using var scope = _scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<EfExperimentPaperPlanEvidenceRepository>().SaveAsync(evidence, cancellationToken).ConfigureAwait(false);
+    }
+    public async Task<IReadOnlyList<ExperimentPaperPlanEvidence>> ListAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default)
+    {
+        using var scope = _scopes.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<EfExperimentPaperPlanEvidenceRepository>().ListAsync(userId, workerId, cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>Builds exits only from a replayed open paper position and its immutable approved plan.</summary>
+public sealed class DurablePaperTrainingProtectiveExitPositionSource : IExperimentProtectiveExitPositionSource
+{
+    private readonly IExperimentWorkerRepository _workers;
+    private readonly IExperimentPaperPlanEvidenceRepository _plans;
+
+    public DurablePaperTrainingProtectiveExitPositionSource(
+        IExperimentWorkerRepository workers,
+        IExperimentPaperPlanEvidenceRepository plans) => (_workers, _plans) = (
+            workers ?? throw new ArgumentNullException(nameof(workers)),
+            plans ?? throw new ArgumentNullException(nameof(plans)));
+
+    public async Task<IReadOnlyList<ExperimentProtectiveExitPosition>> ListOpenAsync(Guid userId, CancellationToken cancellationToken = default)
+    {
+        if (userId == Guid.Empty)
+            return [];
+
+        var positions = new List<ExperimentProtectiveExitPosition>();
+        foreach (var worker in await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (worker.UserId != userId || worker.Status != ExperimentWorkerStatus.Running || worker.PositionQuantity <= 0m)
+                continue;
+
+            var openedAt = CurrentPositionOpenedAt(worker);
+            if (openedAt is null)
+                continue;
+            var plan = (await _plans.ListAsync(userId, worker.Id, cancellationToken).ConfigureAwait(false))
+                .Where(candidate => candidate.DecisionKey.Symbol.Equals(worker.MarketSymbol, StringComparison.OrdinalIgnoreCase)
+                    && candidate.DecisionKey.AsOfUtc <= openedAt.Value
+                    && candidate.ProtectiveStopPrice > 0m)
+                .OrderByDescending(candidate => candidate.DecisionKey.AsOfUtc)
+                .ThenByDescending(candidate => candidate.RecordedAtUtc)
+                .FirstOrDefault();
+            if (plan is null)
+                continue;
+
+            positions.Add(new ExperimentProtectiveExitPosition(userId, worker.Id, PositionId(plan.DecisionKey),
+                worker.MarketSymbol, worker.PositionQuantity, worker.AverageEntryPrice, openedAt.Value,
+                plan.ProtectiveStopPrice, plan.ConservativeTargetPrice, worker));
+        }
+        return positions;
+    }
+
+    private static DateTimeOffset? CurrentPositionOpenedAt(ExperimentWorker worker)
+    {
+        var quantity = 0m;
+        DateTimeOffset? opened = null;
+        foreach (var entry in worker.Ledger.OrderBy(value => value.OccurredAtUtc).ThenBy(value => value.Id))
+        {
+            if (entry.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
+            {
+                if (quantity == 0m)
+                    opened = entry.OccurredAtUtc;
+                quantity += entry.Quantity;
+            }
+            else if (entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase))
+            {
+                quantity -= entry.Quantity;
+                if (quantity == 0m)
+                    opened = null;
+            }
+        }
+        return quantity == worker.PositionQuantity && quantity > 0m ? opened : null;
+    }
+
+    private static Guid PositionId(ExperimentDecisionKey key)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{key.UserId:D}|{key.WorkerId:D}|{key.StrategyFingerprint}|{key.OpenTimeUtc:O}|{key.CloseTimeUtc:O}|{key.AsOfUtc:O}"));
+        return new Guid(bytes[..16]);
+    }
+}
+
+/// <summary>Maps a protective-exit identity onto the durable paper execution claim store.</summary>
+public sealed class DurablePaperTrainingProtectiveExitLedger : IExperimentProtectiveExitLedger
+{
+    private const string ClaimStrategy = "experiment-protective-exit-claim";
+    private readonly IExperimentPaperExecutionLedger _ledger;
+
+    public DurablePaperTrainingProtectiveExitLedger(IExperimentPaperExecutionLedger ledger) =>
+        _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
+
+    public async Task<ExperimentProtectiveExitClaimResult> ClaimAsync(ExperimentProtectiveExitKey key, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        var association = Association(key, ExperimentPaperExecutionStatus.Claimed, null);
+        var result = await _ledger.ClaimAsync(key.UserId, association, cancellationToken).ConfigureAwait(false);
+        return result.Result switch
+        {
+            ExperimentPaperExecutionClaimResult.Claimed => ExperimentProtectiveExitClaimResult.Claimed,
+            ExperimentPaperExecutionClaimResult.Existing => ExperimentProtectiveExitClaimResult.Existing,
+            _ => ExperimentProtectiveExitClaimResult.Conflict
+        };
+    }
+
+    public Task CompleteAsync(ExperimentProtectiveExitKey key, ExperimentPaperExecutionStatus status, string detail, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return _ledger.CompleteAsync(key.UserId, Association(key, status, detail), cancellationToken);
+    }
+
+    private static ExperimentPaperExecutionAssociation Association(
+        ExperimentProtectiveExitKey key, ExperimentPaperExecutionStatus status, string? detail)
+    {
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{key.PositionId:D}|{key.ProtectiveExitIdentity}")));
+        var decision = new ExperimentDecisionKey(key.UserId, key.WorkerId, 0, ExperimentResearchGroup.A,
+            ClaimStrategy, 1, fingerprint, "protective-exit", CandleInterval.OneMinute,
+            key.CandleCloseTimeUtc.AddMinutes(-1), key.CandleCloseTimeUtc, key.CandleCloseTimeUtc);
+        return new(decision, $"paper-protective-exit-{fingerprint}", status, null, detail);
+    }
+}
+
 /// <summary>
 /// Creates the fixed catalog workers and immutable approved-paper configuration only after the
 /// durable activation source has selected an owner. No browser input is used here.

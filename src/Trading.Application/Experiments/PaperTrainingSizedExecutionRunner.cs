@@ -25,6 +25,25 @@ public interface IPaperTrainingSizingSnapshotSource
 }
 
 /// <summary>
+/// Immutable approved-plan evidence retained for every accepted opening proposal. Protective
+/// exits consume this record instead of recalculating levels from later market data.
+/// </summary>
+public sealed record ExperimentPaperPlanEvidence(
+    ExperimentDecisionKey DecisionKey,
+    decimal ProtectiveStopPrice,
+    decimal? ConservativeTargetPrice,
+    DateTimeOffset RecordedAtUtc);
+
+public interface IExperimentPaperPlanEvidenceRepository
+{
+    Task SaveAsync(ExperimentPaperPlanEvidence evidence, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ExperimentPaperPlanEvidence>> ListAsync(
+        Guid userId,
+        Guid workerId,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Integrates approved research plans with the fixed paper-only sizing and execution boundary.
 /// It owns no exchange, credentials, live route, futures adapter, or network dependency.
 /// </summary>
@@ -38,6 +57,7 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
     private readonly PaperExperimentTradeOrchestrator _paper;
     private readonly IExperimentWorkerRepository _workers;
     private readonly IPaperTradingLedgerRepository _ledger;
+    private readonly IExperimentPaperPlanEvidenceRepository _plans;
     private readonly TimeProvider _time;
 
     public PaperTrainingSizedExecutionRunner(
@@ -49,6 +69,7 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         PaperExperimentTradeOrchestrator paper,
         IExperimentWorkerRepository workers,
         IPaperTradingLedgerRepository ledger,
+        IExperimentPaperPlanEvidenceRepository plans,
         TimeProvider time)
     {
         _analysis = analysis ?? throw new ArgumentNullException(nameof(analysis));
@@ -59,6 +80,7 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         _paper = paper ?? throw new ArgumentNullException(nameof(paper));
         _workers = workers ?? throw new ArgumentNullException(nameof(workers));
         _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
+        _plans = plans ?? throw new ArgumentNullException(nameof(plans));
         _time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
@@ -94,6 +116,8 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         var decision = await _decisions.DecideAsync(worker, configuration, assignment, observation, snapshot.Context.Portfolio, identity, cancellationToken).ConfigureAwait(false);
         if (decision.Proposal.Action != ExperimentProposalAction.Open)
             return;
+        await _plans.SaveAsync(new ExperimentPaperPlanEvidence(
+            decision.Key, snapshot.Plan.ProtectiveStopPrice, snapshot.Plan.ConservativeTargetPrice, now), cancellationToken).ConfigureAwait(false);
 
         var fill = snapshot.WorkerRiskRequest.ProposedFill;
         if (fill is null || fill.RequestedQuantity != sized.Quantity || fill.ReferencePrice != snapshot.Plan.EntryReferencePrice)
@@ -106,11 +130,14 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         if (result.PipelineResult?.Executed != true || result.PaperFill is null)
             return;
 
-        var adapterFill = result.PaperFill;
-        worker.ApplyPaperTrade(adapterFill.Quantity, adapterFill.Price, adapterFill.Fees,
-            adapterFill.Direction == Trading.Domain.Execution.TradeDirection.Buy ? "buy" : "sell", adapterFill.ExecutedAtUtc);
-        await _ledger.AddAsync(worker.UserId, worker.Ledger.Last(), cancellationToken).ConfigureAwait(false);
-        await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
+        if (!result.WorkerStatePersisted)
+        {
+            var adapterFill = result.PaperFill;
+            worker.ApplyPaperTrade(adapterFill.Quantity, adapterFill.Price, adapterFill.Fees,
+                adapterFill.Direction == Trading.Domain.Execution.TradeDirection.Buy ? "buy" : "sell", adapterFill.ExecutedAtUtc);
+            await _ledger.AddAsync(worker.UserId, worker.Ledger.Last(), cancellationToken).ConfigureAwait(false);
+            await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static bool IsExactPlan(PaperExecutionPlan plan, ExperimentWorker worker, ExperimentDecisionEvidence evidence, ExperimentPaperCandleSnapshot candle)

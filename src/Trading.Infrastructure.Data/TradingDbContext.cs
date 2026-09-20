@@ -42,6 +42,7 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedHistoricalDataset> HistoricalDatasets => Set<PersistedHistoricalDataset>();
     public DbSet<PersistedExperimentDecisionRecord> ExperimentDecisionRecords => Set<PersistedExperimentDecisionRecord>();
     public DbSet<PersistedExperimentPaperExecutionAssociation> ExperimentPaperExecutionAssociations => Set<PersistedExperimentPaperExecutionAssociation>();
+    public DbSet<PersistedExperimentPaperPlanEvidence> ExperimentPaperPlanEvidence => Set<PersistedExperimentPaperPlanEvidence>();
     public DbSet<PersistedExperimentResultSnapshot> ExperimentResultSnapshots => Set<PersistedExperimentResultSnapshot>();
     public DbSet<PersistedPaperTrainingActivation> PaperTrainingActivations => Set<PersistedPaperTrainingActivation>();
     public DbSet<PersistedExperimentWorker> ExperimentWorkers => Set<PersistedExperimentWorker>();
@@ -290,6 +291,19 @@ public sealed class TradingDbContext : DbContext
             entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
             entity.Property(x => x.CorrelationId).HasMaxLength(128).IsRequired();
             entity.Property(x => x.Detail).HasMaxLength(1024).IsRequired(false);
+            entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
+        });
+
+        modelBuilder.Entity<PersistedExperimentPaperPlanEvidence>(entity =>
+        {
+            entity.ToTable("ExperimentPaperPlanEvidence");
+            entity.HasKey(x => new { x.UserId, x.WorkerId, x.GroupConfigurationVersion, x.Group, x.StrategyId, x.StrategyVersion,
+                x.StrategyFingerprint, x.Symbol, x.Interval, x.OpenTimeUtc, x.CloseTimeUtc, x.AsOfUtc });
+            entity.Property(x => x.StrategyId).HasMaxLength(128).IsRequired();
+            entity.Property(x => x.StrategyFingerprint).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.ProtectiveStopPrice).HasColumnType(MoneyColumnType);
+            entity.Property(x => x.ConservativeTargetPrice).HasColumnType(MoneyColumnType);
             entity.HasIndex(x => new { x.UserId, x.WorkerId, x.AsOfUtc });
         });
 
