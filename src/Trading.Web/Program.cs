@@ -116,8 +116,22 @@ builder.Services
         options.ExpireTimeSpan = TimeSpan.FromHours(8);
 
         // API callers get a status code rather than a redirect to a sign-in page.
+        // A browser navigating to a page is sent to the sign-in form instead, so
+        // an unauthenticated person lands somewhere they can act on rather than
+        // on an empty error. This changes presentation only: the route itself is
+        // still refused, and nothing becomes reachable without a session.
         options.Events.OnRedirectToLogin = context =>
         {
+            if (WantsHtmlPage(context.Request))
+            {
+                // The return path is passed as a relative path only. Echoing an
+                // absolute URL here would turn the sign-in page into an open
+                // redirect that could bounce a user to an attacker's site.
+                var returnPath = context.Request.Path.HasValue ? context.Request.Path.Value! : "/";
+                context.Response.Redirect("/account?returnUrl=" + Uri.EscapeDataString(returnPath));
+                return Task.CompletedTask;
+            }
+
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return Task.CompletedTask;
         };
@@ -127,6 +141,12 @@ builder.Services
             return Task.CompletedTask;
         };
     });
+
+static bool WantsHtmlPage(HttpRequest request) =>
+    !request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+    && HttpMethods.IsGet(request.Method)
+    && request.Headers.Accept.Any(value =>
+        value is not null && value.Contains("text/html", StringComparison.OrdinalIgnoreCase));
 
 builder.Services.AddAuthorization();
 
@@ -2157,6 +2177,17 @@ app.MapGet("/account", () => Results.Content(
           });
           report(result.ok ? 'Signed in.' : 'Sign in failed.');
           document.getElementById('login-password').value = '';
+
+          if (result.ok) {
+            // Return to the page that required sign-in. Only a same-site
+            // relative path is honoured, so a crafted returnUrl cannot bounce
+            // the signed-in user to another origin.
+            var requested = new URLSearchParams(window.location.search).get('returnUrl');
+            var safe = requested && requested.charAt(0) === '/' && requested.charAt(1) !== '/'
+              ? requested
+              : '/';
+            window.location.assign(safe);
+          }
         });
 
         document.getElementById('register-form').addEventListener('submit', async function (event) {
