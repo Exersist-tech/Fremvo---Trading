@@ -91,7 +91,19 @@ public sealed class ApprovedExperimentStrategyRegistry
         _evaluators.Values.Select(evaluator => evaluator.Definition).ToArray();
 
     public static ApprovedExperimentStrategyRegistry CreatePlatformDefault() =>
-        new(new IApprovedExperimentStrategyEvaluator[] { new SmaTrendExperimentEvaluator() });
+        new(new IApprovedExperimentStrategyEvaluator[]
+        {
+            new EmaTrendContinuationExperimentAdapter(),
+            new DonchianBreakoutEnsembleExperimentAdapter(),
+            new BollingerMeanReversionExperimentAdapter(),
+            new RsiPullbackExperimentAdapter(),
+            new MacdVolumeAccelerationExperimentAdapter(),
+            new VolatilityCompressionBreakoutExperimentAdapter(),
+            new SurvivorshipAwareMomentumRotationExperimentAdapter(),
+            new RelativeStrengthPullbackRotationExperimentAdapter(),
+            new SessionConditionedBreakoutExperimentAdapter(),
+            new RegimeSwitchingEnsembleExperimentAdapter()
+        });
 
     internal bool TryResolve(StrategyTemplateVersionIdentity identity, out IApprovedExperimentStrategyEvaluator? evaluator) =>
         _evaluators.TryGetValue((identity.TemplateId, identity.Version), out evaluator);
@@ -114,68 +126,76 @@ internal interface IApprovedExperimentStrategyEvaluator
     ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson);
 }
 
-internal sealed class SmaTrendExperimentEvaluator : IApprovedExperimentStrategyEvaluator
+/// <summary>
+/// Phase 5B adapters deliberately accept only the immutable, already-admitted single candle
+/// series. None manufacture universe, session, classifier, component, or additional timeframe
+/// evidence; their corresponding model remains unavailable until that exact evidence is supplied
+/// through a future approved source.
+/// </summary>
+internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEvaluator
 {
-    private const string Schema = """{"fastPeriod":"positive integer","slowPeriod":"positive integer"}""";
-    private const string Content = "experiment-sma-trend-v1";
+    protected Phase5BExperimentAdapter(string familyId, string schemaId, string requiredEvidence)
+    {
+        Definition = new ApprovedExperimentStrategyDefinition(
+            familyId, 1, schemaId, 1, Fingerprint($"{familyId}|approved-parameters-v1"),
+            Fingerprint($"{familyId}|phase-5b-adapter-v1"));
+        RequiredEvidence = requiredEvidence;
+    }
 
-    public ApprovedExperimentStrategyDefinition Definition { get; } = new(
-        "experiment-sma-trend",
-        1,
-        "experiment-sma-trend-parameters",
-        1,
-        Fingerprint(Schema),
-        Fingerprint(Content));
+    public ApprovedExperimentStrategyDefinition Definition { get; }
+    private string RequiredEvidence { get; }
 
     public ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
-        if (!TryParseParameters(parametersJson, out var fastPeriod, out var slowPeriod))
-        {
-            return ExperimentAnalysisResult.Blocked("Parameters do not exactly match the approved evaluator schema.");
-        }
-
-        if (series.Candles.Count < slowPeriod)
-        {
-            return ExperimentAnalysisResult.NoCondition("The approved closed-candle history is insufficient.");
-        }
-
-        var closes = series.Candles.Select(candle => candle.Close).ToArray();
-        var fast = closes[^fastPeriod..].Average();
-        var slow = closes[^slowPeriod..].Average();
-        return fast == slow
-            ? ExperimentAnalysisResult.NoCondition("The approved moving averages are equal.")
-            : ExperimentAnalysisResult.Analyzed(fast > slow ? "Fast average is above slow average." : "Fast average is below slow average.", fast - slow);
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        return ExperimentAnalysisResult.Blocked(
+            $"Approved {Definition.FamilyId} input is unavailable: {RequiredEvidence}. No substitute input or family is used.");
     }
 
-    private static bool TryParseParameters(string json, out int fastPeriod, out int slowPeriod)
-    {
-        fastPeriod = 0;
-        slowPeriod = 0;
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Object
-                || document.RootElement.EnumerateObject().Count() != 2
-                || !document.RootElement.TryGetProperty("fastPeriod", out var fast)
-                || !document.RootElement.TryGetProperty("slowPeriod", out var slow)
-                || fast.ValueKind != JsonValueKind.Number
-                || slow.ValueKind != JsonValueKind.Number
-                || !fast.TryGetInt32(out fastPeriod)
-                || !slow.TryGetInt32(out slowPeriod))
-            {
-                return false;
-            }
-
-            return fastPeriod > 0 && slowPeriod > fastPeriod;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static string Fingerprint(string value) =>
+    protected static string Fingerprint(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+}
+
+internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentAdapter
+{
+    public EmaTrendContinuationExperimentAdapter() : base("platform.ema-trend-continuation", "ema-trend-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperimentAdapter
+{
+    public DonchianBreakoutEnsembleExperimentAdapter() : base("platform.donchian-breakout-ensemble", "donchian-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimentAdapter
+{
+    public BollingerMeanReversionExperimentAdapter() : base("platform.bollinger-mean-reversion", "bollinger-mean-reversion-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
+{
+    public RsiPullbackExperimentAdapter() : base("platform.rsi-pullback", "rsi-pullback-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimentAdapter
+{
+    public MacdVolumeAccelerationExperimentAdapter() : base("platform.macd-volume", "macd-volume-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BExperimentAdapter
+{
+    public VolatilityCompressionBreakoutExperimentAdapter() : base("platform.volatility-compression-breakout", "volatility-compression-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+}
+internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase5BExperimentAdapter
+{
+    public SurvivorshipAwareMomentumRotationExperimentAdapter() : base("platform.cross-sectional-momentum-rotation", "cross-sectional-momentum-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
+}
+internal sealed class RelativeStrengthPullbackRotationExperimentAdapter : Phase5BExperimentAdapter
+{
+    public RelativeStrengthPullbackRotationExperimentAdapter() : base("platform.relative-strength-pullback-rotation", "relative-strength-pullback-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
+}
+internal sealed class SessionConditionedBreakoutExperimentAdapter : Phase5BExperimentAdapter
+{
+    public SessionConditionedBreakoutExperimentAdapter() : base("platform.session-conditioned-breakout", "session-conditioned-breakout-parameters", "approved session profile and regime, signal, and execution timeframe series") { }
+}
+internal sealed class RegimeSwitchingEnsembleExperimentAdapter : Phase5BExperimentAdapter
+{
+    public RegimeSwitchingEnsembleExperimentAdapter() : base("platform.regime-switching-ensemble", "regime-switching-ensemble-parameters", "approved classifier output and component observations") { }
 }
 
 /// <summary>

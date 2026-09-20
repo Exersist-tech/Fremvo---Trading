@@ -17,6 +17,19 @@ public sealed class PaperExperimentWorkerRunnerTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
     private static readonly Guid InstrumentId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private static readonly string[] ExpectedPhase5BFamilies =
+    [
+        "platform.ema-trend-continuation",
+        "platform.donchian-breakout-ensemble",
+        "platform.bollinger-mean-reversion",
+        "platform.rsi-pullback",
+        "platform.macd-volume",
+        "platform.volatility-compression-breakout",
+        "platform.cross-sectional-momentum-rotation",
+        "platform.relative-strength-pullback-rotation",
+        "platform.session-conditioned-breakout",
+        "platform.regime-switching-ensemble"
+    ];
 
     private sealed class FixedCandleSource : IExperimentCandleSeriesSource
     {
@@ -30,30 +43,33 @@ public sealed class PaperExperimentWorkerRunnerTests
     }
 
     [Fact]
-    public async Task KnownApprovedFamilyEvaluatesDeterministicallyWithoutChangingWorkerState()
+    public async Task EveryPhase5BFamilyResolvesToItsOwnInputBlockedAdapterWithoutChangingWorkerState()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
-        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
-        var configuration = Configuration(worker, registry.Definitions.Single());
-        var assignment = configuration.Assignments.Single();
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
 
-        var first = await runner.AnalyzeAsync(worker, configuration, assignment, Now);
-        var second = await runner.AnalyzeAsync(worker, configuration, assignment, Now);
+        Assert.Equal(ExpectedPhase5BFamilies.OrderBy(value => value), registry.Definitions.Select(value => value.FamilyId).OrderBy(value => value));
+        foreach (var definition in registry.Definitions)
+        {
+            var worker = Worker("{}", definition.FamilyId);
+            var configuration = Configuration(worker, definition);
+            var first = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
+            var second = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
 
-        Assert.Equal(ExperimentAnalysisOutcome.Analyzed, first.Outcome);
-        Assert.Equal(first.Outcome, second.Outcome);
-        Assert.Equal(first.Reason, second.Reason);
-        Assert.Equal(first.Value, second.Value);
-        Assert.Equal(0m, worker.PositionQuantity);
-        Assert.Empty(worker.Ledger);
+            Assert.Equal(ExperimentAnalysisOutcome.Blocked, first.Outcome);
+            Assert.Equal(first.Outcome, second.Outcome);
+            Assert.Equal(first.Reason, second.Reason);
+            Assert.Contains(definition.FamilyId, first.Reason, StringComparison.Ordinal);
+            Assert.Equal(0m, worker.PositionQuantity);
+            Assert.Empty(worker.Ledger);
+        }
     }
 
     [Fact]
     public async Task UnknownFamilyAndVersionOrParameterMismatchAreExplicitlyBlocked()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
-        var definition = registry.Definitions.Single();
+        var definition = registry.Definitions.First();
         var unknownWorker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", "not-platform-owned", "BTC/USD", 1_000m, Now, 1);
         unknownWorker.UpdateStrategyParameters("""{"fastPeriod":2,"slowPeriod":3}""");
         unknownWorker.Start();
@@ -61,7 +77,7 @@ public sealed class PaperExperimentWorkerRunnerTests
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
 
         var unknownResult = await runner.AnalyzeAsync(unknownWorker, unknown, unknown.Assignments.Single(), Now);
-        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
+        var worker = Worker("{}", definition.FamilyId);
         var matching = Configuration(worker, definition);
         worker.UpdateStrategyParameters("""{"fastPeriod":3,"slowPeriod":4}""");
         var mismatchResult = await runner.AnalyzeAsync(worker, matching, matching.Assignments.Single(), Now);
@@ -76,12 +92,13 @@ public sealed class PaperExperimentWorkerRunnerTests
     public async Task RejectedGateAndForeignGroupAreExplicitlyBlocked()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
-        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
-        var rejected = Configuration(worker, registry.Definitions.Single(), acceptedGate: false);
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var rejected = Configuration(worker, definition, acceptedGate: false);
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
 
         var rejectedResult = await runner.AnalyzeAsync(worker, rejected, rejected.Assignments.Single(), Now);
-        var otherWorker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
+        var otherWorker = Worker("{}", definition.FamilyId);
         var foreignResult = await runner.AnalyzeAsync(otherWorker, rejected, rejected.Assignments.Single(), Now);
 
         Assert.Equal(ExperimentAnalysisOutcome.Blocked, rejectedResult.Outcome);
@@ -95,7 +112,7 @@ public sealed class PaperExperimentWorkerRunnerTests
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
 
-        Assert.Single(registry.Definitions);
+        Assert.Equal(10, registry.Definitions.Count);
         Assert.DoesNotContain(typeof(ApprovedExperimentStrategyRegistry).GetMethods(), method =>
             method.Name.Contains("Register", StringComparison.OrdinalIgnoreCase)
             || method.GetParameters().Any(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));
@@ -105,8 +122,9 @@ public sealed class PaperExperimentWorkerRunnerTests
     public async Task AttestedObservationsMapDeterministicallyAndNeverAddExposure()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
-        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
-        var configuration = Configuration(worker, registry.Definitions.Single());
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(worker, definition);
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(AvailableSeries()), registry);
         var analysis = await runner.AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
         var series = AvailableSeries().Series!;
@@ -121,7 +139,7 @@ public sealed class PaperExperimentWorkerRunnerTests
         var existingExposure = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis,
             snapshot with { PositionQuantity = 1m }, identity);
 
-        Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
+        Assert.Equal(ExperimentProposalAction.Neutral, first.Proposal.Action);
         Assert.Equal(first, repeated);
         Assert.Equal(ExperimentProposalAction.Neutral, existingExposure.Proposal.Action);
         Assert.DoesNotContain(Enum.GetNames<ExperimentProposalAction>(), action => action.Equals("Add", StringComparison.OrdinalIgnoreCase));
@@ -132,8 +150,9 @@ public sealed class PaperExperimentWorkerRunnerTests
     public async Task NoConditionIsNeutralAndUnattestedOrMismatchedEvidenceIsRejected()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
-        var worker = Worker("""{"fastPeriod":2,"slowPeriod":3}""");
-        var configuration = Configuration(worker, registry.Definitions.Single());
+        var definition = registry.Definitions.First();
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(worker, definition);
         var now = Now;
         var flat = new Candle("BTC/USD", CandleInterval.OneHour, now.AddHours(-1), now, 100m, 100m, 100m, 100m, 1m, true, false);
         var runner = new PaperExperimentWorkerRunner(new FixedCandleSource(ExperimentCandleSeriesResult.Available(
@@ -144,7 +163,7 @@ public sealed class PaperExperimentWorkerRunnerTests
         var identity = new ExperimentClosedCandleIdentity(flat.Symbol, flat.Interval, flat.OpenTimeUtc, flat.CloseTimeUtc, now);
 
         var neutral = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), result, snapshot, identity);
-        Assert.Equal(ExperimentAnalysisOutcome.NoCondition, result.Outcome);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, result.Outcome);
         Assert.Equal(ExperimentProposalAction.Neutral, neutral.Proposal.Action);
         await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
             ExperimentAnalysisResult.Analyzed("forged", 1m), snapshot, identity));
@@ -159,9 +178,9 @@ public sealed class PaperExperimentWorkerRunnerTests
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
-    private static ExperimentWorker Worker(string parameters)
+    private static ExperimentWorker Worker(string parameters, string strategyId = "platform.ema-trend-continuation")
     {
-        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", "experiment-sma-trend", "BTC/USD", 1_000m, Now, 1);
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", strategyId, "BTC/USD", 1_000m, Now, 1);
         worker.UpdateStrategyParameters(parameters);
         worker.Start();
         return worker;

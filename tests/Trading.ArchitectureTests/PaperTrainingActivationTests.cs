@@ -9,6 +9,7 @@ public sealed class PaperTrainingActivationTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
     private static readonly string[] ExpectedAuditActions = ["PaperTrainingRequested", "PaperTrainingActivated"];
+    private static readonly int[] ExpectedGroupSizes = [4, 3, 3];
 
     [Fact]
     public async Task DefaultActivationSourceStartsNoWorkers()
@@ -68,7 +69,9 @@ public sealed class PaperTrainingActivationTests
         Assert.Equal(10, request.Slots.Count);
         Assert.All(request.Slots, slot => Assert.Equal(PaperTrainingActivationService.FixedStartingCash, slot.StartingCash));
         Assert.Equal(PaperTrainingActivationService.ApprovedSlots, request.Slots);
-        Assert.All(request.Slots, slot => Assert.Equal("experiment-sma-trend", slot.StrategyId));
+        Assert.Equal(10, request.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(ExpectedGroupSizes, request.Slots.GroupBy(slot => slot.Group).OrderBy(group => group.Key).Select(group => group.Count()));
+        Assert.All(request.Slots, slot => Assert.StartsWith("phase5b-", slot.ProvenanceId, StringComparison.Ordinal));
         Assert.All(request.Slots, slot => Assert.Equal("BTC/USD", slot.Symbol));
     }
 

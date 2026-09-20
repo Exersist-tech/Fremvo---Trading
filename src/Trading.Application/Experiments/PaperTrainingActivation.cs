@@ -18,7 +18,11 @@ public enum PaperTrainingActivationState
 /// Platform-owned worker definitions. Balances, symbols, strategies, and seeds are intentionally
 /// selected from a fixed approved catalog rather than accepted as operator input.
 /// </summary>
-public sealed record PaperTrainingWorkerSlot(int Slot, string StrategyId, string Symbol, decimal StartingCash, int Seed);
+/// <summary>Fixed platform-owned Phase 5B assignment. Parameter and provenance ids are catalog
+/// references, never browser or user supplied strategy configuration.</summary>
+public sealed record PaperTrainingWorkerSlot(
+    int Slot, ExperimentResearchGroup Group, string StrategyId, string Symbol, decimal StartingCash, int Seed,
+    string ParameterSetId, string ProvenanceId);
 
 public sealed record PaperTrainingPrerequisites(
     bool DurableClosedCandleSource,
@@ -113,16 +117,16 @@ public sealed class PaperTrainingActivationService
     public const int MaximumSlots = ExperimentWorker.MaxWorkersPerUser;
     private static readonly PaperTrainingWorkerSlot[] s_catalog =
     [
-        new(1, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104729),
-        new(2, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104759),
-        new(3, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104761),
-        new(4, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104773),
-        new(5, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104779),
-        new(6, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104789),
-        new(7, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104801),
-        new(8, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104803),
-        new(9, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104827),
-        new(10, "experiment-sma-trend", "BTC/USD", FixedStartingCash, 104831)
+        new(1, ExperimentResearchGroup.A, "platform.ema-trend-continuation", "BTC/USD", FixedStartingCash, 104729, "ema-trend-parameters@1", "phase5b-ema-v1"),
+        new(2, ExperimentResearchGroup.A, "platform.donchian-breakout-ensemble", "BTC/USD", FixedStartingCash, 104759, "donchian-breakout-parameters@1", "phase5b-donchian-v1"),
+        new(3, ExperimentResearchGroup.A, "platform.bollinger-mean-reversion", "BTC/USD", FixedStartingCash, 104761, "bollinger-mean-reversion-parameters@1", "phase5b-bollinger-v1"),
+        new(4, ExperimentResearchGroup.A, "platform.rsi-pullback", "BTC/USD", FixedStartingCash, 104773, "rsi-pullback-parameters@1", "phase5b-rsi-v1"),
+        new(5, ExperimentResearchGroup.B, "platform.macd-volume", "BTC/USD", FixedStartingCash, 104779, "macd-volume-parameters@1", "phase5b-macd-v1"),
+        new(6, ExperimentResearchGroup.B, "platform.volatility-compression-breakout", "BTC/USD", FixedStartingCash, 104789, "volatility-compression-breakout-parameters@1", "phase5b-volatility-v1"),
+        new(7, ExperimentResearchGroup.B, "platform.cross-sectional-momentum-rotation", "BTC/USD", FixedStartingCash, 104801, "cross-sectional-momentum-parameters@1", "phase5b-momentum-v1"),
+        new(8, ExperimentResearchGroup.C, "platform.relative-strength-pullback-rotation", "BTC/USD", FixedStartingCash, 104803, "relative-strength-pullback-parameters@1", "phase5b-relative-strength-v1"),
+        new(9, ExperimentResearchGroup.C, "platform.session-conditioned-breakout", "BTC/USD", FixedStartingCash, 104827, "session-conditioned-breakout-parameters@1", "phase5b-session-v1"),
+        new(10, ExperimentResearchGroup.C, "platform.regime-switching-ensemble", "BTC/USD", FixedStartingCash, 104831, "regime-switching-ensemble-parameters@1", "phase5b-regime-v1")
     ];
 
     private readonly IPaperTrainingActivationRepository _repository;
