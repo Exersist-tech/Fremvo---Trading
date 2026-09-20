@@ -151,9 +151,7 @@ public sealed class Position
         }
 
         MarkPrice = newMarkPrice;
-        UnrealizedPnl = Direction == PositionDirection.DirectionLong
-            ? (MarkPrice - EntryPrice) * Quantity
-            : (EntryPrice - MarkPrice) * Quantity;
+        RecalculateUnrealisedPnl();
     }
 
     public void Reduce(decimal quantityToReduce)
@@ -174,6 +172,33 @@ public sealed class Position
         {
             Status = PositionStatus.Flat;
         }
+
+        // Unrealised profit and loss is a function of the quantity still open,
+        // so it must be recomputed here. Leaving it untouched would report the
+        // exposure of a position size that is no longer held, overstating both
+        // gains and losses after every partial reduction.
+        RecalculateUnrealisedPnl();
+
+        // The concurrency token has to move whenever persisted state changes,
+        // otherwise a concurrent writer can overwrite this reduction.
+        Version++;
+    }
+
+    /// <summary>
+    /// Unrealised profit and loss on the quantity still open, in quote
+    /// currency. A flat position has no exposure and therefore none.
+    /// </summary>
+    private void RecalculateUnrealisedPnl()
+    {
+        if (Quantity == 0m)
+        {
+            UnrealizedPnl = 0m;
+            return;
+        }
+
+        UnrealizedPnl = Direction == PositionDirection.DirectionLong
+            ? (MarkPrice - EntryPrice) * Quantity
+            : (EntryPrice - MarkPrice) * Quantity;
     }
 
     public void Liquidate()

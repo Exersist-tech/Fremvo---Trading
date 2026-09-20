@@ -182,6 +182,15 @@ tbody tr:last-child td { border-bottom: none; }
   font-size: 0.85rem;
 }
 
+.toolbar .spacer {
+  flex: 1 1 auto;
+}
+
+#chart {
+  cursor: crosshair;
+  touch-action: none;
+}
+
 .toolbar input, .toolbar select {
   background: var(--panel);
   color: var(--text);

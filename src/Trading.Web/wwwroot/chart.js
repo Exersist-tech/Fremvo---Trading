@@ -24,9 +24,16 @@
     candles: [],
     positions: [],
     orders: [],
+    pairs: [],
     symbol: '',
-    interval: ''
+    interval: '',
+    // View window over the candle series. barCount is how many bars are drawn;
+    // rightOffset is how many bars back from the newest the window ends.
+    barCount: 160,
+    rightOffset: 0
   };
+
+  var MIN_BARS = 12;
 
   function $(id) { return document.getElementById(id); }
 
@@ -48,6 +55,12 @@
     // The user's own locale and zone. Times are transported as UTC; only the
     // presentation is localised.
     return d.toLocaleString();
+  }
+
+  function formatSigned(value) {
+    var n = Number(value);
+    if (!isFinite(n)) { return String(value); }
+    return (n > 0 ? '+' : '') + formatPrice(n);
   }
 
   function draw() {
@@ -78,11 +91,20 @@
     var priceBottom = cssHeight - axisHeight - volumeHeight - 8;
     var plotWidth = cssWidth - padLeft - padRight;
 
-    // Show the most recent bars that fit rather than squeezing the whole
-    // series into unreadable slivers.
-    var minSlot = 3;
-    var maxBars = Math.max(10, Math.floor(plotWidth / minSlot));
-    var visible = candles.slice(Math.max(0, candles.length - maxBars));
+    // The visible window is chosen by the user through zoom and pan. It is
+    // clamped to the series so panning can never scroll past the data and
+    // present an empty chart as if the market had no prices.
+    var maxBars = Math.max(MIN_BARS, Math.floor(plotWidth / 2));
+    var barCount = Math.min(Math.max(MIN_BARS, Math.round(state.barCount)), Math.min(maxBars, candles.length));
+    var maxOffset = Math.max(0, candles.length - barCount);
+    var offset = Math.min(Math.max(0, Math.round(state.rightOffset)), maxOffset);
+
+    state.barCount = barCount;
+    state.rightOffset = offset;
+
+    var end = candles.length - offset;
+    var visible = candles.slice(Math.max(0, end - barCount), end);
+    if (!visible.length) { return; }
 
     var high = -Infinity;
     var low = Infinity;
@@ -212,10 +234,18 @@
 
     var formingCount = visible.filter(function (c) { return !c.isClosed; }).length;
     $('legend').textContent =
-      visible.length + ' of ' + candles.length + ' bars shown. ' +
+      'Showing bars ' + (end - visible.length + 1) + '\u2013' + end + ' of ' + candles.length + '. ' +
       (formingCount
         ? formingCount + ' bar still forming, drawn dashed. It is not a finished candle and no closed-candle signal uses it.'
         : 'All bars shown are closed.');
+  }
+
+  function isShort(direction) {
+    // The API reports the enum name, which is DirectionShort rather than
+    // Short. Comparing against 'Short' alone silently drew every short
+    // position with the long label and colour.
+    var value = String(direction || '').toLowerCase();
+    return value === 'short' || value === 'directionshort';
   }
 
   function relevantEntries() {
@@ -224,10 +254,11 @@
 
     state.positions.forEach(function (p) {
       if (String(p.symbol).toUpperCase() !== symbol) { return; }
+      var short = isShort(p.direction);
       entries.push({
         price: Number(p.entryPrice),
-        label: (p.direction === 'Short' ? 'Short entry' : 'Long entry'),
-        colour: p.direction === 'Short' ? ENTRY_SHORT : ENTRY_LONG
+        label: (short ? 'Short entry' : 'Long entry'),
+        colour: short ? ENTRY_SHORT : ENTRY_LONG
       });
     });
 
@@ -263,33 +294,124 @@
 
     var table = document.createElement('table');
     var head = document.createElement('tr');
-    ['Symbol', 'Direction', 'Quantity', 'Entry', 'Mark', 'Unrealized', 'Opened'].forEach(function (title) {
-      var th = document.createElement('th');
-      th.textContent = title;
-      head.appendChild(th);
-    });
+    ['Pair', 'Direction', 'Quantity', 'Entry', 'Last closed price', 'Unrealised', 'Return', 'Break even', 'Priced at', 'Opened']
+      .forEach(function (title) {
+        var th = document.createElement('th');
+        th.textContent = title;
+        head.appendChild(th);
+      });
     table.appendChild(head);
 
     rows.forEach(function (position) {
       var tr = document.createElement('tr');
-      [
+
+      // Every money figure below is computed on the server in decimal and
+      // shown as received. Nothing here recalculates a profit or loss, so the
+      // page cannot disagree with the platform's own books.
+      var unrealised = position.unrealisedPnl;
+      var percent = position.unrealisedPercent;
+
+      var cells = [
         position.symbol,
-        position.direction,
+        isShort(position.direction) ? 'Short' : 'Long',
         position.quantity,
         formatPrice(position.entryPrice),
-        position.markPrice === null ? '-' : formatPrice(position.markPrice),
-        position.unrealizedPnl === null ? '-' : formatPrice(position.unrealizedPnl),
+        position.markPrice === null || position.markPrice === undefined
+          ? 'unavailable'
+          : formatPrice(position.markPrice),
+        unrealised === null || unrealised === undefined ? 'unknown' : formatSigned(unrealised),
+        percent === null || percent === undefined ? 'unknown' : formatSigned(percent) + '%',
+        formatPrice(position.breakEvenPrice),
+        position.pricedAtUtc ? formatTime(position.pricedAtUtc) : 'not priced',
         formatTime(position.openedAtUtc)
-      ].forEach(function (value) {
+      ];
+
+      cells.forEach(function (value, index) {
         var td = document.createElement('td');
-        // textContent everywhere: no venue or user string is ever parsed as markup.
         td.textContent = value === null || value === undefined ? '-' : String(value);
+
+        // Colour only the two result columns, and only when a result is known.
+        if ((index === 5 || index === 6) && unrealised !== null && unrealised !== undefined) {
+          td.style.color = Number(unrealised) >= 0 ? '#3fbf6f' : '#ff6b6b';
+        }
+
         tr.appendChild(td);
       });
+
       table.appendChild(tr);
     });
 
     host.appendChild(table);
+
+    // A stale or absent valuation is stated rather than left to look current.
+    var warnings = rows.filter(function (r) { return r.priceIsStale || !r.markPrice; });
+    if (warnings.length) {
+      var warning = document.createElement('p');
+      warning.className = 'notice error';
+      warning.textContent = rows[0].priceUnavailableReason
+        ? 'This position could not be priced: ' + rows[0].priceUnavailableReason
+        : 'The price used to value this position is older than 30 minutes. Treat the result as out of date.';
+      host.appendChild(warning);
+    }
+
+    var note = document.createElement('p');
+    note.className = 'empty';
+    note.textContent =
+      'Valued at the close of the last closed candle. Fees, spread and slippage are not modelled, ' +
+      'so break even is the raw entry price and the unrealised figure is an upper bound. ' +
+      'A planned exit price is not part of a position yet.';
+    host.appendChild(note);
+  }
+
+  async function loadPairs() {
+    var select = $('symbol');
+
+    try {
+      var response = await fetch('/api/marketdata/pairs', { headers: { 'Accept': 'application/json' } });
+      var payload = await response.json();
+
+      if (!response.ok) {
+        setStatus(payload && payload.message ? payload.message : 'The pair list could not be loaded.', true);
+        return false;
+      }
+
+      // Only pairs the venue is actually accepting orders on are offered.
+      // Listing a delisted pair would let someone build a position they cannot
+      // trade out of.
+      state.pairs = payload.filter(function (p) { return p.isActive; });
+
+      select.textContent = '';
+      state.pairs.forEach(function (pair) {
+        var option = document.createElement('option');
+        option.value = pair.symbol;
+        // textContent, so a venue-supplied name is never parsed as markup.
+        option.textContent = pair.displayName;
+        select.appendChild(option);
+      });
+
+      var preferred = state.pairs.filter(function (p) { return p.symbol === 'XBTUSD'; });
+      select.value = preferred.length ? 'XBTUSD' : (state.pairs.length ? state.pairs[0].symbol : '');
+      return state.pairs.length > 0;
+    } catch (error) {
+      setStatus('The pair list could not be loaded. ' + error.message, true);
+      return false;
+    }
+  }
+
+  function renderPairFilters() {
+    var host = $('pairFilters');
+    var match = state.pairs.filter(function (p) { return p.symbol === state.symbol; });
+
+    if (!match.length) {
+      host.textContent = '';
+      return;
+    }
+
+    var pair = match[0];
+    host.textContent =
+      'Kraken order rules for ' + pair.displayName + ': minimum ' + pair.minimumQuantity + ' ' +
+      pair.baseAsset + ', quantity step ' + pair.quantityStep + ', price tick ' + pair.priceTick +
+      '. These are the venue\u2019s own filters; an order breaking them would be rejected.';
   }
 
   async function load() {
@@ -297,7 +419,7 @@
     var interval = $('interval').value;
 
     if (!symbol) {
-      setStatus('Enter a pair, for example XBTUSD.', true);
+      setStatus('Select a pair.', true);
       return;
     }
 
@@ -321,19 +443,26 @@
         return;
       }
 
+      var switchedPair = state.symbol !== symbol;
+
       state.candles = payload;
       state.symbol = symbol;
       state.interval = interval;
 
-      var orders = await fetch('/api/orders', { headers: { 'Accept': 'application/json' } });
-      if (orders.ok) {
-        var book = await orders.json();
-        state.positions = book.positions || [];
-        state.orders = book.orders || [];
-      } else {
-        state.positions = [];
-        state.orders = [];
+      // A new pair or interval starts at the most recent bars. Keeping the old
+      // window would show a different market at a scroll position chosen for
+      // the previous one.
+      if (switchedPair || state.interval !== interval) {
+        state.rightOffset = 0;
       }
+
+      // Positions come from the valuation route so the profit and loss figures
+      // are the server's decimal results, not numbers derived in the browser.
+      var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
+      state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
+
+      var orders = await fetch('/api/orders', { headers: { 'Accept': 'application/json' } });
+      state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
       setStatus(
         'Paper trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.',
@@ -341,6 +470,7 @@
 
       draw();
       renderPositionTable();
+      renderPairFilters();
     } catch (error) {
       setStatus('Candles could not be loaded. ' + error.message, true);
     } finally {
@@ -411,14 +541,94 @@
     }
   }
 
-  window.addEventListener('DOMContentLoaded', function () {
-    $('load').addEventListener('click', load);
-    $('symbol').addEventListener('keydown', function (event) {
-      if (event.key === 'Enter') { load(); }
+  function zoom(factor, anchorRatio) {
+    var before = state.barCount;
+    var next = Math.round(before * factor);
+
+    if (next === before) {
+      next = before + (factor < 1 ? -1 : 1);
+    }
+
+    state.barCount = Math.max(MIN_BARS, next);
+
+    // Keep the bar under the pointer roughly in place. Without this the chart
+    // jumps to a different part of the series on every wheel step, which makes
+    // it hard to follow a level you were looking at.
+    if (typeof anchorRatio === 'number') {
+      var delta = state.barCount - before;
+      state.rightOffset = Math.max(0, Math.round(state.rightOffset - delta * (1 - anchorRatio)));
+    }
+
+    draw();
+  }
+
+  function attachChartInteraction() {
+    var canvas = $('chart');
+
+    canvas.addEventListener('wheel', function (event) {
+      if (!state.candles.length) { return; }
+      event.preventDefault();
+
+      var rect = canvas.getBoundingClientRect();
+      var ratio = rect.width ? (event.clientX - rect.left) / rect.width : 1;
+      zoom(event.deltaY > 0 ? 1.2 : 1 / 1.2, Math.min(Math.max(ratio, 0), 1));
+    }, { passive: false });
+
+    var dragging = false;
+    var dragStartX = 0;
+    var dragStartOffset = 0;
+
+    canvas.addEventListener('pointerdown', function (event) {
+      if (!state.candles.length) { return; }
+      dragging = true;
+      dragStartX = event.clientX;
+      dragStartOffset = state.rightOffset;
+      canvas.setPointerCapture(event.pointerId);
     });
+
+    canvas.addEventListener('pointermove', function (event) {
+      if (!dragging) { return; }
+
+      var rect = canvas.getBoundingClientRect();
+      var barsPerPixel = rect.width ? state.barCount / rect.width : 0;
+      // Dragging right moves back in time, which is the direction every other
+      // charting tool uses.
+      state.rightOffset = Math.max(0, Math.round(dragStartOffset + (event.clientX - dragStartX) * barsPerPixel));
+      draw();
+    });
+
+    function endDrag(event) {
+      if (!dragging) { return; }
+      dragging = false;
+      if (canvas.hasPointerCapture(event.pointerId)) {
+        canvas.releasePointerCapture(event.pointerId);
+      }
+    }
+
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+  }
+
+  window.addEventListener('DOMContentLoaded', async function () {
+    $('load').addEventListener('click', load);
     $('interval').addEventListener('change', load);
+    $('symbol').addEventListener('change', load);
     $('submitTrade').addEventListener('click', submitTrade);
-    load();
+
+    $('zoomIn').addEventListener('click', function () { zoom(1 / 1.4); });
+    $('zoomOut').addEventListener('click', function () { zoom(1.4); });
+    $('zoomReset').addEventListener('click', function () {
+      state.barCount = 160;
+      state.rightOffset = 0;
+      draw();
+    });
+
+    attachChartInteraction();
+
+    // The pair list has to arrive before the first load, otherwise there is no
+    // symbol to request.
+    var ready = await loadPairs();
+    if (ready) { load(); }
   });
 
   window.addEventListener('resize', function () { draw(); });

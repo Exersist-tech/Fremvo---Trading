@@ -15,6 +15,7 @@ using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
+using Trading.Domain.Positions;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
@@ -177,6 +178,19 @@ builder.Services.AddSingleton(TimeProvider.System);
 // scoped writer. This service has no exchange adapter of any kind: its fills
 // are simulated against published closed candles and it cannot reach a venue.
 builder.Services.AddScoped<PaperTradingService>();
+
+// Values open positions against closed candles. Read-only: it creates no order
+// and changes no position.
+builder.Services.AddScoped<IPositionValuationService, PositionValuationService>();
+
+// The tradable pair list is public reference data shared by every user, so it
+// is a singleton with its own short-lived cache. It holds no user, account,
+// balance or credential, so nothing leaks between users.
+builder.Services.AddHttpClient<ITradablePairSource, KrakenTradablePairSource>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
 builder.Services.AddSingleton<IUniverseInstrumentProvider, SeedUniverseInstrumentProvider>();
 builder.Services.AddSingleton<IUniverseEvidenceSource, UnconfiguredUniverseEvidenceSource>();
 builder.Services.AddSingleton(_ => new EligibilityThresholds(
@@ -1598,6 +1612,78 @@ app.MapGet("/api/marketdata/candles", async (
 // header, or configuration switch that can redirect this route to a venue.
 // ---------------------------------------------------------------------------
 
+// The pairs a venue will trade, with the order filters it enforces. Public
+// reference data: no credential is used and no user data is involved.
+app.MapGet("/api/marketdata/pairs", async (
+    ITradablePairSource pairs,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var available = await pairs.ListAsync(cancellationToken).ConfigureAwait(false);
+
+        return Results.Ok(available.Select(pair => new
+        {
+            pair.Symbol,
+            pair.DisplayName,
+            pair.BaseAsset,
+            pair.QuoteAsset,
+            pair.IsActive,
+            pair.MinimumQuantity,
+            pair.QuantityStep,
+            pair.PriceTick
+        }));
+    }
+    catch (MarketDataSourceException exception)
+    {
+        // Reported as a failure rather than an empty list: "the venue trades
+        // nothing" and "the request failed" lead to opposite conclusions.
+        return Results.BadRequest(new { error = "MarketDataUnavailable", message = exception.Message });
+    }
+}).RequireAuthorization();
+
+// Open positions priced against the last closed candle. Every figure is
+// computed server-side in decimal; the browser receives finished numbers so it
+// never derives a profit or loss figure in binary floating point.
+app.MapGet("/api/paper/positions", async (
+    ClaimsPrincipal principal,
+    IPositionValuationService valuation,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var valued = await valuation
+        .ValueOpenPositionsAsync(userId.Value, cancellationToken)
+        .ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Paper",
+        disclaimer = OrdersDisclaimer,
+        positions = valued.Select(item => new
+        {
+            item.Position.Id,
+            item.Position.Symbol,
+            direction = item.Position.Direction == PositionDirection.DirectionShort ? "Short" : "Long",
+            status = item.Position.Status.ToString(),
+            item.Position.Quantity,
+            item.Position.EntryPrice,
+            markPrice = item.MarkPrice,
+            unrealisedPnl = item.UnrealisedPnl,
+            unrealisedPercent = item.UnrealisedPercent,
+            breakEvenPrice = item.BreakEvenPriceExcludingFees,
+            pricedAtUtc = item.PricedAtUtc,
+            priceIsStale = item.PriceIsStale,
+            priceUnavailableReason = item.PriceUnavailableReason,
+            item.Position.OpenedAtUtc
+        })
+    });
+}).RequireAuthorization();
+
 app.MapPost("/api/paper/orders", async (
     SubmitPaperOrderRequest request,
     ClaimsPrincipal principal,
@@ -1813,7 +1899,7 @@ app.MapGet("/chart", () => Results.Content(
 
         <div class="toolbar">
           <label for="symbol">Pair</label>
-          <input id="symbol" value="XBTUSD" size="12" autocomplete="off" />
+          <select id="symbol"></select>
 
           <label for="interval">Interval</label>
           <select id="interval">
@@ -1828,6 +1914,10 @@ app.MapGet("/chart", () => Results.Content(
           </select>
 
           <button id="load" type="button">Load</button>
+          <span class="spacer"></span>
+          <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
+          <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
+          <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
         </div>
 
         <div id="status" class="notice">Loading.</div>
@@ -1835,9 +1925,11 @@ app.MapGet("/chart", () => Results.Content(
         <canvas id="chart" width="1100" height="460"
                 style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
         <p id="legend" class="empty"></p>
+        <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
 
         <h2>Position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
+        <p id="pairFilters" class="empty"></p>
 
         <h2>Place a paper trade</h2>
         <div class="notice">
