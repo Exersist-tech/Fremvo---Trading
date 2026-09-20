@@ -846,6 +846,65 @@
     }, 250);
   }
 
+  function normalizeAsset(asset) {
+    var code = String(asset || '').toUpperCase();
+    if (code === 'XBT' || code === 'XXBT') { return 'BTC'; }
+    if (code === 'XDG') { return 'DOGE'; }
+    return code.length === 4 && (code.charAt(0) === 'X' || code.charAt(0) === 'Z')
+      ? code.slice(1) : code;
+  }
+
+  async function loadPairHolding() {
+    var host = $('pairHolding');
+    var pair = state.pairs.filter(function (item) { return item.symbol === state.symbol; })[0];
+    if (!pair) {
+      host.textContent = 'Current exchange holding is unavailable because the selected pair is unknown.';
+      host.className = 'notice error';
+      return;
+    }
+
+    var target = normalizeAsset(pair.baseAsset);
+    host.textContent = 'Loading current ' + target + ' holding from the exchange.';
+    host.className = 'notice';
+
+    try {
+      var response = await fetch('/api/portfolio', { headers: { 'Accept': 'application/json' } });
+      var payload = await readJsonResponse(response);
+      if (!response.ok) {
+        throw new Error('The current holding could not be read.');
+      }
+
+      var messages = [];
+      var hasUnavailableAccount = false;
+      (payload.accounts || []).forEach(function (account) {
+        if (account.error) {
+          hasUnavailableAccount = true;
+          messages.push(account.displayName + ': current balance unavailable');
+          return;
+        }
+
+        var balance = (account.balances || []).filter(function (item) {
+          return normalizeAsset(item.asset) === target;
+        })[0];
+        var total = balance ? balance.total : 0;
+        var available = balance ? balance.available : 0;
+        var held = balance ? balance.held : 0;
+        messages.push(
+          account.displayName + ': ' + total + ' ' + target +
+          ' total (' + available + ' available, ' + held + ' held; read ' +
+          formatTime(account.retrievedAtUtc) + ')');
+      });
+
+      host.textContent = messages.length
+        ? 'Current ' + target + ' exchange holding: ' + messages.join(' | ')
+        : 'No connected exchange account is available for a current holding reading.';
+      host.className = hasUnavailableAccount ? 'notice error' : 'notice';
+    } catch (error) {
+      host.textContent = 'Current exchange holding could not be read. No previous balance is shown.';
+      host.className = 'notice error';
+    }
+  }
+
   function renderPairFilters() {
     var host = $('pairFilters');
     var match = state.pairs.filter(function (p) { return p.symbol === state.symbol; });
@@ -853,58 +912,6 @@
     if (!match.length) {
       host.textContent = '';
       return;
-    }
-
-    function normalizeAsset(asset) {
-      var code = String(asset || '').toUpperCase();
-      if (code === 'XBT' || code === 'XXBT') { return 'BTC'; }
-      if (code === 'XDG') { return 'DOGE'; }
-      return code.length === 4 && (code.charAt(0) === 'X' || code.charAt(0) === 'Z')
-        ? code.slice(1) : code;
-    }
-
-    async function loadPairHolding() {
-      var host = $('pairHolding');
-      var pair = state.pairs.filter(function (item) { return item.symbol === state.symbol; })[0];
-      if (!pair) {
-        host.textContent = 'Current exchange holding is unavailable because the selected pair is unknown.';
-        host.className = 'notice error';
-        return;
-      }
-
-      host.textContent = 'Loading current ' + pair.baseAsset + ' holding from the exchange.';
-      host.className = 'notice';
-      try {
-        var response = await fetch('/api/portfolio', { headers: { 'Accept': 'application/json' } });
-        var payload = await readJsonResponse(response);
-        if (!response.ok) {
-          throw new Error('The current holding could not be read.');
-        }
-
-        var target = normalizeAsset(pair.baseAsset);
-        var messages = [];
-        (payload.accounts || []).forEach(function (account) {
-          if (account.error) {
-            messages.push(account.displayName + ': current balance unavailable (' + account.error + ')');
-            return;
-          }
-          var balance = (account.balances || []).filter(function (item) {
-            return normalizeAsset(item.asset) === target;
-          })[0];
-          messages.push(account.displayName + ': ' + (balance ? balance.total : 0) + ' ' + target +
-            ' (read ' + formatTime(account.retrievedAtUtc) + ')');
-        });
-
-        host.textContent = messages.length
-          ? 'Current ' + target + ' holding — ' + messages.join(' · ')
-          : 'No connected exchange account is available for a current holding reading.';
-        host.className = messages.some(function (message) {
-          return message.indexOf('unavailable') !== -1;
-        }) ? 'notice error' : 'notice';
-      } catch (error) {
-        host.textContent = 'Current exchange holding could not be read. No previous balance is shown.';
-        host.className = 'notice error';
-      }
     }
 
     var pair = match[0];
