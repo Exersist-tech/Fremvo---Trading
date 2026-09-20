@@ -2591,42 +2591,79 @@ app.MapGet("/chart", () => Results.Content(
 
         <div id="status" class="notice">Loading.</div>
 
-        <div class="chart-toolbar">
-          <div class="pair-selector">
-            <label for="pairSearch">Search pairs</label>
-            <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
-                   aria-autocomplete="list" aria-controls="pairResults" />
-            <!-- The select remains the canonical selected value for the chart
-                 and order ticket. Pair search only chooses from its active
-                 Kraken-backed options; it never accepts arbitrary symbols. -->
-            <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
-            <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
-            <p id="pairSearchEmpty" class="pair-search-empty" aria-live="polite"></p>
+        <div class="chart-workspace">
+          <aside class="trade-panel" aria-label="Trade ticket">
+            <h2>Trade</h2>
+
+            <!-- The chart is shared. Only the book and ticket change with the
+                 tab, because the market data is the same in either mode. -->
+            <div class="tabs" role="tablist">
+              <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
+              <button id="modeLive" class="tab" type="button" role="tab">Live</button>
+            </div>
+
+            <div id="modeNotice" class="notice">
+              <strong>Fake funds. No exchange is contacted.</strong>
+              The fill is priced at the close of the last closed candle. It does not model spread,
+              slippage, fees or partial fills, so a paper result is an upper bound on what the
+              same decision would have returned live.
+            </div>
+
+            <div class="toolbar" id="tradeTicket">
+              <label for="tradeSide">Side</label>
+              <select id="tradeSide">
+                <option value="Buy">Buy</option>
+                <option value="Sell">Sell</option>
+              </select>
+
+              <label for="tradeQuantity">Quantity</label>
+              <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
+
+              <button id="submitTrade" type="button">Submit paper order</button>
+            </div>
+
+            <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
+          </aside>
+
+          <div class="chart-column">
+            <div class="chart-toolbar">
+              <div class="pair-selector">
+                <label for="pairSearch">Search pairs</label>
+                <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
+                       aria-autocomplete="list" aria-controls="pairResults" />
+                <!-- The select remains the canonical selected value for the chart
+                     and order ticket. Pair search only chooses from its active
+                     Kraken-backed options; it never accepts arbitrary symbols. -->
+                <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
+                <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
+                <p id="pairSearchEmpty" class="pair-search-empty" aria-live="polite"></p>
+              </div>
+
+              <div class="chart-actions">
+                <label for="interval">Interval</label>
+                <select id="interval">
+                  <option value="OneMinute">1 minute</option>
+                  <option value="FiveMinutes">5 minutes</option>
+                  <option value="TenMinutes">10 minutes</option>
+                  <option value="FifteenMinutes">15 minutes</option>
+                  <option value="ThirtyMinutes">30 minutes</option>
+                  <option value="OneHour" selected>1 hour</option>
+                  <option value="FourHours">4 hours</option>
+                  <option value="OneDay">1 day</option>
+                </select>
+
+                <button id="load" type="button">Load</button>
+                <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
+                <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
+                <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
+              </div>
+            </div>
+
+            <div class="chart-stage">
+              <canvas id="chart" width="1100" height="460"
+                      style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
+            </div>
           </div>
-
-          <div class="chart-actions">
-            <label for="interval">Interval</label>
-            <select id="interval">
-              <option value="OneMinute">1 minute</option>
-              <option value="FiveMinutes">5 minutes</option>
-              <option value="TenMinutes">10 minutes</option>
-              <option value="FifteenMinutes">15 minutes</option>
-              <option value="ThirtyMinutes">30 minutes</option>
-              <option value="OneHour" selected>1 hour</option>
-              <option value="FourHours">4 hours</option>
-              <option value="OneDay">1 day</option>
-            </select>
-
-            <button id="load" type="button">Load</button>
-            <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
-            <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
-            <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
-          </div>
-        </div>
-
-        <div class="chart-stage">
-          <canvas id="chart" width="1100" height="460"
-                  style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
         </div>
         <p id="legend" class="empty"></p>
         <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
@@ -2634,38 +2671,6 @@ app.MapGet("/chart", () => Results.Content(
         <h2>Position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
         <p id="pairFilters" class="empty"></p>
-
-        <h2>Trade</h2>
-
-        <!-- The chart above is shared. Only the book and the ticket change
-             with the tab, because the market data is the same market data
-             whichever book you are trading into. -->
-        <div class="tabs" role="tablist">
-          <button id="modePaper" class="tab active" type="button" role="tab">Paper</button>
-          <button id="modeLive" class="tab" type="button" role="tab">Live</button>
-        </div>
-
-        <div id="modeNotice" class="notice">
-          <strong>Fake funds. No exchange is contacted.</strong>
-          The fill is priced at the close of the last closed candle, so it reflects a price that
-          actually settled. It does not model spread, slippage, fees or partial fills, so a paper
-          result is an upper bound on what the same decision would have returned live.
-        </div>
-
-        <div class="toolbar" id="tradeTicket">
-          <label for="tradeSide">Side</label>
-          <select id="tradeSide">
-            <option value="Buy">Buy</option>
-            <option value="Sell">Sell</option>
-          </select>
-
-          <label for="tradeQuantity">Quantity</label>
-          <input id="tradeQuantity" value="0.01" size="10" inputmode="decimal" autocomplete="off" />
-
-          <button id="submitTrade" type="button">Submit paper order</button>
-        </div>
-
-        <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
 
         <p class="empty">
           Kraken serves no ten-minute candle. That interval is refused rather than answered with a

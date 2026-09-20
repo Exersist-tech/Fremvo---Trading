@@ -195,6 +195,53 @@ tbody tr:last-child td { border-bottom: none; }
   position: relative;
 }
 
+.chart-workspace {
+  display: grid;
+  grid-template-columns: minmax(16rem, 20rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.trade-panel {
+  position: sticky;
+  top: 4.75rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.trade-panel h2 {
+  margin: 0 0 0.75rem;
+}
+
+.trade-panel .tabs {
+  margin-top: 0;
+}
+
+.trade-panel .notice {
+  margin-bottom: 1rem;
+}
+
+.trade-panel .toolbar {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.trade-panel .toolbar label {
+  margin: 0;
+}
+
+.trade-panel .toolbar input,
+.trade-panel .toolbar select,
+.trade-panel .toolbar button {
+  width: 100%;
+}
+
+.chart-column {
+  min-width: 0;
+}
+
 .chart-toolbar {
   display: flex;
   align-items: center;
@@ -332,6 +379,8 @@ button.danger {
 }
 
 @media (max-width: 780px) {
+  .chart-workspace { grid-template-columns: 1fr; }
+  .trade-panel { position: static; }
   .chart-toolbar { align-items: stretch; flex-direction: column; }
   .pair-selector { width: 100%; }
   .chart-actions { justify-content: flex-start; }
