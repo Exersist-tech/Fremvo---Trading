@@ -17,6 +17,7 @@ using Trading.Domain.Users;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
 using Trading.Optimization;
+using Trading.Web.Development;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
 using Trading.Web.Security;
@@ -123,6 +124,10 @@ builder.Services.AddSingleton(sp => new UniverseAdminQueryService(
     sp.GetRequiredService<TimeProvider>()));
 
 var app = builder.Build();
+
+// Local demo bootstrap. This is a no-op unless Development:SeedDemoData is
+// set, and it refuses to run outside the Development environment.
+await DevelopmentDataSeeder.SeedAsync(app).ConfigureAwait(false);
 
 app.UseStaticFiles();
 app.UseAuthentication();
@@ -1538,7 +1543,7 @@ app.MapGet("/account", () => Results.Content(
     """,
     "text/html"));
 
-app.Run();
+await app.RunAsync().ConfigureAwait(false);
 
 /// <summary>
 /// Creation request for a paper experiment worker. It deliberately carries no user id: the owner

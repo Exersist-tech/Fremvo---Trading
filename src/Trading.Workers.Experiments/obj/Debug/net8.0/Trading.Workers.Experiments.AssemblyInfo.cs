@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Trading.Workers.Experiments")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f1d7031e1ad3a65cb993480e156d3e5081c99cfe")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+82877e40116c20e9bb6a9989bef53a5b472f8392")]
 [assembly: System.Reflection.AssemblyProductAttribute("Trading.Workers.Experiments")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Trading.Workers.Experiments")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
