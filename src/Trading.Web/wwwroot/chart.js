@@ -38,6 +38,8 @@
   var MIN_BARS = 12;
   var pairSearchTimer = null;
   var pairSearchGeneration = 0;
+  var chartRefreshTimer = null;
+  var chartRefreshInFlight = false;
 
   function $(id) { return document.getElementById(id); }
 
@@ -1007,7 +1009,44 @@
       '. These are the venue\u2019s own filters; an order breaking them would be rejected.';
   }
 
-  async function load() {
+  function intervalMilliseconds(interval) {
+    var minutes = {
+      OneMinute: 1,
+      FiveMinutes: 5,
+      TenMinutes: 10,
+      FifteenMinutes: 15,
+      ThirtyMinutes: 30,
+      OneHour: 60,
+      FourHours: 240,
+      OneDay: 1440
+    };
+    return minutes[interval] ? minutes[interval] * 60 * 1000 : null;
+  }
+
+  function scheduleChartRefresh() {
+    if (chartRefreshTimer !== null) {
+      window.clearTimeout(chartRefreshTimer);
+      chartRefreshTimer = null;
+    }
+
+    var interval = intervalMilliseconds($('interval').value);
+    if (!interval || !state.symbol) { return; }
+
+    // Allow the venue a short moment after the boundary to publish its new
+    // forming candle. This is a display refresh only; it never evaluates an
+    // exit or submits an order.
+    var delay = interval - (Date.now() % interval) + 1500;
+    chartRefreshTimer = window.setTimeout(async function () {
+      await load(true);
+      scheduleChartRefresh();
+    }, delay);
+  }
+
+  async function load(isAutomaticRefresh) {
+    if (isAutomaticRefresh && chartRefreshInFlight) {
+      return;
+    }
+
     var symbol = $('symbol').value.trim();
     var interval = $('interval').value;
 
@@ -1016,8 +1055,11 @@
       return;
     }
 
-    setStatus('Loading ' + symbol + ' ' + interval + '.', false);
-    $('load').disabled = true;
+    if (!isAutomaticRefresh) {
+      setStatus('Loading ' + symbol + ' ' + interval + '.', false);
+      $('load').disabled = true;
+    }
+    chartRefreshInFlight = true;
 
     try {
       var response = await fetch(
@@ -1030,13 +1072,15 @@
       if (!response.ok) {
         // The venue's reason is shown rather than an empty chart, because
         // "no data" and "the request failed" mean different things.
-        setStatus(payload && payload.message ? payload.message : 'Candles could not be loaded.', true);
-        state.candles = [];
-        draw();
+        if (!isAutomaticRefresh) {
+          setStatus(payload && payload.message ? payload.message : 'Candles could not be loaded.', true);
+          state.candles = [];
+          draw();
+        }
         return;
       }
 
-      var switchedPair = state.symbol !== symbol;
+      var switchedView = state.symbol !== symbol || state.interval !== interval;
 
       state.candles = payload;
       state.symbol = symbol;
@@ -1045,8 +1089,13 @@
       // A new pair or interval starts at the most recent bars. Keeping the old
       // window would show a different market at a scroll position chosen for
       // the previous one.
-      if (switchedPair || state.interval !== interval) {
+      if (switchedView) {
         state.rightOffset = 0;
+      }
+
+      if (isAutomaticRefresh) {
+        draw();
+        return;
       }
 
       // Positions come from the valuation route so the profit and loss figures
@@ -1094,9 +1143,15 @@
       renderPairFilters();
       await loadPairHolding();
     } catch (error) {
-      setStatus('Candles could not be loaded. ' + error.message, true);
+      if (!isAutomaticRefresh) {
+        setStatus('Candles could not be loaded. ' + error.message, true);
+      }
     } finally {
-      $('load').disabled = false;
+      chartRefreshInFlight = false;
+      if (!isAutomaticRefresh) {
+        $('load').disabled = false;
+      }
+      scheduleChartRefresh();
     }
   }
 
