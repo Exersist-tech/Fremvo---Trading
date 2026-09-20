@@ -2666,13 +2666,6 @@ app.MapGet("/chart", () => Results.Content(
     <body>
       <main class="page-wide chart-page">
         <h1>Chart</h1>
-        <p class="lede">
-          Price history from Kraken with confirmed positions and working orders marked on it.
-          The selected book determines whether an order is simulated or sent through the separately
-          enabled live route.
-        </p>
-
-        <div id="status" class="notice chart-status">Loading.</div>
 
         <div class="chart-workspace">
           <div class="chart-column">
@@ -2761,6 +2754,8 @@ app.MapGet("/chart", () => Results.Content(
             <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
           </aside>
         </div>
+
+        <div id="status" class="notice chart-status">Loading.</div>
         <h2>Confirmed position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
         <h2>Active orders on this pair</h2>
