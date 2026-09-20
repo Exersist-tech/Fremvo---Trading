@@ -25,6 +25,7 @@ public sealed class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly ExperimentWorkerPool _pool;
     private readonly IExperimentWorkerRunner _runner;
+    private readonly IExperimentResearchGroupConfigurationSource _configurationSource;
     private readonly ExperimentHostOptions _options;
     private readonly TimeProvider _timeProvider;
 
@@ -32,6 +33,7 @@ public sealed class Worker : BackgroundService
         ILogger<Worker> logger,
         ExperimentWorkerPool pool,
         IExperimentWorkerRunner runner,
+        IExperimentResearchGroupConfigurationSource configurationSource,
         IOptions<ExperimentHostOptions> options,
         TimeProvider timeProvider)
     {
@@ -40,6 +42,7 @@ public sealed class Worker : BackgroundService
         _logger = logger;
         _pool = pool;
         _runner = runner;
+        _configurationSource = configurationSource;
         _options = options.Value;
         _timeProvider = timeProvider;
     }
@@ -72,7 +75,8 @@ public sealed class Worker : BackgroundService
 
             try
             {
-                var result = await _pool.RunAllAsync(userId, _runner, cancellationToken).ConfigureAwait(false);
+                var configuration = await _configurationSource.GetAsync(userId, cancellationToken).ConfigureAwait(false);
+                var result = await _pool.RunConfiguredAsync(userId, configuration, _runner, cancellationToken).ConfigureAwait(false);
                 completed += result.CompletedCount;
                 faulted += result.FaultedCount;
             }

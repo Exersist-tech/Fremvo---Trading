@@ -147,6 +147,58 @@ public sealed class ExperimentWorkerPool
 
         return new ExperimentWorkerPoolResult(results);
     }
+
+    /// <summary>
+    /// Runs only workers present in a valid, owner-scoped immutable research configuration.
+    /// Missing or invalid approvals, gates, provenance, or data are fail-closed no-ops.
+    /// </summary>
+    public async Task<ExperimentWorkerPoolResult> RunConfiguredAsync(
+        Guid userId,
+        ExperimentResearchGroupConfiguration? configuration,
+        IExperimentWorkerRunner runner,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(runner);
+        if (configuration is null || configuration.UserId != userId)
+        {
+            return new ExperimentWorkerPoolResult(Array.Empty<ExperimentWorkerRunResult>());
+        }
+
+        var workers = await _repository.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+        var workersById = workers.ToDictionary(worker => worker.Id);
+        var results = new List<ExperimentWorkerRunResult>();
+
+        foreach (var assignment in configuration.Assignments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!workersById.TryGetValue(assignment.WorkerId, out var worker)
+                || !configuration.IsRunnableFor(worker, assignment)
+                || worker.Status != ExperimentWorkerStatus.Running)
+            {
+                continue;
+            }
+
+            try
+            {
+                await runner.RunOnceAsync(worker, cancellationToken).ConfigureAwait(false);
+                results.Add(new ExperimentWorkerRunResult(worker.Id, ExperimentWorkerOutcome.Completed, null));
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+#pragma warning disable CA1031 // A faulting worker must be contained, not allowed to stop the other nine.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                worker.Fail($"Experiment worker faulted: {ex.GetType().Name}");
+                await _repository.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
+                results.Add(new ExperimentWorkerRunResult(worker.Id, ExperimentWorkerOutcome.Faulted, worker.FailureReason));
+            }
+        }
+
+        return new ExperimentWorkerPoolResult(results);
+    }
 }
 
 /// <summary>

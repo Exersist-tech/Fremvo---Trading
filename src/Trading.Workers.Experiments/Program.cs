@@ -31,6 +31,7 @@ builder.Services.AddSingleton<ExperimentWorkerPool>();
 
 builder.Services.AddSingleton<IExperimentMarketFeed, UnconfiguredExperimentMarketFeed>();
 builder.Services.AddSingleton<IApprovedStrategyTemplateFactory, UnconfiguredStrategyTemplateFactory>();
+builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, UnconfiguredExperimentResearchGroupConfigurationSource>();
 builder.Services.AddSingleton<IExperimentWorkerRunner, PaperExperimentWorkerRunner>();
 
 builder.Services.AddHostedService<Worker>();
