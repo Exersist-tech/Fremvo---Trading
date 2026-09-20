@@ -110,6 +110,59 @@ public sealed class StrategyContractTests
     }
 
     [Fact]
+    public void TimeframeRolesAreImmutableSeparateAndAlignedToExecution()
+    {
+        var timeframes = new StrategyTimeframeConfiguration(
+            CandleInterval.OneHour,
+            CandleInterval.FifteenMinutes,
+            CandleInterval.FiveMinutes);
+        var regime = Series(StrategyTimeframeRole.Regime, CandleInterval.OneHour, 0, 60);
+        var signal = Series(StrategyTimeframeRole.Signal, CandleInterval.FifteenMinutes, 45, 60);
+        var execution = Series(StrategyTimeframeRole.Execution, CandleInterval.FiveMinutes, 55, 60);
+
+        var input = new StrategyEvaluationInput(
+            s_templateId,
+            new StrategyParameterSet(Array.Empty<StrategyParameterDefinition>()),
+            new StrategyState(s_templateId, 0, s_start),
+            timeframes,
+            [regime, signal, execution]);
+
+        Assert.Equal(timeframes, input.Timeframes);
+        Assert.Same(regime, input.Regime);
+        Assert.Same(signal, input.Signal);
+        Assert.Same(execution, input.Execution);
+        Assert.Equal(s_start.AddMinutes(60), input.AsOfUtc);
+        Assert.All(new[] { input.Regime, input.Signal, input.Execution }, series =>
+            Assert.DoesNotContain(series.ClosedCandles, candle => candle.CloseTimeUtc > input.AsOfUtc));
+        Assert.Null(typeof(StrategyTimeframeConfiguration).GetProperty(nameof(StrategyTimeframeConfiguration.Regime))!.SetMethod);
+    }
+
+    [Fact]
+    public void TimeframeRolesRejectUnsupportedSwappedMissingDuplicateAndFutureData()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new StrategyTimeframeConfiguration((CandleInterval)2, CandleInterval.OneMinute, CandleInterval.OneMinute));
+        Assert.Throws<ArgumentException>(() =>
+            new StrategyTimeframeConfiguration(CandleInterval.FiveMinutes, CandleInterval.FifteenMinutes, CandleInterval.FiveMinutes));
+        Assert.Throws<ArgumentException>(() =>
+            new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.FifteenMinutes, CandleInterval.ThirtyMinutes));
+
+        var timeframes = new StrategyTimeframeConfiguration(
+            CandleInterval.OneHour, CandleInterval.FifteenMinutes, CandleInterval.FiveMinutes);
+        var regime = Series(StrategyTimeframeRole.Regime, CandleInterval.OneHour, 0, 60);
+        var signal = Series(StrategyTimeframeRole.Signal, CandleInterval.FifteenMinutes, 0, 15);
+        var execution = Series(StrategyTimeframeRole.Execution, CandleInterval.FiveMinutes, 0, 5, 5, 10, 10, 15);
+
+        Assert.Throws<ArgumentException>(() => MultiInput(timeframes, [regime, signal]));
+        Assert.Throws<ArgumentException>(() => MultiInput(timeframes, [regime, signal,
+            Series(StrategyTimeframeRole.Signal, CandleInterval.FifteenMinutes, 15, 30)]));
+        Assert.Throws<ArgumentException>(() => MultiInput(timeframes, [regime,
+            Series(StrategyTimeframeRole.Signal, CandleInterval.OneHour, 0, 60), execution]));
+        Assert.Throws<ArgumentException>(() => MultiInput(timeframes, [Series(
+            StrategyTimeframeRole.Regime, CandleInterval.OneHour, 0, 60, 60, 120), signal, execution]));
+    }
+
+    [Fact]
     public void ContractHasNoUserCodeSurfaceAndProposalCannotBeUsedAsAnOrder()
     {
         var publicContractTypes = new[]
@@ -171,6 +224,39 @@ public sealed class StrategyContractTests
             5m,
             true,
             false);
+
+    private static StrategyTimeframeSeries Series(
+        StrategyTimeframeRole role,
+        CandleInterval interval,
+        params int[] minuteBoundaries)
+    {
+        var candles = minuteBoundaries
+            .Chunk(2)
+            .Select(pair => new Candle(
+                "BTCUSD",
+                interval,
+                s_start.AddMinutes(pair[0]),
+                s_start.AddMinutes(pair[1]),
+                100m,
+                102m,
+                99m,
+                101m,
+                5m,
+                true,
+                false))
+            .ToArray();
+        return new StrategyTimeframeSeries(role, interval, candles);
+    }
+
+    private static StrategyEvaluationInput MultiInput(
+        StrategyTimeframeConfiguration timeframes,
+        IReadOnlyList<StrategyTimeframeSeries> series) =>
+        new(
+            s_templateId,
+            new StrategyParameterSet(Array.Empty<StrategyParameterDefinition>()),
+            new StrategyState(s_templateId, 0, s_start),
+            timeframes,
+            series);
 
     private sealed class CountingStrategy : IStrategy
     {

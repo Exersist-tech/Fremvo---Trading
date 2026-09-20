@@ -137,6 +137,12 @@ public sealed class StrategyApproval
                 throw new InvalidOperationException(
                     "A strategy approval requires explicit restrictive requirements before approval.");
             }
+
+            if (Requirements.TimeframeConfiguration is null)
+            {
+                throw new InvalidOperationException(
+                    "A strategy approval requires explicit immutable timeframe roles before approval.");
+            }
         }
         else if (approver is not null)
         {

@@ -299,7 +299,11 @@ public sealed class StrategyApprovalTests
             TimeSpan.FromMinutes(10),
             new[] { CandleInterval.OneHour },
             new[] { TradingProductType.Spot },
-            new[] { StrategyApprovalMode.Backtest });
+            new[] { StrategyApprovalMode.Backtest },
+            new StrategyTimeframeConfiguration(
+                CandleInterval.OneHour,
+                CandleInterval.OneHour,
+                CandleInterval.OneHour));
         var intersection = Requirements().Intersect(tighter);
 
         Assert.Equal(200, intersection.MinimumClosedHistoryCandles);
@@ -312,6 +316,54 @@ public sealed class StrategyApprovalTests
             Array.Empty<ApprovedInstrumentScope>(), 1, 1m, 1m, 1m, TimeSpan.FromMinutes(1),
             new[] { CandleInterval.OneHour }, new[] { TradingProductType.Spot },
             new[] { StrategyApprovalMode.Research }));
+    }
+
+    [Fact]
+    public void ApprovalBindsAndRestrictsImmutableTimeframeRoles()
+    {
+        var roles = new StrategyTimeframeConfiguration(
+            CandleInterval.OneHour,
+            CandleInterval.FifteenMinutes,
+            CandleInterval.FiveMinutes);
+        var requirements = new StrategyApprovalRequirements(
+            new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+            100, 100m, 0.10m, 0.01m, TimeSpan.FromMinutes(30),
+            new[] { CandleInterval.OneHour, CandleInterval.FifteenMinutes, CandleInterval.FiveMinutes },
+            new[] { TradingProductType.Spot },
+            new[] { StrategyApprovalMode.Backtest },
+            roles);
+        var allowed = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(), roles, TradingProductType.Spot,
+            StrategyApprovalMode.Backtest, s_createdAtUtc);
+        var rejected = StrategyApprovalRequirementEvaluator.Evaluate(
+            requirements, Evidence(),
+            new StrategyTimeframeConfiguration(
+                CandleInterval.FourHours, CandleInterval.FifteenMinutes, CandleInterval.FiveMinutes),
+            TradingProductType.Spot, StrategyApprovalMode.Backtest, s_createdAtUtc);
+
+        Assert.True(allowed.Allowed);
+        Assert.False(rejected.Allowed);
+        Assert.Throws<ArgumentException>(() => new StrategyApprovalRequirements(
+            new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+            100, 100m, 0.10m, 0.01m, TimeSpan.FromMinutes(30),
+            new[] { CandleInterval.OneHour },
+            new[] { TradingProductType.Spot },
+            new[] { StrategyApprovalMode.Backtest },
+            roles));
+
+        var human = StrategyApprovalActor.Human(Guid.NewGuid());
+        var underReview = StrategyApproval.CreateDraft(
+                Guid.NewGuid(), Version(), human, s_createdAtUtc,
+                new StrategyApprovalRequirements(
+                    new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
+                    100, 100m, 0.10m, 0.01m, TimeSpan.FromMinutes(30),
+                    new[] { CandleInterval.OneHour },
+                    new[] { TradingProductType.Spot },
+                    new[] { StrategyApprovalMode.Backtest }))
+            .TransitionTo(StrategyApprovalState.UnderReview, human, s_createdAtUtc.AddMinutes(1));
+
+        Assert.Throws<InvalidOperationException>(() => underReview.TransitionTo(
+            StrategyApprovalState.Approved, human, s_createdAtUtc.AddMinutes(2), human));
     }
 
     [Fact]
@@ -378,7 +430,11 @@ public sealed class StrategyApprovalTests
             TimeSpan.FromMinutes(30),
             new[] { CandleInterval.OneHour },
             products ?? new[] { TradingProductType.Spot },
-            modes ?? new[] { StrategyApprovalMode.Research, StrategyApprovalMode.Backtest });
+            modes ?? new[] { StrategyApprovalMode.Research, StrategyApprovalMode.Backtest },
+            new StrategyTimeframeConfiguration(
+                CandleInterval.OneHour,
+                CandleInterval.OneHour,
+                CandleInterval.OneHour));
 
     private static StrategyApprovalEvidence Evidence(
         decimal? liquidity = 100m,

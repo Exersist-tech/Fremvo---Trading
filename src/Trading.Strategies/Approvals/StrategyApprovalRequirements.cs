@@ -79,7 +79,8 @@ public sealed class StrategyApprovalRequirements
         TimeSpan maximumEvidenceAge,
         IEnumerable<CandleInterval> allowedIntervals,
         IEnumerable<TradingProductType> allowedProductTypes,
-        IEnumerable<StrategyApprovalMode> allowedModes)
+        IEnumerable<StrategyApprovalMode> allowedModes,
+        StrategyTimeframeConfiguration? timeframeConfiguration = null)
     {
         ArgumentNullException.ThrowIfNull(instrumentScopes);
         ArgumentNullException.ThrowIfNull(allowedIntervals);
@@ -111,6 +112,11 @@ public sealed class StrategyApprovalRequirements
             throw new ArgumentException("A concrete normalized interval is required.", nameof(allowedIntervals));
         }
 
+        if (_allowedIntervals.Any(interval => !Enum.IsDefined(interval)))
+        {
+            throw new ArgumentException("Only supported normalized intervals may be approved.", nameof(allowedIntervals));
+        }
+
         if (_allowedProductTypes.Any(product => product != TradingProductType.Spot))
         {
             throw new ArgumentException("Futures are blocked during the research phase.", nameof(allowedProductTypes));
@@ -129,6 +135,17 @@ public sealed class StrategyApprovalRequirements
         MaximumSpread = maximumSpread;
         MaximumEstimatedSlippage = maximumEstimatedSlippage;
         MaximumEvidenceAge = maximumEvidenceAge;
+        if (timeframeConfiguration is not null
+            && (!_allowedIntervals.Contains(timeframeConfiguration.Regime)
+                || !_allowedIntervals.Contains(timeframeConfiguration.Signal)
+                || !_allowedIntervals.Contains(timeframeConfiguration.Execution)))
+        {
+            throw new ArgumentException(
+                "Approval timeframe roles must each be restricted by an allowed interval.",
+                nameof(timeframeConfiguration));
+        }
+
+        TimeframeConfiguration = timeframeConfiguration;
     }
 
     public IReadOnlyList<ApprovedInstrumentScope> InstrumentScopes => _instrumentScopes;
@@ -140,6 +157,7 @@ public sealed class StrategyApprovalRequirements
     public IReadOnlyList<CandleInterval> AllowedIntervals => _allowedIntervals;
     public IReadOnlyList<TradingProductType> AllowedProductTypes => _allowedProductTypes;
     public IReadOnlyList<StrategyApprovalMode> AllowedModes => _allowedModes;
+    public StrategyTimeframeConfiguration? TimeframeConfiguration { get; }
 
     public StrategyApprovalRequirements Intersect(StrategyApprovalRequirements other)
     {
@@ -161,7 +179,28 @@ public sealed class StrategyApprovalRequirements
             MaximumEvidenceAge < other.MaximumEvidenceAge ? MaximumEvidenceAge : other.MaximumEvidenceAge,
             _allowedIntervals.Intersect(other._allowedIntervals).ToArray(),
             _allowedProductTypes.Intersect(other._allowedProductTypes).ToArray(),
-            _allowedModes.Intersect(other._allowedModes).ToArray());
+            _allowedModes.Intersect(other._allowedModes).ToArray(),
+            IntersectTimeframes(other));
+    }
+
+    private StrategyTimeframeConfiguration? IntersectTimeframes(StrategyApprovalRequirements other)
+    {
+        if (TimeframeConfiguration is null)
+        {
+            return other.TimeframeConfiguration;
+        }
+
+        if (other.TimeframeConfiguration is null)
+        {
+            return TimeframeConfiguration;
+        }
+
+        if (!TimeframeConfiguration.Equals(other.TimeframeConfiguration))
+        {
+            throw new ArgumentException("Approval timeframe role configurations do not intersect.");
+        }
+
+        return TimeframeConfiguration;
     }
 
     private static ReadOnlyCollection<T> DistinctRequired<T>(IEnumerable<T> values, string parameterName)
@@ -284,6 +323,42 @@ public static class StrategyApprovalRequirementEvaluator
         if (!requirements.AllowedModes.Contains(mode))
         {
             failures.Add("Mode is not allowed.");
+        }
+
+        return new StrategyApprovalEvaluation(failures);
+    }
+
+    public static StrategyApprovalEvaluation Evaluate(
+        StrategyApprovalRequirements requirements,
+        StrategyApprovalEvidence? evidence,
+        StrategyTimeframeConfiguration timeframeConfiguration,
+        TradingProductType productType,
+        StrategyApprovalMode mode,
+        DateTimeOffset evaluatedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(requirements);
+        ArgumentNullException.ThrowIfNull(timeframeConfiguration);
+
+        var evaluation = Evaluate(
+            requirements,
+            evidence,
+            timeframeConfiguration.Execution,
+            productType,
+            mode,
+            evaluatedAtUtc);
+        var failures = evaluation.Failures.ToList();
+
+        if (requirements.TimeframeConfiguration is null
+            || !requirements.TimeframeConfiguration.Equals(timeframeConfiguration))
+        {
+            failures.Add("Timeframe roles are not bound by the approval.");
+        }
+
+        if (!requirements.AllowedIntervals.Contains(timeframeConfiguration.Regime)
+            || !requirements.AllowedIntervals.Contains(timeframeConfiguration.Signal)
+            || !requirements.AllowedIntervals.Contains(timeframeConfiguration.Execution))
+        {
+            failures.Add("One or more timeframe role intervals are not allowed.");
         }
 
         return new StrategyApprovalEvaluation(failures);
