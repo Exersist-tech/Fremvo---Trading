@@ -219,6 +219,20 @@ public sealed class KrakenHistoricalCandleSourceTests
     }
 
     [Fact]
+    public async Task FourDayCandlesAreRefusedRatherThanSubstituted()
+    {
+        using var handler = new StubHandler(TwoBarPayload);
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.com") };
+        var source = new KrakenHistoricalCandleSource(client);
+
+        await Assert.ThrowsAsync<MarketDataIntervalNotSupportedException>(
+            () => source.FetchAsync("XBTUSD", CandleInterval.FourDays, DateTimeOffset.UnixEpoch));
+
+        Assert.False(KrakenIntervalMap.IsNativelySupported(CandleInterval.FourDays));
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    [Fact]
     public void RequestUriCarriesThePairIntervalAndStart()
     {
         var uri = KrakenHistoricalCandleSource.BuildRequestUri("XBTUSD", 5, DateTimeOffset.FromUnixTimeSeconds(1700000000));

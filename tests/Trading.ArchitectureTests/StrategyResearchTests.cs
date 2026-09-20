@@ -55,7 +55,8 @@ namespace Trading.ArchitectureTests
             Assert.Contains(CandleInterval.OneHour, intervals);
             Assert.Contains(CandleInterval.FourHours, intervals);
             Assert.Contains(CandleInterval.OneDay, intervals);
-            Assert.Equal(8, intervals.Length);
+            Assert.Contains(CandleInterval.FourDays, intervals);
+            Assert.Equal(9, intervals.Length);
         }
     }
 }

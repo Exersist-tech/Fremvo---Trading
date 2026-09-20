@@ -54,7 +54,8 @@ credential handle to the connector at call time.
 - `SymbolFilterSet` (price tick size, quantity step size, minimum notional,
   min/max quantity — exchange-neutral value object populated per exchange).
 - `CandleInterval` (enum: `OneMinute`, `FiveMinutes`, `TenMinutes`,
-  `FifteenMinutes`, `ThirtyMinutes`, `OneHour`, `FourHours`, `OneDay`).
+  `FifteenMinutes`, `ThirtyMinutes`, `OneHour`, `FourHours`, `OneDay`,
+  `FourDays`).
 - `Candle` (symbol, interval, open time UTC, close time UTC, OHLCV as
   `decimal`, `IsDerived` flag, `IsClosed` flag, source sequence/id for
   duplicate detection).
@@ -65,6 +66,11 @@ credential handle to the connector at call time.
 Derived candles (e.g. 10-minute from ten closed 1-minute candles) are
 always explicitly marked `IsDerived = true` and only built from `IsClosed`
 source candles.
+
+Four-day candles are derived only from four closed one-day candles. Their
+windows are anchored at Unix epoch day zero (1970-01-01T00:00:00Z): a window
+starts at UTC midnight when its whole-day offset from that date is divisible by
+four. This is independent of locale, calendar-week, and exchange time zones.
 
 ### 3.1 Candle sources
 
