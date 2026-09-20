@@ -2712,9 +2712,6 @@ app.MapGet("/chart", () => Results.Content(
             <div id="tradeStatus" class="empty">No paper order submitted yet.</div>
           </aside>
         </div>
-        <p id="legend" class="empty"></p>
-        <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
-
         <h2>Confirmed position on this pair</h2>
         <div id="positions"><p class="empty">Loading.</p></div>
         <h2>Active orders on this pair</h2>

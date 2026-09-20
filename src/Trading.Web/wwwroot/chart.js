@@ -245,12 +245,6 @@
       ctx.fillText(formatTime(c.openTimeUtc), Math.min(Math.max(cx, padLeft), padLeft + plotWidth), cssHeight - 6);
     });
 
-    var formingCount = visible.filter(function (c) { return !c.isClosed; }).length;
-    $('legend').textContent =
-      'Showing bars ' + (end - visible.length + 1) + '\u2013' + end + ' of ' + candles.length + '. ' +
-      (formingCount
-        ? formingCount + ' bar still forming, drawn dashed. It is not a finished candle and no closed-candle signal uses it.'
-        : 'All bars shown are closed.');
   }
 
   function isShort(direction) {
@@ -935,7 +929,7 @@
     }
 
     var target = normalizeAsset(pair.baseAsset);
-    host.textContent = 'Loading current ' + target + ' holding from the exchange.';
+    host.textContent = 'Loading ' + target + ' balance.';
     host.className = 'pair-balance-value';
 
     try {
@@ -945,12 +939,21 @@
         throw new Error('The current holding could not be read.');
       }
 
-      var messages = [];
+      host.textContent = '';
       var hasUnavailableAccount = false;
       (payload.accounts || []).forEach(function (account) {
+        var accountRow = document.createElement('div');
+        accountRow.className = 'pair-balance-account';
+        var accountName = document.createElement('strong');
+        accountName.textContent = account.displayName;
+        accountRow.appendChild(accountName);
+
         if (account.error) {
           hasUnavailableAccount = true;
-          messages.push(account.displayName + ': current balance unavailable');
+          var unavailable = document.createElement('span');
+          unavailable.textContent = 'Balance unavailable';
+          accountRow.appendChild(unavailable);
+          host.appendChild(accountRow);
           return;
         }
 
@@ -960,15 +963,27 @@
         var total = balance ? balance.total : 0;
         var available = balance ? balance.available : 0;
         var held = balance ? balance.held : 0;
-        messages.push(
-          account.displayName + ': ' + total + ' ' + target +
-          ' total (' + available + ' available, ' + held + ' held; read ' +
-          formatTime(account.retrievedAtUtc) + ')');
+        [
+          ['Total', total],
+          ['Available', available],
+          ['Held', held]
+        ].forEach(function (item) {
+          var row = document.createElement('div');
+          row.className = 'pair-balance-row';
+          var label = document.createElement('span');
+          label.textContent = item[0];
+          var value = document.createElement('strong');
+          value.textContent = item[1] + ' ' + target;
+          row.appendChild(label);
+          row.appendChild(value);
+          accountRow.appendChild(row);
+        });
+        host.appendChild(accountRow);
       });
 
-      host.textContent = messages.length
-        ? 'Current ' + target + ' exchange holding: ' + messages.join(' | ')
-        : 'No connected exchange account is available for a current holding reading.';
+      if (!host.childElementCount) {
+        host.textContent = 'No connected exchange account.';
+      }
       host.className = hasUnavailableAccount ? 'pair-balance-value error' : 'pair-balance-value';
     } catch (error) {
       host.textContent = 'Current exchange holding could not be read. No previous balance is shown.';

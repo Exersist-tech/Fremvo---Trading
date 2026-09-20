@@ -245,6 +245,34 @@ tbody tr:last-child td { border-bottom: none; }
 
 .pair-balance-value.error { color: #ffb4b4; }
 
+.pair-balance-account + .pair-balance-account {
+  border-top: 1px solid rgba(63, 185, 80, 0.25);
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+}
+
+.pair-balance-account > strong {
+  display: block;
+  font-size: 0.82rem;
+  margin-bottom: 0.25rem;
+}
+
+.pair-balance-account > span {
+  color: var(--bad);
+  font-size: 0.82rem;
+}
+
+.pair-balance-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.08rem 0;
+}
+
+.pair-balance-row span { color: var(--muted); }
+.pair-balance-row strong { font-weight: 600; text-align: right; }
+
 .chart-status {
   margin-bottom: 0.75rem;
   padding: 0.5rem 0.75rem;
