@@ -20,6 +20,9 @@ builder.Services.AddSingleton<ExperimentWorkerPool>();
 builder.Services.AddSingleton<IExperimentCandleSeriesSource, UnconfiguredExperimentCandleSeriesSource>();
 builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, UnconfiguredExperimentResearchGroupConfigurationSource>();
 builder.Services.AddSingleton<IExperimentWorkerRunner, UnconfiguredExperimentWorkerRunner>();
+// Activation is fail-closed by default. A deployment must explicitly replace this source with a
+// durable, audited activation repository; host configuration alone can never start training.
+builder.Services.AddSingleton<IPaperTrainingActivationSource, DisabledPaperTrainingActivationSource>();
 
 // Protective exits have an independent, explicitly disabled schedule. This inert evaluator is
 // intentional: enabling the schedule alone cannot activate broader experiment training.

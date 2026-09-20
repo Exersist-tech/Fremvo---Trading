@@ -26,6 +26,7 @@ public sealed class Worker : BackgroundService
     private readonly ExperimentWorkerPool _pool;
     private readonly IExperimentWorkerRunner _runner;
     private readonly IExperimentResearchGroupConfigurationSource _configurationSource;
+    private readonly IPaperTrainingActivationSource _activationSource;
     private readonly ExperimentHostOptions _options;
     private readonly TimeProvider _timeProvider;
 
@@ -34,6 +35,7 @@ public sealed class Worker : BackgroundService
         ExperimentWorkerPool pool,
         IExperimentWorkerRunner runner,
         IExperimentResearchGroupConfigurationSource configurationSource,
+        IPaperTrainingActivationSource activationSource,
         IOptions<ExperimentHostOptions> options,
         TimeProvider timeProvider)
     {
@@ -43,6 +45,7 @@ public sealed class Worker : BackgroundService
         _pool = pool;
         _runner = runner;
         _configurationSource = configurationSource;
+        _activationSource = activationSource;
         _options = options.Value;
         _timeProvider = timeProvider;
     }
@@ -69,7 +72,8 @@ public sealed class Worker : BackgroundService
         var completed = 0;
         var faulted = 0;
 
-        foreach (var userId in _options.EnabledUserIds)
+        var activeOwners = await _activationSource.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var userId in _options.EnabledUserIds.Intersect(activeOwners))
         {
             cancellationToken.ThrowIfCancellationRequested();
 

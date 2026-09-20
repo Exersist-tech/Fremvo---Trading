@@ -43,6 +43,7 @@ public sealed class TradingDbContext : DbContext
     public DbSet<PersistedExperimentDecisionRecord> ExperimentDecisionRecords => Set<PersistedExperimentDecisionRecord>();
     public DbSet<PersistedExperimentPaperExecutionAssociation> ExperimentPaperExecutionAssociations => Set<PersistedExperimentPaperExecutionAssociation>();
     public DbSet<PersistedExperimentResultSnapshot> ExperimentResultSnapshots => Set<PersistedExperimentResultSnapshot>();
+    public DbSet<PersistedPaperTrainingActivation> PaperTrainingActivations => Set<PersistedPaperTrainingActivation>();
 
     /// <summary>
     /// Precision used for every monetary and quantity column.
@@ -171,6 +172,18 @@ public sealed class TradingDbContext : DbContext
                 .HasColumnType("nvarchar(max)");
 
             entity.HasIndex(auditEvent => auditEvent.CorrelationId);
+        });
+
+        modelBuilder.Entity<PersistedPaperTrainingActivation>(entity =>
+        {
+            entity.ToTable("PaperTrainingActivations");
+            entity.HasKey(value => value.OwnerUserId);
+            entity.Property(value => value.State).IsRequired();
+            entity.Property(value => value.SlotCount).IsRequired();
+            entity.Property(value => value.ChangedAtUtc).IsRequired();
+            entity.Property(value => value.ChangedBy).IsRequired();
+            entity.Property(value => value.ApprovalId).HasMaxLength(128);
+            entity.Property(value => value.RowVersion).IsRowVersion();
         });
 
         modelBuilder.Entity<ExchangeAccount>(entity =>
