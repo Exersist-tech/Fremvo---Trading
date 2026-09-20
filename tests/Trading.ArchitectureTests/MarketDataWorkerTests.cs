@@ -47,7 +47,26 @@ public sealed class MarketDataWorkerTests
 
         Assert.Equal(CandleWriteResult.Conflict, result);
         Assert.Contains(DataQualityIssue.OutOfOrder, repository.LastWritten!.QualityFlags);
+        Assert.Contains(DataQualityIssue.Late, repository.LastWritten.QualityFlags);
+        Assert.False(repository.LastWritten.CanBeUsedForClosedCandleSignal);
         Assert.Equal(1, repository.UpsertCalls);
+    }
+
+    [Fact]
+    public async Task ProcessorMarksAHistoricalDuplicateBeforeRepositoryRejectsIt()
+    {
+        var existing = CreateCandle(10);
+        var repository = new RecordingRepository(existing, existing);
+        var processor = new CandleIngestionProcessor(
+            repository,
+            new FixedTimeProvider(new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero)),
+            NullLogger<CandleIngestionProcessor>.Instance);
+
+        var result = await processor.ProcessAsync(CreateCandle(10), CancellationToken.None);
+
+        Assert.Equal(CandleWriteResult.Conflict, result);
+        Assert.Contains(DataQualityIssue.Duplicate, repository.LastWritten!.QualityFlags);
+        Assert.False(repository.LastWritten.CanBeUsedForClosedCandleSignal);
     }
 
     [Fact]
@@ -67,8 +86,13 @@ public sealed class MarketDataWorkerTests
     private sealed class RecordingRepository : ICandleRepository
     {
         private readonly Candle _latest;
+        private readonly IReadOnlyCollection<Candle> _sameOpenTime;
 
-        internal RecordingRepository(Candle latest) => _latest = latest;
+        internal RecordingRepository(Candle latest, params Candle[] sameOpenTime)
+        {
+            _latest = latest;
+            _sameOpenTime = sameOpenTime;
+        }
         internal Candle? LastWritten { get; private set; }
         internal int UpsertCalls { get; private set; }
 
@@ -83,7 +107,7 @@ public sealed class MarketDataWorkerTests
             Task.FromResult<Candle?>(_latest);
 
         public Task<IReadOnlyCollection<Candle>> ListAsync(string symbol, CandleInterval interval, DateTimeOffset fromUtc, DateTimeOffset toUtc, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyCollection<Candle>>(Array.Empty<Candle>());
+            Task.FromResult(fromUtc == toUtc ? _sameOpenTime : (IReadOnlyCollection<Candle>)Array.Empty<Candle>());
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

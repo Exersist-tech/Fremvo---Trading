@@ -42,6 +42,30 @@ public static class DerivedCandleBuilder
         var low = ordered.Min(c => c.Low);
         var close = ordered.Last().Close;
         var volume = ordered.Sum(c => c.Volume);
+        var issues = new HashSet<DataQualityIssue>(ordered.SelectMany(candle => candle.QualityFlags));
+        for (var index = 0; index < ordered.Count; index++)
+        {
+            var expectedOpen = startTimeUtc.ToUniversalTime().AddMinutes(index);
+            if (ordered[index].OpenTimeUtc != expectedOpen)
+            {
+                issues.Add(DataQualityIssue.Missing);
+            }
+        }
+
+        for (var index = 1; index < oneMinuteCandles.Count; index++)
+        {
+            if (oneMinuteCandles[index].OpenTimeUtc <= oneMinuteCandles[index - 1].OpenTimeUtc)
+            {
+                issues.Add(oneMinuteCandles[index].OpenTimeUtc == oneMinuteCandles[index - 1].OpenTimeUtc
+                    ? DataQualityIssue.Duplicate
+                    : DataQualityIssue.OutOfOrder);
+            }
+        }
+
+        if (endTimeUtc.ToUniversalTime() != startTimeUtc.ToUniversalTime().AddMinutes(10))
+        {
+            issues.Add(DataQualityIssue.Missing);
+        }
 
         return new Candle(
             symbol,
@@ -55,6 +79,6 @@ public static class DerivedCandleBuilder
             volume,
             isClosed: isClosed,
             isDerived: true,
-            qualityFlags: isClosed ? new[] { DataQualityIssue.Derived } : new[] { DataQualityIssue.Derived, DataQualityIssue.Incomplete });
+            qualityFlags: issues);
     }
 }

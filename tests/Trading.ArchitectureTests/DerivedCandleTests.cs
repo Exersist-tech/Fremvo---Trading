@@ -48,4 +48,26 @@ public sealed class DerivedCandleTests
 
         Assert.Throws<ArgumentException>(() => DerivedCandleBuilder.BuildTenMinuteCandle(candles, "BTCUSDT", start, start.AddMinutes(2), true));
     }
+
+    [Fact]
+    public void DerivedCandlePropagatesUnsafeConstituentAndGapEvidence()
+    {
+        var start = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var candles = Enumerable.Range(0, 10)
+            .Select(index => new Candle(
+                "BTCUSDT", CandleInterval.OneMinute,
+                start.AddMinutes(index == 5 ? 6 : index),
+                start.AddMinutes(index == 5 ? 7 : index + 1),
+                100m, 101m, 99m, 100m, 1m, true, false,
+                index == 4 ? new[] { DataQualityIssue.Late } : null))
+            .ToArray();
+
+        var derived = DerivedCandleBuilder.BuildTenMinuteCandle(
+            candles, "BTCUSDT", start, start.AddMinutes(10), true);
+
+        Assert.Contains(DataQualityIssue.Derived, derived.QualityFlags);
+        Assert.Contains(DataQualityIssue.Late, derived.QualityFlags);
+        Assert.Contains(DataQualityIssue.Missing, derived.QualityFlags);
+        Assert.False(derived.CanBeUsedForClosedCandleSignal);
+    }
 }

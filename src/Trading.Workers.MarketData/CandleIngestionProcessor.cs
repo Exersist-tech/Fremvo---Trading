@@ -28,11 +28,18 @@ public sealed class CandleIngestionProcessor
         ArgumentNullException.ThrowIfNull(incoming);
         var previous = await _repository.GetLatestAsync(incoming.Symbol, incoming.Interval, cancellationToken)
             .ConfigureAwait(false);
+        var sameOpenTime = await _repository.ListAsync(
+                incoming.Symbol, incoming.Interval, incoming.OpenTimeUtc, incoming.OpenTimeUtc, cancellationToken)
+            .ConfigureAwait(false);
         var flags = incoming.QualityFlags
             .Concat(CandleQualityEvaluator.Evaluate(
                 incoming, previous, _timeProvider.GetUtcNow(),
                 TimeSpan.FromMinutes((int)incoming.Interval),
                 TimeSpan.FromMinutes((int)incoming.Interval * 2)))
+            .Concat(sameOpenTime.SelectMany(existing => CandleQualityEvaluator.Evaluate(
+                incoming, existing, _timeProvider.GetUtcNow(),
+                TimeSpan.FromMinutes((int)incoming.Interval),
+                TimeSpan.FromMinutes((int)incoming.Interval * 2))))
             .Distinct()
             .OrderBy(flag => (int)flag)
             .ToArray();
