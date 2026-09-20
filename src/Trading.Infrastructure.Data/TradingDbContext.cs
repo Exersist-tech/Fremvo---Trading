@@ -216,6 +216,7 @@ public sealed class TradingDbContext : DbContext
             // Stored as text so the paper and live books stay distinguishable
             // in the database itself, not only in application code.
             entity.Property(order => order.Mode).HasConversion<string>().HasMaxLength(16).IsRequired();
+            entity.Property(order => order.ExchangeAccountId).IsRequired(false);
             entity.HasIndex(order => new { order.UserId, order.Mode });
 
             entity.Property(order => order.Symbol)

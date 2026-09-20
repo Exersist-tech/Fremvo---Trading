@@ -25,7 +25,13 @@ public enum TradingStageChangeOutcome
     /// There is no execution route to this exchange, so no order could reach a
     /// venue even if the account were promoted.
     /// </summary>
-    LiveRouteUnavailable = 4
+    LiveRouteUnavailable = 4,
+
+    /// <summary>
+    /// The account owner is not in the operator-approved initial live-trading
+    /// cohort.
+    /// </summary>
+    LiveTradingNotEntitled = 5
 }
 
 public sealed record TradingStageChangeResult(
@@ -71,17 +77,20 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
     private readonly ILiveExecutionRouteProvider _routes;
     private readonly IAuditEventWriter _auditWriter;
     private readonly TimeProvider _timeProvider;
+    private readonly Execution.LiveTradingOptions _liveTradingOptions;
 
     public ExchangeAccountStageService(
         IExchangeAccountRepository accounts,
         ILiveExecutionRouteProvider routes,
         IAuditEventWriter auditWriter,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        Execution.LiveTradingOptions? liveTradingOptions = null)
     {
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _liveTradingOptions = liveTradingOptions ?? new Execution.LiveTradingOptions();
     }
 
     public async Task<TradingStageChangeResult> PromoteAsync(
@@ -127,8 +136,31 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
                 $"Real trading on {account.ExchangeKind} is not available: this deployment has no execution route to that exchange, so no order could reach it. Paper trading is unaffected.");
         }
 
+        if (!_liveTradingOptions.CanTradeLive(userId))
+        {
+            return new TradingStageChangeResult(
+                TradingStageChangeOutcome.LiveTradingNotEntitled,
+                account.Stage,
+                "This account is not in the operator-approved live-trading rollout cohort.");
+        }
+
         var now = _timeProvider.GetUtcNow();
         account.Promote(target, now);
+
+        // The proving stage exists to put a small amount of real money through
+        // the whole route once, so it is given a notional ceiling at the moment
+        // it is entered. Without one every proving order would be refused for
+        // want of a limit, and an operator tempted to remove the refusal would
+        // remove the limit with it.
+        if (account.Stage == TradingStage.Proving)
+        {
+            account.SetProvingNotionalCeiling(_liveTradingOptions.DefaultProvingNotionalCeiling);
+        }
+        else
+        {
+            account.ClearProvingNotionalCeiling();
+        }
+
         await _accounts.UpdateAsync(account, cancellationToken).ConfigureAwait(false);
 
         await WriteAuditAsync(userId, account, "ExchangeAccount.Promoted", now, cancellationToken)
@@ -156,6 +188,7 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
 
         var now = _timeProvider.GetUtcNow();
         account.ReturnToPaper(now);
+        account.ClearProvingNotionalCeiling();
         await _accounts.UpdateAsync(account, cancellationToken).ConfigureAwait(false);
 
         await WriteAuditAsync(userId, account, "ExchangeAccount.ReturnedToPaper", now, cancellationToken)

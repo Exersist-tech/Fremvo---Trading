@@ -67,6 +67,24 @@
   user's local application data, never the repository working tree. It refuses
   to construct outside Development. It is not a Key Vault substitute.
 
+### Production deployment controls
+
+- `deploy/bicep/main.bicep` deploys an RBAC-enabled Key Vault, a Linux App
+  Service with a system-assigned Managed Identity, Log Analytics, and
+  workspace-based Application Insights. The App Service identity is granted
+  only the Key Vault secret-management permission needed to connect, use, and
+  disconnect a user's exchange account; deployment identities are not
+  application identities.
+- The SQL connection string is a secure Bicep parameter. API key and private
+  key values are never Bicep parameters, App Service settings, logs, or
+  telemetry fields.
+- Live execution remains unavailable unless an operator explicitly enables the
+  Kraken route **and** provides a non-empty, approved user cohort and proving
+  symbol list. Empty lists deny by default.
+- An indeterminate real-order submission is logged as a credential-free,
+  structured `LiveOrderUnknown` event and raises an alert. It must be
+  reconciled before any operator or user attempts another submission.
+
 ## 3. AuthN/AuthZ
 
 - Invitation-only registration; invitation codes are single-use or capped,

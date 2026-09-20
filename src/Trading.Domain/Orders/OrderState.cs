@@ -48,7 +48,8 @@ public sealed class Order
         string clientOrderId,
         bool reduceOnly = false,
         bool closeOnly = false,
-        TradingMode mode = TradingMode.Paper)
+        TradingMode mode = TradingMode.Paper,
+        Guid? exchangeAccountId = null)
     {
         if (id == Guid.Empty)
         {
@@ -85,6 +86,13 @@ public sealed class Order
             throw new ArgumentException("Client order id is required.", nameof(clientOrderId));
         }
 
+        if (mode == TradingMode.Live && (exchangeAccountId is null || exchangeAccountId == Guid.Empty))
+        {
+            throw new ArgumentException(
+                "A live order must name the exchange account that placed it.",
+                nameof(exchangeAccountId));
+        }
+
         Id = id;
         UserId = userId;
         StrategyId = strategyId;
@@ -98,6 +106,7 @@ public sealed class Order
         ReduceOnly = reduceOnly;
         CloseOnly = closeOnly;
         Mode = mode;
+        ExchangeAccountId = exchangeAccountId;
         State = OrderState.Draft;
         Version = 0;
     }
@@ -132,6 +141,13 @@ public sealed class Order
     /// simulated order rather than one that claims to have reached a venue.
     /// </summary>
     public TradingMode Mode { get; }
+
+    /// <summary>
+    /// The account at the venue that owns this order. It is required for a
+    /// live order so reconciliation and fill synchronization cannot query a
+    /// different account owned by the same user.
+    /// </summary>
+    public Guid? ExchangeAccountId { get; }
 
     public OrderState State { get; private set; }
 

@@ -225,7 +225,7 @@ public sealed class KrakenExecutionReplayTests
         var result = await scope.Adapter.ExecuteAsync(LiveCommand(), CancellationToken.None);
 
         Assert.True(result.Success);
-        Assert.Equal(ExecutionOutcome.Filled, result.Outcome);
+        Assert.Equal(ExecutionOutcome.Accepted, result.Outcome);
         Assert.Single(scope.Handler.RequestsTo(KrakenResponses.AddOrderPath));
     }
 

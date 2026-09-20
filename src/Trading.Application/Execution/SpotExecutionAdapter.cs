@@ -142,7 +142,7 @@ public sealed class SpotExecutionAdapter : IExecutionAdapter
                 // Acceptance is not a fill. The quantity and price stay zero
                 // until fills are read back, so an accepted order cannot be
                 // reported as executed at its limit price.
-                outcome: ExecutionOutcome.Filled),
+                outcome: ExecutionOutcome.Accepted),
 
             SpotPlacementOutcome.Rejected => new ExecutionResult(
                 command.Id,

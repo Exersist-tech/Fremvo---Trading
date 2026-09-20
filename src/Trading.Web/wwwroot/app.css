@@ -191,6 +191,95 @@ tbody tr:last-child td { border-bottom: none; }
   touch-action: none;
 }
 
+.chart-stage {
+  position: relative;
+}
+
+.chart-controls {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+}
+
+.chart-controls-left {
+  top: 0.7rem;
+  left: 0.7rem;
+  align-items: stretch;
+  flex-direction: column;
+  min-width: min(290px, calc(100% - 1.4rem));
+}
+
+.chart-controls-right {
+  top: 0.7rem;
+  right: 0.7rem;
+}
+
+.chart-controls label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chart-controls input,
+.chart-controls select {
+  min-height: 2.2rem;
+}
+
+.pair-results {
+  display: none;
+  max-height: 16rem;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.pair-results.has-results {
+  display: block;
+}
+
+.pair-result {
+  display: block;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.pair-result:last-child { border-bottom: 0; }
+.pair-result:hover,
+.pair-result:focus { background: var(--panel-2); }
+
+.pair-result small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 400;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .toolbar input, .toolbar select {
   background: var(--panel);
   color: var(--text);
@@ -223,6 +312,22 @@ button.danger {
   background: #3a1d1d;
   border-color: #7a3030;
   color: #ffb4b4;
+}
+
+@media (max-width: 780px) {
+  .chart-controls-right {
+    top: auto;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .chart-controls-left {
+    top: 0.5rem;
+    left: 0.5rem;
+  }
 }
 
 .tabs {

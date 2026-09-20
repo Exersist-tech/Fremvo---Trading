@@ -358,21 +358,31 @@ public sealed class ExecutionCommand
 /// </remarks>
 public enum ExecutionOutcome
 {
-    /// <summary>The order exists and filled, wholly or partly.</summary>
-    Filled = 0,
+    /// <summary>
+    /// The exchange accepted the order. This is not a fill; fills must be
+    /// observed from the exchange before a position is created.
+    /// </summary>
+    Accepted = 0,
+
+    /// <summary>
+    /// A simulated execution filled, wholly or partly. A real spot execution
+    /// adapter must never use this value for an order merely accepted by a
+    /// venue.
+    /// </summary>
+    Filled = 1,
 
     /// <summary>
     /// The venue refused the order on its own content. No order exists and
     /// none can arise from this command.
     /// </summary>
-    Rejected = 1,
+    Rejected = 2,
 
     /// <summary>
     /// Nothing was established. The order may be live. It must be reconciled
     /// against the venue before anything further is submitted for the same
     /// intent.
     /// </summary>
-    Unknown = 2
+    Unknown = 3
 }
 
 public interface IExecutionAdapter

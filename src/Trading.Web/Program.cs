@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using Azure.Identity;
+using Azure.Security.KeyVault.Secrets;
 using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
@@ -20,14 +22,18 @@ using Trading.Domain.Positions;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Abstractions.Execution;
 using Trading.Exchanges.Kraken;
+using Trading.Exchanges.Kraken.Execution;
 using Trading.Exchanges.Kraken.MarketData;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Audit;
+using Trading.Infrastructure.Data.Execution;
 using Trading.Infrastructure.Data.ExchangeAccounts;
 using Trading.Infrastructure.Secrets;
 using Trading.MarketData;
 using Trading.Optimization;
+using Trading.Risk;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
@@ -49,7 +55,13 @@ const string ExperimentDisclaimer =
     "Simulated results do not indicate future results, and no strategy is guaranteed to be profitable.";
 
 const string OrdersDisclaimer =
-    "Live trading is disabled. Orders shown here are paper orders placed with fake funds. " +
+    "Orders shown here are paper orders placed with fake funds. " +
+    "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
+
+const string LiveOrdersDisclaimer =
+    "These are real orders placed with your own funds on a real exchange. " +
+    "Acceptance by the exchange is not a fill, and an accepted order may still be " +
+    "cancelled, partly filled, or filled at a different time than expected. " +
     "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
 
 // The live book is empty because no order has ever been sent to a venue from
@@ -80,12 +92,48 @@ builder.Services.AddScoped<IExchangeAccountService, ExchangeAccountService>();
 builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountRepository>();
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
 
-// No ILiveExecutionRoute is registered, so LiveExecutionRouteProvider reports
-// that nothing can reach a venue and promotion out of paper is refused. This is
-// the single place real trading becomes possible: registering a route for an
-// exchange is what opens the ladder for it, and nothing else needs to change.
+// Whether this deployment can reach a real venue. Registering an
+// ILiveExecutionRoute is the single act that opens the promotion ladder out of
+// paper, so it is done deliberately and only when an operator has asked for it.
+// The switch cannot invent a capability: it can only register a route whose
+// gateway already exists in this build, and an exchange with no gateway stays
+// unreachable no matter what configuration says.
+var liveExecutionEnabled = builder.Configuration.GetValue<bool>("Trading:LiveExecution:Kraken:Enabled");
+
 builder.Services.AddSingleton<ILiveExecutionRouteProvider, LiveExecutionRouteProvider>();
 builder.Services.AddScoped<IExchangeAccountStageService, ExchangeAccountStageService>();
+
+// Platform ceilings on live trading. Deliberately small by default, and with no
+// approved proving instruments, so a deployment that enables live execution
+// without configuring bounds still cannot send a large or arbitrary order.
+var liveTradingOptions = new LiveTradingOptions();
+builder.Configuration.GetSection("Trading:LiveExecution").Bind(liveTradingOptions);
+builder.Services.AddSingleton(liveTradingOptions);
+
+// The order gateway is registered whether or not live execution is enabled: it
+// is also what reconciliation and order synchronisation read through, and both
+// of those must keep working for an account that was promoted and then had its
+// route withdrawn. Only the route registration below grants the ability to
+// promote an account in the first place.
+builder.Services.AddHttpClient<ISpotOrderGateway, KrakenSpotOrderGateway>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com");
+    client.Timeout = TimeSpan.FromSeconds(20);
+});
+
+if (liveExecutionEnabled)
+{
+    builder.Services.AddSingleton<ILiveExecutionRoute>(provider =>
+        new KrakenSpotLiveExecutionRoute(provider.GetRequiredService<ISpotOrderGateway>()));
+}
+
+builder.Services.AddScoped<ISpotExecutionAccountSource, ExchangeAccountExecutionSource>();
+builder.Services.AddScoped<IExecutionAdapter>(provider => new SpotExecutionAdapter(
+    provider.GetRequiredService<ISpotOrderGateway>(),
+    provider.GetRequiredService<ISpotExecutionAccountSource>(),
+    provider.GetRequiredService<TimeProvider>()));
+builder.Services.AddScoped<ILiveTradingService, LiveTradingService>();
+builder.Services.AddScoped<LiveOrderSyncService>();
 
 // The Kraken permission probe talks to Kraken's private API to establish what a
 // user's key may do. It is the only component that sees a credential, and it
@@ -127,7 +175,17 @@ if (builder.Environment.IsDevelopment())
 }
 else
 {
-    builder.Services.AddSingleton<ISecretStore, InMemorySecretStore>();
+    var keyVaultUri = builder.Configuration["KeyVault:Uri"];
+    if (!Uri.TryCreate(keyVaultUri, UriKind.Absolute, out var keyVaultEndpoint)
+        || keyVaultEndpoint.Scheme != Uri.UriSchemeHttps
+        || !string.IsNullOrEmpty(keyVaultEndpoint.UserInfo))
+    {
+        throw new InvalidOperationException(
+            "Production requires a valid HTTPS KeyVault:Uri. Exchange credentials must never use in-memory storage outside Development.");
+    }
+
+    builder.Services.AddSingleton(_ => new SecretClient(keyVaultEndpoint, new DefaultAzureCredential()));
+    builder.Services.AddSingleton<ISecretStore, AzureKeyVaultSecretStore>();
 }
 
 // Sign-in state is held in a cookie that the browser cannot read, so no identity or session
@@ -188,13 +246,17 @@ builder.Services.AddSingleton<ExperimentWorkerPool>();
 builder.Services.AddSingleton<InMemoryTradingHaltState>();
 builder.Services.AddSingleton<ITradingHaltState>(sp => sp.GetRequiredService<InMemoryTradingHaltState>());
 
-// Execution storage. These are the non-durable implementations, which is acceptable only
-// because live trading is disabled. Enabling live trading requires swapping these for the
-// Entity Framework repositories so an exchange order can never outlive its local record.
-builder.Services.AddSingleton<InMemoryOrderRepository>();
-builder.Services.AddSingleton<IOrderRepository>(sp => sp.GetRequiredService<InMemoryOrderRepository>());
-builder.Services.AddSingleton<IPositionRepository, InMemoryPositionRepository>();
-builder.Services.AddSingleton<IOrderReconciliationRepository, InMemoryOrderReconciliationRepository>();
+// Execution storage. These are durable: an order that exists at the exchange
+// must never outlive its local record, because the client order id stored here
+// is the only handle by which a lost order can be found again. In-memory
+// storage would lose that handle on every restart, which is survivable for a
+// simulated fill and not survivable for a real one.
+builder.Services.AddScoped<IOrderRepository, EfOrderRepository>();
+builder.Services.AddScoped<IPositionRepository, EfPositionRepository>();
+builder.Services.AddScoped<IOrderReconciliationRepository, EfOrderReconciliationRepository>();
+builder.Services.AddScoped<IExchangeOrderStatusQuery, OrderBackedSpotOrderStatusQuery>();
+builder.Services.AddScoped<OrderReconciliationService>();
+builder.Services.AddSingleton(_ => new RiskEngine());
 
 // Instrument universe. The thresholds registered here are the mandatory
 // platform floor; operator configuration is combined with them and may only
@@ -1806,6 +1868,71 @@ app.MapGet("/api/paper/positions", async (
     });
 }).RequireAuthorization();
 
+// The live book, valued the same way the paper book is.
+//
+// It is a separate route from the paper one, filtered by mode, so a simulated
+// position can never appear among real ones and vice versa. Mixing them would
+// present fake exposure as real, which is the most dangerous thing this
+// application could display.
+app.MapGet("/api/live/positions", async (
+    ClaimsPrincipal principal,
+    IPositionValuationService valuation,
+    LiveOrderSyncService sync,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var staleWarning = (string?)null;
+
+    try
+    {
+        // Positions follow observed fills, so the exchange is asked before the
+        // book is read. Without this a working order would never become a
+        // position until something else happened to look.
+        await sync.SyncAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    }
+#pragma warning disable CA1031 // A failed refresh must not hide the positions themselves.
+    catch (Exception exception) when (exception is not OperationCanceledException)
+#pragma warning restore CA1031
+    {
+        staleWarning = "The exchange could not be reached, so this book may be out of date.";
+    }
+
+    var valued = await valuation
+        .ValueOpenPositionsAsync(userId.Value, cancellationToken)
+        .ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Live",
+        disclaimer = LiveOrdersDisclaimer,
+        staleWarning,
+        positions = valued.Where(item => item.Position.Mode == TradingMode.Live).Select(item => new
+        {
+            item.Position.Id,
+            item.Position.Symbol,
+            direction = item.Position.Direction == PositionDirection.DirectionShort ? "Short" : "Long",
+            status = item.Position.Status.ToString(),
+            item.Position.Quantity,
+            item.Position.EntryPrice,
+            markPrice = item.MarkPrice,
+            unrealisedPnl = item.UnrealisedPnl,
+            unrealisedPercent = item.UnrealisedPercent,
+            breakEvenPrice = item.BreakEvenPriceExcludingFees,
+            stopLossPrice = item.Position.StopLossPrice,
+            takeProfitPrice = item.Position.TakeProfitPrice,
+            pricedAtUtc = item.PricedAtUtc,
+            priceIsStale = item.PriceIsStale,
+            priceUnavailableReason = item.PriceUnavailableReason,
+            item.Position.OpenedAtUtc
+        })
+    });
+}).RequireAuthorization();
+
 // Sets or clears the stop and target on an open paper position. The levels are
 // validated against the position's direction, so a stop on the profitable side
 // is refused rather than stored and triggered immediately.
@@ -1975,6 +2102,154 @@ app.MapPost("/api/paper/orders", async (
     });
 }).RequireAuthorization();
 
+// Lists the user's live orders, after asking the exchange what actually
+// happened to each working one.
+//
+// The refresh runs before the read because the platform's own record of a
+// working order is only ever a claim about the past. Showing it without asking
+// would present the moment of submission as though it were the present.
+app.MapGet("/api/live/orders", async (
+    ClaimsPrincipal principal,
+    IOrderRepository orders,
+    LiveOrderSyncService sync,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    var synced = 0;
+    var syncFailure = (string?)null;
+
+    try
+    {
+        synced = await sync.SyncAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    }
+#pragma warning disable CA1031 // A failed refresh must not hide the orders themselves.
+    catch (Exception exception) when (exception is not OperationCanceledException)
+#pragma warning restore CA1031
+    {
+        syncFailure = "The exchange could not be reached, so these states may be out of date.";
+    }
+
+    var all = await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Live",
+        disclaimer = LiveOrdersDisclaimer,
+        refreshed = synced,
+        staleWarning = syncFailure,
+        orders = all
+            .Where(order => order.Mode == TradingMode.Live)
+            .OrderByDescending(order => order.CreatedAtUtc)
+            .Select(order => new
+            {
+                order.Id,
+                order.ClientOrderId,
+                order.Symbol,
+                side = order.Side.ToString(),
+                state = order.State.ToString(),
+                order.Quantity,
+                order.FilledQuantity,
+                price = order.Price,
+                limitPrice = order.Price,
+                order.CreatedAtUtc,
+                requiresReconciliation = order.State == OrderState.Failed
+            })
+    });
+}).RequireAuthorization();
+
+// Submits a real order with real money.
+//
+// Every refusal keeps its own outcome and its own status code. The one that
+// matters most is Unknown: it is answered with 202 and an explicit instruction
+// not to retry, because a retry after an unestablished submission is how one
+// intended position becomes two.
+app.MapPost("/api/live/orders", async (
+    SubmitLiveOrderRequest request,
+    ClaimsPrincipal principal,
+    ILiveTradingService liveTrading,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    ArgumentNullException.ThrowIfNull(request);
+
+    if (!Enum.TryParse<OrderSide>(request.Side, ignoreCase: true, out var side))
+    {
+        return Results.BadRequest(new { error = "InvalidSide", message = "Side must be Buy or Sell." });
+    }
+
+    var result = await liveTrading
+        .SubmitAsync(
+            userId.Value,
+            request.ExchangeAccountId,
+            request.Symbol,
+            side,
+            request.Quantity,
+            request.ClientOrderId,
+            cancellationToken)
+        .ConfigureAwait(false);
+
+    if (result.Outcome == LiveTradeOutcome.Unknown)
+    {
+        return Results.Json(
+            new
+            {
+                error = result.Outcome.ToString(),
+                message = result.Message,
+                orderId = result.Order?.Id,
+                clientOrderId = result.Order?.ClientOrderId,
+                action = "Do not resubmit this order. Its state is being reconciled with the exchange."
+            },
+            statusCode: StatusCodes.Status202Accepted);
+    }
+
+    if (!result.Succeeded)
+    {
+        var status = result.Outcome switch
+        {
+            LiveTradeOutcome.Duplicate => StatusCodes.Status409Conflict,
+            LiveTradeOutcome.Blocked or LiveTradeOutcome.RiskBlocked => StatusCodes.Status403Forbidden,
+            LiveTradeOutcome.PriceUnavailable => StatusCodes.Status503ServiceUnavailable,
+            LiveTradeOutcome.InstrumentUnavailable => StatusCodes.Status503ServiceUnavailable,
+            LiveTradeOutcome.AccountNotEligible => StatusCodes.Status412PreconditionFailed,
+            LiveTradeOutcome.Rejected => StatusCodes.Status422UnprocessableEntity,
+            _ => StatusCodes.Status400BadRequest
+        };
+
+        return Results.Json(
+            new { error = result.Outcome.ToString(), message = result.Message },
+            statusCode: status);
+    }
+
+    var order = result.Order!;
+    return Results.Ok(new
+    {
+        tradingMode = "Live",
+        disclaimer = LiveOrdersDisclaimer,
+        message = result.Message,
+        order = new
+        {
+            order.Id,
+            order.ClientOrderId,
+            order.Symbol,
+            side = order.Side.ToString(),
+            state = order.State.ToString(),
+            order.Quantity,
+            order.FilledQuantity,
+            limitPrice = order.Price
+        }
+    });
+}).RequireAuthorization();
+
 // What this deployment can actually do, per mode. The page asks rather than
 // assumes, so the tab it offers matches what the server will accept.
 app.MapGet("/api/trading/modes", async (
@@ -2004,13 +2279,16 @@ app.MapGet("/api/trading/modes", async (
         },
         live = new
         {
-            available = liveRoute && connected.Exists(account => account.CanReachExchange),
-            // Stated plainly rather than as "coming soon". No order can reach a
-            // venue from this deployment, and saying anything softer would
-            // imply a capability that does not exist.
-            reason = liveRoute
-                ? "No account has been promoted out of paper."
-                : "Live trading is unavailable: this deployment has no execution route to the exchange, so no order could reach it."
+            available = liveRoute && connected.Exists(account =>
+                account.CanReachExchange && account.Stage != TradingStage.Paper),
+            // Each reason names the specific thing that is missing, so a user
+            // is never told "unavailable" when the only obstacle is a promotion
+            // they can request themselves.
+            reason = !liveRoute
+                ? "Live trading is unavailable: this deployment has no execution route to the exchange, so no order could reach it."
+                : connected.TrueForAll(account => account.Stage == TradingStage.Paper)
+                    ? "No account has been promoted out of paper. Promote an account to Proving to send a first small real order."
+                    : null
         },
         accounts = connected.Select(account => new
         {
@@ -2071,6 +2349,7 @@ app.MapPost("/api/exchange/accounts/{accountId:guid}/stage", async (
         // user, so it is reported as unimplemented rather than as a refusal
         // they could argue with.
         TradingStageChangeOutcome.LiveRouteUnavailable => StatusCodes.Status501NotImplemented,
+        TradingStageChangeOutcome.LiveTradingNotEntitled => StatusCodes.Status403Forbidden,
         _ => StatusCodes.Status409Conflict
     };
 
@@ -2267,33 +2546,42 @@ app.MapGet("/chart", () => Results.Content(
           chart shows the same distinction.
         </div>
 
-        <div class="toolbar">
-          <label for="symbol">Pair</label>
-          <select id="symbol"></select>
-
-          <label for="interval">Interval</label>
-          <select id="interval">
-            <option value="OneMinute">1 minute</option>
-            <option value="FiveMinutes">5 minutes</option>
-            <option value="TenMinutes">10 minutes</option>
-            <option value="FifteenMinutes">15 minutes</option>
-            <option value="ThirtyMinutes">30 minutes</option>
-            <option value="OneHour" selected>1 hour</option>
-            <option value="FourHours">4 hours</option>
-            <option value="OneDay">1 day</option>
-          </select>
-
-          <button id="load" type="button">Load</button>
-          <span class="spacer"></span>
-          <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
-          <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
-          <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
-        </div>
-
         <div id="status" class="notice">Loading.</div>
 
-        <canvas id="chart" width="1100" height="460"
-                style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
+        <div class="chart-stage">
+          <div class="chart-controls chart-controls-left">
+            <label for="pairSearch">Search pairs</label>
+            <input id="pairSearch" type="search" placeholder="Search BTC, EUR, XBTUSD" autocomplete="off"
+                   aria-autocomplete="list" aria-controls="pairResults" />
+            <!-- The select remains the canonical selected value for the chart
+                 and order ticket. Pair search only chooses from its active
+                 Kraken-backed options; it never accepts arbitrary symbols. -->
+            <select id="symbol" class="visually-hidden" aria-hidden="true" tabindex="-1"></select>
+            <div id="pairResults" class="pair-results" role="listbox" aria-label="Matching active Kraken pairs"></div>
+          </div>
+
+          <div class="chart-controls chart-controls-right">
+            <label for="interval">Interval</label>
+            <select id="interval">
+              <option value="OneMinute">1 minute</option>
+              <option value="FiveMinutes">5 minutes</option>
+              <option value="TenMinutes">10 minutes</option>
+              <option value="FifteenMinutes">15 minutes</option>
+              <option value="ThirtyMinutes">30 minutes</option>
+              <option value="OneHour" selected>1 hour</option>
+              <option value="FourHours">4 hours</option>
+              <option value="OneDay">1 day</option>
+            </select>
+
+            <button id="load" type="button">Load</button>
+            <button id="zoomIn" type="button" title="Show fewer bars">Zoom in</button>
+            <button id="zoomOut" type="button" title="Show more bars">Zoom out</button>
+            <button id="zoomReset" type="button" title="Back to the most recent bars">Reset</button>
+          </div>
+
+          <canvas id="chart" width="1100" height="460"
+                  style="width:100%;height:460px;background:#14171c;border-radius:6px;"></canvas>
+        </div>
         <p id="legend" class="empty"></p>
         <p class="empty">Scroll on the chart to zoom. Drag it sideways to pan.</p>
 
@@ -2915,6 +3203,19 @@ internal sealed record HaltCommandRequest(
 /// principal, and no trading mode, because a paper order can never be redirected to a venue.
 /// </summary>
 internal sealed record SubmitPaperOrderRequest(
+    string Symbol,
+    string Side,
+    decimal Quantity,
+    string? ClientOrderId);
+
+/// <summary>
+/// Live order submission. It carries no user id, because the owner is taken
+/// from the signed-in principal, and it names the exchange account explicitly
+/// so a user with more than one cannot have an order routed to whichever
+/// account the server happened to pick.
+/// </summary>
+internal sealed record SubmitLiveOrderRequest(
+    Guid ExchangeAccountId,
     string Symbol,
     string Side,
     decimal Quantity,

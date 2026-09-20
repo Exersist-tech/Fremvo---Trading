@@ -1,3 +1,4 @@
+using Trading.Application.Execution;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Domain.Audit;
@@ -15,7 +16,9 @@ public sealed class ExchangeAccountPromotionTests
     private static readonly Guid UserId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid OtherUserId = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
-    private static (ExchangeAccountStageService Service, ExchangeAccount Account) Build(bool withLiveRoute)
+    private static (ExchangeAccountStageService Service, ExchangeAccount Account) Build(
+        bool withLiveRoute,
+        bool entitled = true)
     {
         var accounts = new FakeAccounts();
         var account = new ExchangeAccount(
@@ -36,7 +39,11 @@ public sealed class ExchangeAccountPromotionTests
             accounts,
             routes,
             new SilentAuditWriter(),
-            new FrozenClock(Now));
+            new FrozenClock(Now),
+            new LiveTradingOptions
+            {
+                AllowedUserIds = entitled ? [UserId] : Array.Empty<Guid>()
+            });
 
         return (service, account);
     }
@@ -65,6 +72,17 @@ public sealed class ExchangeAccountPromotionTests
         // The account must be left exactly where it was.
         Assert.Equal(TradingStage.Paper, account.Stage);
         Assert.False(account.CanReachExchange);
+    }
+
+    [Fact]
+    public async Task PromotionIsRefusedWhenTheUserIsNotInTheRolloutCohort()
+    {
+        var (service, account) = Build(withLiveRoute: true, entitled: false);
+
+        var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
+
+        Assert.Equal(TradingStageChangeOutcome.LiveTradingNotEntitled, result.Outcome);
+        Assert.Equal(TradingStage.Paper, account.Stage);
     }
 
     [Fact]

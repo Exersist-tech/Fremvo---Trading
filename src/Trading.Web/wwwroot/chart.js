@@ -382,13 +382,25 @@
   // leaves an order and an audit trail behind like any other fill.
   async function closePosition(position, button) {
     var side = isShort(position.direction) ? 'Buy' : 'Sell';
+    var live = tradingMode === 'Live';
 
     var confirmed = window.confirm(
       'Close the ' + (isShort(position.direction) ? 'short' : 'long') + ' position of ' +
       position.quantity + ' ' + position.symbol + '?\n\n' +
-      'This submits a ' + side.toLowerCase() + ' order for the full quantity. Fake funds only.');
+      'This submits a ' + side.toLowerCase() + ' order for the full quantity. ' +
+      (live ? 'REAL money on a real exchange.' : 'Fake funds only.'));
 
     if (!confirmed) { return; }
+
+    if (live) {
+      button.disabled = true;
+      try {
+        await submitLiveTrade(position.symbol, side, position.quantity);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
 
     button.disabled = true;
     setTradeStatus('Closing ' + position.symbol + '.', false);
@@ -459,7 +471,7 @@
       p.className = 'empty';
       p.textContent = tradingMode === 'Paper'
         ? 'No open position on ' + state.symbol + '. Positions appear here once paper trading opens one.'
-        : 'No live book exists. No order has ever been sent to an exchange from this deployment.';
+        : 'No open live position on ' + state.symbol + '. A live position appears only after the exchange reports a fill.';
       host.appendChild(p);
       return;
     }
@@ -584,15 +596,72 @@
 
       if (requestedMatch.length) {
         select.value = requestedMatch[0].symbol;
+        setPairSearchValue(requestedMatch[0]);
         return true;
       }
 
       var preferred = state.pairs.filter(function (p) { return p.symbol === 'XBTUSD'; });
       select.value = preferred.length ? 'XBTUSD' : (state.pairs.length ? state.pairs[0].symbol : '');
+      setPairSearchValue(selectedPair());
       return state.pairs.length > 0;
     } catch (error) {
       setStatus('The pair list could not be loaded. ' + error.message, true);
       return false;
+    }
+
+    function selectedPair() {
+      var selected = $('symbol').value;
+      var matches = state.pairs.filter(function (pair) { return pair.symbol === selected; });
+      return matches.length ? matches[0] : null;
+    }
+
+    function setPairSearchValue(pair) {
+      if (!pair) { return; }
+      $('pairSearch').value = pair.displayName + ' (' + pair.symbol + ')';
+    }
+
+    function clearPairResults() {
+      var host = $('pairResults');
+      host.textContent = '';
+      host.classList.remove('has-results');
+    }
+
+    function renderPairSearch(query) {
+      var host = $('pairResults');
+      var needle = String(query || '').trim().toUpperCase();
+      var matches = state.pairs.filter(function (pair) {
+        if (!needle) { return true; }
+        return pair.symbol.toUpperCase().indexOf(needle) !== -1 ||
+          pair.displayName.toUpperCase().indexOf(needle) !== -1 ||
+          pair.baseAsset.toUpperCase().indexOf(needle) !== -1 ||
+          pair.quoteAsset.toUpperCase().indexOf(needle) !== -1;
+      }).slice(0, 8);
+
+      host.textContent = '';
+
+      matches.forEach(function (pair) {
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'pair-result';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', String(pair.symbol === $('symbol').value));
+        option.textContent = pair.displayName;
+
+        var detail = document.createElement('small');
+        detail.textContent = pair.symbol + ' · ' + pair.baseAsset + '/' + pair.quoteAsset;
+        option.appendChild(detail);
+
+        option.addEventListener('click', function () {
+          $('symbol').value = pair.symbol;
+          setPairSearchValue(pair);
+          clearPairResults();
+          load();
+        });
+
+        host.appendChild(option);
+      });
+
+      host.classList.toggle('has-results', matches.length > 0);
     }
   }
 
@@ -665,15 +734,18 @@
         var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
         state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
       } else {
-        // There is no live book to read. Showing the paper book here would
-        // present simulated exposure as real, which is the single most
-        // dangerous thing this page could do.
-        state.positions = [];
+        // The live book is read from its own route, which asks the exchange
+        // first. It is filtered to live positions server-side, so a paper
+        // position can never appear here as though it were real.
+        var liveValued = await fetch('/api/live/positions', { headers: { 'Accept': 'application/json' } });
+        state.positions = liveValued.ok ? ((await liveValued.json()).positions || []) : [];
       }
 
-      var orders = await fetch(
-        '/api/orders?mode=' + encodeURIComponent(tradingMode),
-        { headers: { 'Accept': 'application/json' } });
+      var ordersUrl = tradingMode === 'Live'
+        ? '/api/live/orders'
+        : '/api/orders?mode=' + encodeURIComponent(tradingMode);
+
+      var orders = await fetch(ordersUrl, { headers: { 'Accept': 'application/json' } });
       state.orders = orders.ok ? ((await orders.json()).orders || []) : [];
 
       var message = tradingMode + ' trading. ' + payload.length + ' bars of ' + symbol + ' loaded from Kraken.';
@@ -739,6 +811,20 @@
   var tradingMode = 'Paper';
   var modeCapability = null;
 
+  function liveAccount() {
+    if (!modeCapability || !modeCapability.accounts) { return null; }
+
+    // The account must be able to reach the exchange and must have been
+    // promoted out of paper. Picking any connected account would route a real
+    // order to whichever one happened to come first.
+    for (var i = 0; i < modeCapability.accounts.length; i++) {
+      var account = modeCapability.accounts[i];
+      if (account.canReachExchange && account.stage !== 'Paper') { return account; }
+    }
+
+    return null;
+  }
+
   function applyMode() {
     var paper = tradingMode === 'Paper';
 
@@ -760,17 +846,32 @@
       return;
     }
 
-    notice.className = 'notice error';
-    notice.innerHTML = '<strong>Live trading is not available.</strong> ' +
-      (modeCapability && modeCapability.live && modeCapability.live.reason
-        ? escapeHtml(modeCapability.live.reason)
-        : 'This deployment has no execution route to the exchange.') +
-      ' Connecting an exchange key does not by itself create that route.';
+    var account = liveAccount();
+    var available = modeCapability && modeCapability.live && modeCapability.live.available && account;
 
-    // The ticket is removed rather than disabled. A greyed-out live ticket
-    // reads as "not yet configured", which would suggest the capability is a
-    // setting away. It is not: the code that sends an order does not exist.
-    ticket.style.display = 'none';
+    if (!available) {
+      notice.className = 'notice error';
+      notice.innerHTML = '<strong>Live trading is not available.</strong> ' +
+        (modeCapability && modeCapability.live && modeCapability.live.reason
+          ? escapeHtml(modeCapability.live.reason)
+          : 'No connected account has been promoted out of paper.');
+
+      // The ticket is removed rather than disabled. A greyed-out live ticket
+      // reads as "one setting away", which would understate what promotion
+      // means.
+      ticket.style.display = 'none';
+      return;
+    }
+
+    notice.className = 'notice error';
+    notice.innerHTML = '<strong>Real money. Orders go to ' + escapeHtml(account.exchange) + '.</strong> ' +
+      'Trading through <em>' + escapeHtml(account.displayName) + '</em> at the ' +
+      escapeHtml(account.stage) + ' stage. Orders are sent as limit orders priced at the last ' +
+      'closed candle. Acceptance by the exchange is not a fill, and no strategy is guaranteed ' +
+      'to be profitable.';
+
+    ticket.style.display = '';
+    submit.textContent = 'Submit LIVE order';
   }
 
   function escapeHtml(value) {
@@ -816,6 +917,11 @@
       return;
     }
 
+    if (tradingMode === 'Live') {
+      await submitLiveTrade(symbol, side, quantity);
+      return;
+    }
+
     setTradeStatus('Submitting paper order.', false);
     $('submitTrade').disabled = true;
 
@@ -856,6 +962,83 @@
     } finally {
       // Re-read rather than blindly re-enabling: a connection that was revoked
       // mid-session must not leave an enabled ticket behind.
+      await refreshExchangeConnection();
+    }
+  }
+
+  // Sends a real order with the user's own money.
+  //
+  // Two things here are deliberate. The confirmation names the amount and the
+  // venue, because a live click must not feel like a paper click. And a 202
+  // answer is treated as neither success nor failure: it means the platform
+  // does not know, and the one thing the user must not do is click again.
+  async function submitLiveTrade(symbol, side, quantity) {
+    var account = liveAccount();
+
+    if (!account) {
+      setTradeStatus('No promoted account can reach the exchange.', true);
+      return;
+    }
+
+    var confirmed = window.confirm(
+      'Send a REAL ' + side.toLowerCase() + ' order for ' + quantity + ' ' + symbol +
+      ' to ' + account.exchange + '?\n\n' +
+      'This uses your own funds through "' + account.displayName + '".\n' +
+      'It is sent as a limit order priced at the last closed candle and may not fill.');
+
+    if (!confirmed) { return; }
+
+    setTradeStatus('Sending live order to ' + account.exchange + '.', false);
+    $('submitTrade').disabled = true;
+
+    try {
+      var response = await fetch('/api/live/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          exchangeAccountId: account.id,
+          symbol: symbol,
+          side: side,
+          quantity: quantity,
+          clientOrderId: null
+        })
+      });
+
+      var payload = await response.json();
+
+      if (response.status === 202) {
+        setTradeStatus(
+          'UNKNOWN: ' + (payload && payload.message ? payload.message : '') +
+          ' Do not submit this order again. It is being reconciled with the exchange.',
+          true);
+        await load();
+        return;
+      }
+
+      if (!response.ok) {
+        setTradeStatus(
+          (payload && payload.error ? payload.error + ': ' : 'Refused: ') +
+          (payload && payload.message ? payload.message : 'The live order was not accepted.'),
+          true);
+        return;
+      }
+
+      setTradeStatus(
+        'Live order accepted by ' + account.exchange + ': ' +
+        payload.order.side + ' ' + payload.order.quantity + ' ' + payload.order.symbol +
+        ' at limit ' + formatPrice(payload.order.limitPrice) +
+        '. Accepted is not filled.',
+        false);
+
+      await load();
+    } catch (error) {
+      // The order may have reached the exchange. Saying it failed would be a
+      // claim the browser cannot support.
+      setTradeStatus(
+        'The answer did not arrive, so this order may or may not exist. ' +
+        'Do not submit it again; check the orders list. ' + error.message,
+        true);
+    } finally {
       await refreshExchangeConnection();
     }
   }
@@ -932,6 +1115,31 @@
     $('load').addEventListener('click', load);
     $('interval').addEventListener('change', load);
     $('symbol').addEventListener('change', load);
+    $('pairSearch').addEventListener('focus', function () {
+      renderPairSearch($('pairSearch').value);
+    });
+    $('pairSearch').addEventListener('input', function () {
+      renderPairSearch($('pairSearch').value);
+    });
+    $('pairSearch').addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        clearPairResults();
+        $('pairSearch').blur();
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        var first = $('pairResults').querySelector('.pair-result');
+        if (first) {
+          event.preventDefault();
+          first.click();
+        }
+      }
+    });
+    $('pairSearch').addEventListener('blur', function () {
+      // Let a result receive its click before the list is removed.
+      window.setTimeout(clearPairResults, 150);
+    });
     $('submitTrade').addEventListener('click', submitTrade);
     $('modePaper').addEventListener('click', function () { selectMode('Paper'); });
     $('modeLive').addEventListener('click', function () { selectMode('Live'); });
