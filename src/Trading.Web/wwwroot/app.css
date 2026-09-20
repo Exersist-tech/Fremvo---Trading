@@ -71,6 +71,27 @@ a { color: var(--accent); }
 
 .app-nav .spacer { flex: 1; }
 
+.workspace-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.75rem 0 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace-tabs a {
+  color: var(--muted);
+  padding: 0.55rem 0.8rem;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.workspace-tabs a:hover { color: var(--text); }
+
+.workspace-tabs a.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 .app-nav .mode-badge {
   font-size: 0.72rem;
   text-transform: uppercase;

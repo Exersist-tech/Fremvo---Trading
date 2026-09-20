@@ -1148,6 +1148,10 @@ app.MapGet("/experiment-results", () => Results.Content(
     <body>
       <main class="page-wide">
         <h1>Experiment research results</h1>
+        <nav class="workspace-tabs" aria-label="Experiment sections">
+          <a href="/experiments">Workers</a>
+          <a class="active" href="/experiment-results" aria-current="page">Results</a>
+        </nav>
         <p class="lede">Immutable snapshots from isolated paper workers. This page is read-only.</p>
         <div class="notice"><strong>Research-only comparison.</strong> Sorting is for inspection only; it does not identify a winner, recommend a strategy, select or promote anything, or initiate execution.</div>
         <div id="status" class="notice">Loading immutable experiment snapshots.</div>
@@ -1186,6 +1190,10 @@ app.MapGet("/experiments", () => Results.Content(
     <body>
       <div class="container">
         <h1>Experiment workers <span class="badge">Paper only</span></h1>
+        <nav class="workspace-tabs" aria-label="Experiment sections">
+          <a class="active" href="/experiments" aria-current="page">Workers</a>
+          <a href="/experiment-results">Results</a>
+        </nav>
         <p class="muted">
           Up to ten isolated workers per user. Each worker keeps its own balance, position,
           strategy state, parameters, random seed, and results. Workers may read the same
