@@ -81,6 +81,17 @@
 - Live execution remains unavailable unless an operator explicitly enables the
   Kraken route **and** provides a non-empty, approved user cohort and proving
   symbol list. Empty lists deny by default.
+- Before a supervised rollout, an operator must set all of
+  `Trading__LiveExecution__Kraken__Enabled=true`,
+  `Trading__LiveExecution__AllowedUserIds__0=<user-guid>`,
+  `Trading__LiveExecution__ProvingSymbols__0=<exact-kraken-symbol>`, and
+  bounded `Trading__LiveExecution__MaxOrderNotional` plus
+  `Trading__LiveExecution__DefaultProvingNotionalCeiling` values. These are
+  deployment settings, never browser inputs. The account owner then connects
+  a read-and-trade-only Kraken key, selects **Start proving**, submits one
+  small approved-pair limit order, waits for its fill and reconciliation, and
+  only then selects **Enable live**. A user cannot skip, self-entitle, or
+  promote a different user's account.
 - An indeterminate real-order submission is logged as a credential-free,
   structured `LiveOrderUnknown` event and raises an alert. It must be
   reconciled before any operator or user attempts another submission.

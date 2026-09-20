@@ -2,6 +2,7 @@ using Trading.Application.Execution;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Domain.Audit;
+using Trading.Domain.Orders;
 using Trading.Exchanges.Abstractions;
 
 namespace Trading.ArchitectureTests;
@@ -16,11 +17,12 @@ public sealed class ExchangeAccountPromotionTests
     private static readonly Guid UserId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid OtherUserId = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
-    private static (ExchangeAccountStageService Service, ExchangeAccount Account) Build(
+    private static (ExchangeAccountStageService Service, ExchangeAccount Account, InMemoryOrderRepository Orders) Build(
         bool withLiveRoute,
         bool entitled = true)
     {
         var accounts = new FakeAccounts();
+        var orders = new InMemoryOrderRepository();
         var account = new ExchangeAccount(
             Guid.NewGuid(),
             UserId,
@@ -37,6 +39,7 @@ public sealed class ExchangeAccountPromotionTests
 
         var service = new ExchangeAccountStageService(
             accounts,
+            orders,
             routes,
             new SilentAuditWriter(),
             new FrozenClock(Now),
@@ -45,7 +48,7 @@ public sealed class ExchangeAccountPromotionTests
                 AllowedUserIds = entitled ? [UserId] : Array.Empty<Guid>()
             });
 
-        return (service, account);
+        return (service, account, orders);
     }
 
     [Fact]
@@ -62,7 +65,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task PromotionIsRefusedWhenNoExecutionRouteExists()
     {
-        var (service, account) = Build(withLiveRoute: false);
+        var (service, account, _) = Build(withLiveRoute: false);
 
         var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
 
@@ -77,7 +80,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task PromotionIsRefusedWhenTheUserIsNotInTheRolloutCohort()
     {
-        var (service, account) = Build(withLiveRoute: true, entitled: false);
+        var (service, account, _) = Build(withLiveRoute: true, entitled: false);
 
         var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
 
@@ -88,7 +91,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task StagesCannotBeSkipped()
     {
-        var (service, account) = Build(withLiveRoute: true);
+        var (service, account, _) = Build(withLiveRoute: true);
 
         // Straight from paper to live would bypass the supervised minimum-size
         // path that exists to prove execution and reconciliation actually work.
@@ -101,7 +104,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task AnotherUsersAccountCannotBePromoted()
     {
-        var (service, account) = Build(withLiveRoute: true);
+        var (service, account, _) = Build(withLiveRoute: true);
 
         var result = await service.PromoteAsync(OtherUserId, account.Id, TradingStage.Proving);
 
@@ -114,7 +117,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task ADisconnectedAccountCannotBePromoted()
     {
-        var (service, account) = Build(withLiveRoute: true);
+        var (service, account, _) = Build(withLiveRoute: true);
         account.MarkDisconnected();
 
         var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
@@ -125,7 +128,7 @@ public sealed class ExchangeAccountPromotionTests
     [Fact]
     public async Task ReturningToPaperIsNeverRefused()
     {
-        var (service, account) = Build(withLiveRoute: true);
+        var (service, account, _) = Build(withLiveRoute: true);
         await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
         Assert.Equal(TradingStage.Proving, account.Stage);
 
@@ -138,6 +141,18 @@ public sealed class ExchangeAccountPromotionTests
         Assert.True(result.IsSuccess);
         Assert.Equal(TradingStage.Paper, account.Stage);
         Assert.False(account.CanReachExchange);
+    }
+
+    [Fact]
+    public async Task LivePromotionRequiresAReconciledProvingFillForTheSameAccount()
+    {
+        var (service, account, _) = Build(withLiveRoute: true);
+        await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
+
+        var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Live);
+
+        Assert.Equal(TradingStageChangeOutcome.ProvingEvidenceMissing, result.Outcome);
+        Assert.Equal(TradingStage.Proving, account.Stage);
     }
 
     private sealed class FakeKrakenRoute : ILiveExecutionRoute

@@ -164,6 +164,33 @@ public sealed class PaperTradingServiceTests
     }
 
     [Fact]
+    public async Task ALivePositionOnTheSamePairDoesNotBlockAPaperOrder()
+    {
+        var harness = FreshMarket();
+        var livePosition = new Position(
+            Guid.NewGuid(),
+            UserId,
+            Guid.NewGuid(),
+            Symbol,
+            PositionDirection.DirectionLong,
+            0.25m,
+            29000m,
+            30000m,
+            Now,
+            mode: TradingMode.Live);
+        await harness.Positions.AddAsync(livePosition, CancellationToken.None);
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Buy, 0.5m, null);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(TradingMode.Paper, result.Position!.Mode);
+
+        var open = await harness.Positions.ListOpenAsync(UserId, CancellationToken.None);
+        Assert.Contains(open, position => position.Id == livePosition.Id && position.Mode == TradingMode.Live);
+        Assert.Contains(open, position => position.Id == result.Position.Id && position.Mode == TradingMode.Paper);
+    }
+
+    [Fact]
     public void AnOrderDefaultsToThePaperBook()
     {
         // Failing safe: a caller that omits the mode produces a simulated

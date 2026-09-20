@@ -1,5 +1,8 @@
+using Trading.Application.Execution;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
+using Trading.Domain.Execution;
+using Trading.Domain.Orders;
 using Trading.Exchanges.Abstractions;
 
 namespace Trading.Application.UseCases.Exchange;
@@ -31,7 +34,12 @@ public enum TradingStageChangeOutcome
     /// The account owner is not in the operator-approved initial live-trading
     /// cohort.
     /// </summary>
-    LiveTradingNotEntitled = 5
+    LiveTradingNotEntitled = 5,
+
+    /// <summary>
+    /// No fully reconciled proving fill exists for this account yet.
+    /// </summary>
+    ProvingEvidenceMissing = 6
 }
 
 public sealed record TradingStageChangeResult(
@@ -74,6 +82,7 @@ public interface IExchangeAccountStageService
 public sealed class ExchangeAccountStageService : IExchangeAccountStageService
 {
     private readonly IExchangeAccountRepository _accounts;
+    private readonly IOrderRepository _orders;
     private readonly ILiveExecutionRouteProvider _routes;
     private readonly IAuditEventWriter _auditWriter;
     private readonly TimeProvider _timeProvider;
@@ -81,12 +90,14 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
 
     public ExchangeAccountStageService(
         IExchangeAccountRepository accounts,
+        IOrderRepository orders,
         ILiveExecutionRouteProvider routes,
         IAuditEventWriter auditWriter,
         TimeProvider timeProvider,
         Execution.LiveTradingOptions? liveTradingOptions = null)
     {
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
+        _orders = orders ?? throw new ArgumentNullException(nameof(orders));
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
@@ -142,6 +153,24 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
                 TradingStageChangeOutcome.LiveTradingNotEntitled,
                 account.Stage,
                 "This account is not in the operator-approved live-trading rollout cohort.");
+        }
+
+        if (target == TradingStage.Live)
+        {
+            var orders = await _orders.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+            var hasReconciledProvingFill = orders.Any(order =>
+                order.Mode == TradingMode.Live
+                && order.ExchangeAccountId == account.Id
+                && order.State == OrderState.Filled
+                && !order.RequiresReconciliation);
+
+            if (!hasReconciledProvingFill)
+            {
+                return new TradingStageChangeResult(
+                    TradingStageChangeOutcome.ProvingEvidenceMissing,
+                    account.Stage,
+                    "This account needs a fully reconciled proving fill before it can be promoted to live trading.");
+            }
         }
 
         var now = _timeProvider.GetUtcNow();

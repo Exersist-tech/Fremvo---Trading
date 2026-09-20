@@ -2037,6 +2037,7 @@ app.MapPost("/api/paper/orders", async (
     SubmitPaperOrderRequest request,
     ClaimsPrincipal principal,
     PaperTradingService paperTrading,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     // The owner comes from the signed-in principal, never from the request
@@ -2052,9 +2053,29 @@ app.MapPost("/api/paper/orders", async (
         return Results.BadRequest(new { error = "InvalidSide", message = "Side must be Buy or Sell." });
     }
 
-    var result = await paperTrading
-        .SubmitAsync(userId.Value, request.Symbol, side, request.Quantity, request.ClientOrderId, cancellationToken)
-        .ConfigureAwait(false);
+    PaperTradeResult result;
+    try
+    {
+        result = await paperTrading
+            .SubmitAsync(userId.Value, request.Symbol, side, request.Quantity, request.ClientOrderId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+    catch (DbUpdateException exception)
+    {
+        // A persistence fault can happen after one part of a simulated fill
+        // was written. Do not report a clean rejection or invite an immediate
+        // duplicate: the user must refresh the paper book first.
+        Trading.Web.PaperOrderEndpointLog.PersistenceFailure(
+            loggerFactory.CreateLogger("Trading.Web.PaperOrderEndpoint"),
+            exception);
+        return Results.Json(
+            new
+            {
+                error = "PaperTradingPersistenceUnavailable",
+                message = "The paper order could not be recorded completely. Refresh orders and positions before trying again."
+            },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 
     if (!result.Succeeded)
     {
@@ -2682,13 +2703,13 @@ app.MapGet("/exchange", () => Results.Content(
               <td><span class="badge badge-warn">Proving</span></td>
               <td>Real, minimum size</td>
               <td>Yes</td>
-              <td>Locked until the risk engine, idempotency and reconciliation are complete.</td>
+              <td>Requires an enabled route, an operator-approved cohort, and an approved proving pair.</td>
             </tr>
             <tr>
               <td><span class="badge badge-bad">Live</span></td>
               <td>Real</td>
               <td>Yes</td>
-              <td>Locked until the proving stage has run cleanly.</td>
+              <td>Requires a fully reconciled proving fill for this exact exchange account.</td>
             </tr>
           </tbody>
         </table>
@@ -2759,6 +2780,36 @@ app.MapGet("/exchange", () => Results.Content(
           return 'badge badge-bad';
         }
 
+        async function changeStage(account, target) {
+          var question = target === 'Paper'
+            ? 'Return "' + account.displayName + '" to paper trading? No new order can reach Kraken.'
+            : 'Move "' + account.displayName + '" to ' + target + '?\n\n' +
+              'This allows real-money limit orders through Kraken subject to all safety limits.';
+
+          if (!window.confirm(question)) { return; }
+
+          report('Changing trading stage.');
+          var response;
+          try {
+            response = await fetch('/api/exchange/accounts/' + encodeURIComponent(account.id) + '/stage', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({ stage: target })
+            });
+          } catch (error) {
+            reportError('The stage could not be changed. ' + error.message);
+            return;
+          }
+
+          var body = await response.json().catch(function () { return {}; });
+          if (response.ok) {
+            reportOk(body.message || 'Trading stage updated.');
+          } else {
+            reportError(body.message || 'The requested trading-stage change was refused.');
+          }
+          await load();
+        }
+
         async function load() {
           var response = await fetch('/api/exchange/accounts');
           tbody.textContent = '';
@@ -2819,6 +2870,22 @@ app.MapGet("/exchange", () => Results.Content(
               await load();
             });
             actionCell.appendChild(button);
+
+            var stageButton = document.createElement('button');
+            stageButton.className = 'secondary';
+            stageButton.type = 'button';
+            stageButton.style.marginLeft = '0.5rem';
+            if (account.stage === 'Paper') {
+              stageButton.textContent = 'Start proving';
+              stageButton.addEventListener('click', function () { changeStage(account, 'Proving'); });
+            } else if (account.stage === 'Proving') {
+              stageButton.textContent = 'Enable live';
+              stageButton.addEventListener('click', function () { changeStage(account, 'Live'); });
+            } else {
+              stageButton.textContent = 'Return to paper';
+              stageButton.addEventListener('click', function () { changeStage(account, 'Paper'); });
+            }
+            actionCell.appendChild(stageButton);
             row.appendChild(actionCell);
 
             tbody.appendChild(row);

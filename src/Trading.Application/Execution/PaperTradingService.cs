@@ -338,7 +338,8 @@ public sealed class PaperTradingService : IPaperTradingService
 
         return open.FirstOrDefault(position =>
             string.Equals(position.Symbol, symbol, StringComparison.OrdinalIgnoreCase)
-            && position.Status == PositionStatus.Open);
+            && position.Status == PositionStatus.Open
+            && position.Mode == TradingMode.Paper);
     }
 
     private async Task<FillPrice> ResolveFillPriceAsync(

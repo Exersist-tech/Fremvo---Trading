@@ -47,6 +47,15 @@
     el.className = isError ? 'notice error' : 'notice';
   }
 
+  async function readJsonResponse(response) {
+    var contentType = response.headers.get('content-type') || '';
+    if (!contentType.toLowerCase().includes('application/json')) {
+      return {};
+    }
+
+    return await response.json().catch(function () { return {}; });
+  }
+
   function formatPrice(value) {
     var n = Number(value);
     if (!isFinite(n)) { return String(value); }
@@ -419,7 +428,7 @@
         })
       });
 
-      var payload = await response.json();
+      var payload = await readJsonResponse(response);
 
       if (!response.ok) {
         setTradeStatus(
