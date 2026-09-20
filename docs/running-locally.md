@@ -1,0 +1,68 @@
+# Running locally
+
+## Visual Studio
+
+Open `Trading.sln` and press F5 or Ctrl+F5. The solution starts
+`src/Trading.Web` on `https://localhost:5200` and opens the sign-in page.
+
+Two pieces of configuration make that work, and both are committed so the
+behaviour is the same on every machine:
+
+- **`Trading.Web` is the first project in `Trading.sln`.** Visual Studio picks
+  the first project in the solution as its default startup project when it has
+  no saved preference. Previously that was `Trading.Domain`, a class library,
+  so a fresh clone produced *"A project with an Output Type of Class Library
+  cannot be started directly."*
+- **`Trading.slnLaunch`** declares the startup explicitly, so the choice is
+  visible in the run dropdown and survives deleting the `.vs` folder.
+
+If Visual Studio ever starts the wrong project again, delete the untracked
+`.vs` folder. It holds per-user state that overrides both of the above.
+
+## Command line
+
+```
+cd src/Trading.Web
+dotnet run --launch-profile https
+```
+
+## HTTPS is the default profile
+
+The launch profile binds `https://localhost:5200` first and
+`http://localhost:5225` second.
+
+The authentication cookie is issued with `Secure`, `HttpOnly` and
+`SameSite=Strict`. Browsers and curl treat `http://localhost` as a secure
+context, so plain HTTP does work locally — but it does not resemble how the
+application is served anywhere else. Developing over HTTPS keeps local
+behaviour and deployed behaviour the same, so a cookie or redirect problem
+shows up here rather than after deployment.
+
+A local development certificate is required:
+
+```
+dotnet dev-certs https --check --trust
+```
+
+## Known friction
+
+- **A running app locks its own binary.** `Trading.Web.exe` must be stopped
+  before the solution will rebuild, otherwise the build fails on a file lock.
+- **Port 5200 is not shared.** Only one instance can bind it. Stop a
+  command-line instance before starting one from Visual Studio.
+- **`dotnet test Trading.sln` does not build `Trading.Web`.** Build the
+  solution separately when checking web changes compile.
+
+## Demo sign-in
+
+Development seeds two accounts:
+
+| Account | Email | Password |
+|---|---|---|
+| Trader | `trader@fremvo.local` | `DemoPassword123!` |
+| Administrator | `admin@fremvo.local` | `DemoPassword123!` |
+
+These exist for local development only. Password verification is **not yet
+implemented** (see `docs/implementation-status.md`), so any password of
+sufficient length signs in an active user. That must be closed before the
+application is deployed anywhere reachable by anyone else.

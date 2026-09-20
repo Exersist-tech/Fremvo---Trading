@@ -3,6 +3,8 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Web", "src\Trading.Web\Trading.Web.csproj", "{CA536D69-4351-4A93-B30A-8C1511CB1E8D}"
+EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{AFA31885-EC56-48E1-A30C-20A33A479817}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Domain", "src\Trading.Domain\Trading.Domain.csproj", "{BF830363-049B-4186-B5D0-A1346B04A5F6}"
@@ -34,8 +36,6 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Risk", "src\Trading.Risk\Trading.Risk.csproj", "{77D702A6-2E3D-4023-A201-82B380C35BFB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Reporting", "src\Trading.Reporting\Trading.Reporting.csproj", "{DED1BE5A-B342-4959-9E74-1DCB1325D860}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Web", "src\Trading.Web\Trading.Web.csproj", "{CA536D69-4351-4A93-B30A-8C1511CB1E8D}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Trading.Workers.MarketData", "src\Trading.Workers.MarketData\Trading.Workers.MarketData.csproj", "{1F26E635-A7CA-4DCC-9FFA-7D84C048A664}"
 EndProject
