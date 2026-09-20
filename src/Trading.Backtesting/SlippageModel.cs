@@ -34,7 +34,27 @@ public sealed class SlippageModel
             throw new ArgumentOutOfRangeException(nameof(quantity), "Quantity cannot be negative.");
         }
 
-        var percentComponent = price * quantity * PercentSlippage;
-        return FixedSlippage + percentComponent;
+        return GetPriceAdjustment(price) * quantity;
     }
+
+    public decimal GetExecutionPrice(decimal referencePrice, bool isBuy)
+    {
+        if (referencePrice <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(referencePrice), "Price must be positive.");
+        }
+
+        var adjustment = GetPriceAdjustment(referencePrice);
+        var executionPrice = isBuy ? referencePrice + adjustment : referencePrice - adjustment;
+        if (executionPrice <= 0m)
+        {
+            throw new InvalidOperationException("Adverse sell slippage makes the execution price non-positive.");
+        }
+
+        return executionPrice;
+    }
+
+    public static SlippageModel Zero { get; } = new(0m);
+
+    private decimal GetPriceAdjustment(decimal price) => FixedSlippage + (price * PercentSlippage);
 }

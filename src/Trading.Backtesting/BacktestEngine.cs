@@ -7,8 +7,8 @@ namespace Trading.Backtesting;
 
 /// <summary>
 /// Deterministic, in-memory, closed-candle simulation. It has no persistence
-/// or execution integration. Fees, slippage, and venue filters are deliberately
-/// not applied in this phase and must be configured as zero.
+/// or execution integration. It models a single fully-filled spot lifecycle
+/// using only the explicitly configured quote-currency costs and venue filters.
 /// </summary>
 public sealed class BacktestEngine
 {
@@ -31,6 +31,8 @@ public sealed class BacktestEngine
         var equitySnapshots = new List<BacktestEquitySnapshot>();
         var cash = configuration.InitialCapital;
         var baseQuantity = 0m;
+        var totalFees = 0m;
+        var totalSlippage = 0m;
         var lifecycleComplete = false;
 
         for (var index = 0; index < candles.Count; index++)
@@ -55,7 +57,9 @@ public sealed class BacktestEngine
                     throw new InvalidOperationException("Strategy proposal must describe the current closed candle.");
                 }
 
-                events.Add(ConvertProposal(proposal, candle, ref cash, ref baseQuantity, ref lifecycleComplete));
+                events.Add(ConvertProposal(
+                    proposal, candle, configuration, ref cash, ref baseQuantity, ref totalFees,
+                    ref totalSlippage, ref lifecycleComplete));
             }
 
             equitySnapshots.Add(new BacktestEquitySnapshot(
@@ -75,8 +79,8 @@ public sealed class BacktestEngine
             configuration.InitialCapital,
             finalValue,
             finalValue - configuration.InitialCapital,
-            0m,
-            0m,
+            totalFees,
+            totalSlippage,
             events.Count(@event => @event.Action is BacktestSimulatedAction.Buy or BacktestSimulatedAction.Sell),
             dataset.VersionIdentity,
             events,
@@ -86,8 +90,11 @@ public sealed class BacktestEngine
     private static BacktestEvent ConvertProposal(
         StrategyAnalysisProposal proposal,
         Candle candle,
+        BacktestConfiguration configuration,
         ref decimal cash,
         ref decimal baseQuantity,
+        ref decimal totalFees,
+        ref decimal totalSlippage,
         ref bool lifecycleComplete)
     {
         if (proposal.Direction == StrategyAnalysisDirection.Neutral)
@@ -101,21 +108,83 @@ public sealed class BacktestEngine
             && !lifecycleComplete
             && candle.Close > 0m)
         {
-            var quantity = cash / candle.Close;
+            if (!TryGetExecutionPrice(candle.Close, isBuy: true, configuration.SlippageModel, out var price, out var priceRejection))
+            {
+                return Rejected(candle, proposal, priceRejection!, cash, baseQuantity);
+            }
+
+            if (configuration.ExchangeFilter.GetRejectionReason(1m, price) is { } priceFilterRejection
+                && priceFilterRejection.Contains("price tick", StringComparison.Ordinal))
+            {
+                return Rejected(candle, proposal, priceFilterRejection, cash, baseQuantity, price);
+            }
+
+            var unconstrainedQuantity = cash / (price * (1m + configuration.FeeModel.TakerFeeRate));
+            var quantity = MaximumAffordableQuantity(cash, price, configuration.FeeModel, configuration.ExchangeFilter.StepSize);
+            if (quantity <= 0m)
+            {
+                return Rejected(candle, proposal, "Available cash cannot fund one conforming quantity step including quote fees.",
+                    cash, baseQuantity, price);
+            }
+
+            if (configuration.ExchangeFilter.GetRejectionReason(quantity, price) is { } filterRejection)
+            {
+                return Rejected(candle, proposal, filterRejection, cash, baseQuantity, price);
+            }
+
+            var notional = quantity * price;
+            var fee = configuration.FeeModel.ComputeFee(notional, isMakerOrder: false);
+            var debit = notional + fee;
+            if (debit > cash)
+            {
+                return Rejected(candle, proposal, "Conforming quantity would exceed available cash after quote fees.",
+                    cash, baseQuantity, price);
+            }
+
             baseQuantity = quantity;
-            cash = 0m;
+            cash -= debit;
+            totalFees += fee;
+            var slippage = (price - candle.Close) * quantity;
+            totalSlippage += slippage;
+            var sizingExplanation = quantity < unconstrainedQuantity
+                ? "quantity was conservatively reduced to the configured step without exceeding cash."
+                : "quantity exactly matched the configured step.";
             return new BacktestEvent(candle.CloseTimeUtc, proposal, BacktestSimulatedAction.Buy,
-                "Accepted approved bullish analysis as one full-cash simulated spot entry.", quantity, candle.Close, cash, baseQuantity);
+                $"Accepted approved bullish analysis as one fully-filled spot entry; {sizingExplanation}",
+                quantity, price, cash, baseQuantity, candle.Close, fee, slippage);
         }
 
         if (proposal.Direction == StrategyAnalysisDirection.Bearish && baseQuantity > 0m)
         {
+            if (!TryGetExecutionPrice(candle.Close, isBuy: false, configuration.SlippageModel, out var price, out var priceRejection))
+            {
+                return Rejected(candle, proposal, priceRejection!, cash, baseQuantity);
+            }
+
             var quantity = baseQuantity;
-            cash += quantity * candle.Close;
+            if (configuration.ExchangeFilter.GetRejectionReason(quantity, price) is { } filterRejection)
+            {
+                return Rejected(candle, proposal, filterRejection, cash, baseQuantity, price);
+            }
+
+            var notional = quantity * price;
+            var fee = configuration.FeeModel.ComputeFee(notional, isMakerOrder: false);
+            if (fee > notional)
+            {
+                return Rejected(candle, proposal, "Quote fee exceeds sale proceeds; simulated balance cannot become negative.",
+                    cash, baseQuantity, price);
+            }
+
+            var proceeds = notional - fee;
+            cash += proceeds;
             baseQuantity = 0m;
+            totalFees += fee;
+            var slippage = (candle.Close - price) * quantity;
+            totalSlippage += slippage;
             lifecycleComplete = true;
             return new BacktestEvent(candle.CloseTimeUtc, proposal, BacktestSimulatedAction.Sell,
-                "Accepted approved bearish analysis as the single simulated spot exit.", quantity, candle.Close, cash, baseQuantity);
+                "Accepted approved bearish analysis as the single fully-filled simulated spot exit.",
+                quantity, price, cash, baseQuantity, candle.Close, fee, slippage);
         }
 
         var rationale = proposal.Direction == StrategyAnalysisDirection.Bullish && candle.Close <= 0m
@@ -126,6 +195,57 @@ public sealed class BacktestEngine
         return new BacktestEvent(candle.CloseTimeUtc, proposal, BacktestSimulatedAction.Rejected,
             rationale, 0m, candle.Close, cash, baseQuantity);
     }
+
+    private static bool TryGetExecutionPrice(
+        decimal referencePrice,
+        bool isBuy,
+        SlippageModel slippageModel,
+        out decimal executionPrice,
+        out string? rejection)
+    {
+        try
+        {
+            executionPrice = slippageModel.GetExecutionPrice(referencePrice, isBuy);
+            rejection = null;
+            return true;
+        }
+        catch (InvalidOperationException exception)
+        {
+            executionPrice = referencePrice;
+            rejection = exception.Message;
+            return false;
+        }
+    }
+
+    private static decimal MaximumAffordableQuantity(
+        decimal cash,
+        decimal price,
+        FeeModel feeModel,
+        decimal stepSize)
+    {
+        var quantity = FloorToStep(cash / (price * (1m + feeModel.TakerFeeRate)), stepSize);
+        var fee = feeModel.ComputeFee(quantity * price, isMakerOrder: false);
+        if (quantity > 0m && (quantity * price) + fee > cash)
+        {
+            quantity = FloorToStep((cash - feeModel.MinimumFee) / price, stepSize);
+        }
+
+        return quantity;
+    }
+
+    private static decimal FloorToStep(decimal value, decimal stepSize) =>
+        value <= 0m ? 0m : value - (value % stepSize);
+
+    private static BacktestEvent Rejected(
+        Candle candle,
+        StrategyAnalysisProposal proposal,
+        string rationale,
+        decimal cash,
+        decimal baseQuantity,
+        decimal? price = null) =>
+        new(candle.CloseTimeUtc, proposal, BacktestSimulatedAction.Rejected,
+            $"Rejected simulated trade: {rationale}", 0m, price ?? candle.Close, cash, baseQuantity,
+            candle.Close);
 
     private static void ValidatePrerequisites(
         HistoricalDataset dataset,
@@ -149,11 +269,6 @@ public sealed class BacktestEngine
             || configuration.ToUtc.ToUniversalTime() != dataset.ToUtc)
         {
             throw new ArgumentException("Configuration range must exactly match the immutable dataset range.");
-        }
-
-        if (configuration.CommissionRate != 0m || configuration.SlippageRate != 0m)
-        {
-            throw new ArgumentException("Fees and slippage are not applied by the Phase 5.5 engine.");
         }
 
         if (parameters.Values.Count != strategy.ParameterDefinitions.Count)
@@ -238,7 +353,10 @@ public sealed record BacktestEvent(
     decimal Quantity,
     decimal Price,
     decimal CashBalance,
-    decimal BaseQuantity);
+    decimal BaseQuantity,
+    decimal? ReferencePrice = null,
+    decimal Fee = 0m,
+    decimal Slippage = 0m);
 
 public sealed record BacktestEquitySnapshot(
     DateTimeOffset ObservedAtUtc,

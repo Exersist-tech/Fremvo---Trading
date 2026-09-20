@@ -28,6 +28,11 @@ public sealed class FeeModel
             throw new ArgumentOutOfRangeException(nameof(maximumFee), "Maximum fee cannot be negative.");
         }
 
+        if (maximumFee > 0m && maximumFee < minimumFee)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumFee), "Maximum fee cannot be less than minimum fee.");
+        }
+
         MakerFeeRate = makerFeeRate;
         TakerFeeRate = takerFeeRate;
         MinimumFee = minimumFee;
@@ -59,4 +64,6 @@ public sealed class FeeModel
 
         return Math.Max(computed, MinimumFee);
     }
+
+    public static FeeModel Zero { get; } = new(0m, 0m, 0m);
 }

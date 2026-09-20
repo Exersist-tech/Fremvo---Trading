@@ -15,8 +15,9 @@ public sealed class BacktestingModelsTests
                 new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
                 50,
                 10000m,
-                0.001m,
-                0.0005m));
+                FeeModel.Zero,
+                SlippageModel.Zero,
+                new ExchangeFilter(0m, 0m, 0.01m, 0.01m)));
 
         Assert.Equal("toUtc", ex.ParamName);
     }

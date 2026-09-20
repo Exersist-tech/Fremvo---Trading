@@ -132,6 +132,82 @@ public sealed class BacktestEngineTests
     }
 
     [Fact]
+    public void AppliesAdverseSlippageAndQuoteFeesWithExactBuySellAccounting()
+    {
+        var candles = Candles(10m, 10m, 12m, 15m);
+        var dataset = Dataset(candles);
+        var configuration = Configuration(
+            dataset, 1, initialCapital: 120m,
+            feeModel: new FeeModel(0.01m, 0.01m, 0m),
+            slippageModel: new SlippageModel(0.10m),
+            exchangeFilter: new ExchangeFilter(0m, 0m, 0.01m, 0.01m));
+
+        var result = BacktestEngine.Run(dataset, candles, new LifecycleStrategy(), Parameters(), configuration);
+        var buy = Assert.Single(result.Events.Where(@event => @event.Action == BacktestSimulatedAction.Buy));
+        var sell = Assert.Single(result.Events.Where(@event => @event.Action == BacktestSimulatedAction.Sell));
+
+        Assert.Equal(10.10m, buy.Price);
+        Assert.Equal(10m, buy.ReferencePrice);
+        Assert.Equal(11.76m, buy.Quantity);
+        Assert.Equal(1.18776m, buy.Fee);
+        Assert.Equal(14.90m, sell.Price);
+        Assert.Equal(15m, sell.ReferencePrice);
+        Assert.Equal(1.75224m, sell.Fee);
+        Assert.Equal(2.94m, result.TotalFees);
+        Assert.Equal(2.35200m, result.TotalSlippage);
+        Assert.Equal(173.50800m, result.FinalPortfolioValue);
+        Assert.Equal(result.Events.Sum(@event => @event.Fee), result.TotalFees);
+        Assert.Equal(result.Events.Sum(@event => @event.Slippage), result.TotalSlippage);
+        Assert.Equal(result.InitialCapital + result.NetPnL, result.FinalPortfolioValue);
+    }
+
+    [Fact]
+    public void RejectsNonconformingSlippedPriceWithoutChangingBalances()
+    {
+        var candles = Candles(10m, 10m, 10m);
+        var dataset = Dataset(candles);
+        var configuration = Configuration(
+            dataset, 0, initialCapital: 120m,
+            feeModel: FeeModel.Zero,
+            slippageModel: new SlippageModel(0.005m),
+            exchangeFilter: new ExchangeFilter(0m, 0m, 0.01m, 0.01m));
+
+        var result = BacktestEngine.Run(dataset, candles, new RepeatedBullishStrategy(), Parameters(), configuration);
+
+        Assert.All(result.Events, @event => Assert.Equal(BacktestSimulatedAction.Rejected, @event.Action));
+        Assert.All(result.Events, @event => Assert.Equal(120m, @event.CashBalance));
+        Assert.Contains("price tick", result.Events[0].Rationale, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RejectsFilteredMinimumQuantityAndExplainsConservativeStepSizing()
+    {
+        var candles = Candles(10m, 10m, 10m);
+        var dataset = Dataset(candles);
+        var tooLargeMinimum = Configuration(
+            dataset, 0, initialCapital: 125m,
+            feeModel: FeeModel.Zero,
+            slippageModel: SlippageModel.Zero,
+            exchangeFilter: new ExchangeFilter(0m, 20m, 0.01m, 0.01m));
+
+        var rejected = BacktestEngine.Run(dataset, candles, new RepeatedBullishStrategy(), Parameters(), tooLargeMinimum);
+
+        Assert.Equal(BacktestSimulatedAction.Rejected, rejected.Events[0].Action);
+        Assert.Contains("minimum quantity", rejected.Events[0].Rationale, StringComparison.Ordinal);
+
+        var stepped = Configuration(
+            dataset, 0, initialCapital: 125m,
+            feeModel: FeeModel.Zero,
+            slippageModel: SlippageModel.Zero,
+            exchangeFilter: new ExchangeFilter(0m, 0m, 0.01m, 1m));
+        var normalized = BacktestEngine.Run(dataset, candles, new RepeatedBullishStrategy(), Parameters(), stepped);
+
+        Assert.Equal(12m, normalized.Events[0].Quantity);
+        Assert.Equal(5m, normalized.Events[0].CashBalance);
+        Assert.Contains("conservatively reduced", normalized.Events[0].Rationale, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BacktestingAssemblyHasNoExecutionOrConnectorDependencies()
     {
         var assembly = typeof(BacktestEngine).Assembly;
@@ -160,7 +236,21 @@ public sealed class BacktestEngineTests
             createdAtUtc ?? s_start.AddHours(1));
 
     private static BacktestConfiguration Configuration(HistoricalDataset dataset, int warmup) =>
-        new("test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, warmup, 120m, 0m, 0m);
+        new(
+            "test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, warmup, 120m,
+            FeeModel.Zero,
+            SlippageModel.Zero,
+            new ExchangeFilter(0m, 0m, 0.01m, 0.01m));
+
+    private static BacktestConfiguration Configuration(
+        HistoricalDataset dataset,
+        int warmup,
+        decimal initialCapital,
+        FeeModel feeModel,
+        SlippageModel slippageModel,
+        ExchangeFilter exchangeFilter) =>
+        new("test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, warmup, initialCapital,
+            feeModel, slippageModel, exchangeFilter);
 
     private static StrategyParameterSet Parameters() => new(Array.Empty<StrategyParameterDefinition>());
 
