@@ -291,13 +291,16 @@ public sealed class PaperExperimentWorkerRunner
 {
     private readonly IExperimentCandleSeriesSource _candles;
     private readonly ApprovedExperimentStrategyRegistry _registry;
+    private readonly ISupplementalExperimentEvidenceProvider _supplemental;
 
     public PaperExperimentWorkerRunner(
         IExperimentCandleSeriesSource candles,
-        ApprovedExperimentStrategyRegistry registry)
+        ApprovedExperimentStrategyRegistry registry,
+        ISupplementalExperimentEvidenceProvider? supplemental = null)
     {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        _supplemental = supplemental ?? new UnconfiguredSupplementalExperimentEvidenceProvider();
     }
 
     public async Task<ExperimentAnalysisResult> AnalyzeAsync(
@@ -363,7 +366,14 @@ public sealed class PaperExperimentWorkerRunner
             return ExperimentAnalysisResult.Blocked($"Closed candle evidence is unavailable: {seriesResult.BlockReason}.");
         }
 
-        var result = evaluator.Evaluate(seriesResult.Series, worker.StrategyParameters);
+        var result = await _supplemental.EvaluateAsync(
+            definition.FamilyId, seriesResult.Series, assignment.Provenance, cancellationToken).ConfigureAwait(false)
+            ?? evaluator.Evaluate(seriesResult.Series, worker.StrategyParameters);
+        if (result.Outcome == ExperimentAnalysisOutcome.Blocked
+            && !result.Reason.Contains(definition.FamilyId, StringComparison.Ordinal))
+        {
+            result = ExperimentAnalysisResult.Blocked($"{definition.FamilyId}: {result.Reason}");
+        }
         var candle = seriesResult.Series.Candles[^1];
         return result.Attest(new ExperimentDecisionEvidence(
             worker.UserId,

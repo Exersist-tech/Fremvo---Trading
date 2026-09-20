@@ -58,6 +58,9 @@ if (paperTrainingEnabled)
     builder.Services.AddScoped<EfExperimentPaperExecutionLedger>();
     builder.Services.AddSingleton<IExperimentCandleSeriesSource, ScopedDurableCandleSource>();
     builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+    // Supplemental multi-input evidence is deliberately registered only on the explicit durable
+    // paper-training path. The default host provider remains fail-closed.
+    builder.Services.AddSingleton<ISupplementalExperimentEvidenceProvider, PlatformSupplementalExperimentEvidenceProvider>();
     builder.Services.AddSingleton<IExperimentResearchGroupConfigurationSource, PaperTrainingConfigurationSource>();
     builder.Services.AddSingleton<IExperimentDecisionLedger, ScopedDecisionLedger>();
     builder.Services.AddSingleton<PaperExperimentWorkerRunner>();

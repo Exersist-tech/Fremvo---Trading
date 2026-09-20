@@ -174,6 +174,90 @@ public sealed class PaperExperimentWorkerRunnerTests
             result, snapshot with { WorkerId = Guid.NewGuid() }, identity));
     }
 
+    [Fact]
+    public async Task SupplementalProviderEvaluatesEachFixedFamilyAndBlocksAnIncompleteUniverse()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var series = FixedUniverseSeries();
+        var source = new FixedUniverseCandleSource(series);
+        var provider = new PlatformSupplementalExperimentEvidenceProvider(source);
+
+        foreach (var family in ExpectedPhase5BFamilies.Skip(6))
+        {
+            var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
+            var worker = Worker("{}", family);
+            var configuration = Configuration(worker, definition);
+            var result = await provider.EvaluateAsync(
+                family, series["BTC/USD"].Series!, configuration.Assignments.Single().Provenance);
+
+            Assert.NotNull(result);
+            Assert.True(result!.Outcome is ExperimentAnalysisOutcome.Analyzed
+                or ExperimentAnalysisOutcome.NoCondition or ExperimentAnalysisOutcome.Blocked);
+        }
+
+        var missing = new PlatformSupplementalExperimentEvidenceProvider(
+            new FixedUniverseCandleSource(new Dictionary<string, ExperimentCandleSeriesResult>
+            {
+                ["BTC/USD"] = series["BTC/USD"],
+                ["ETH/USD"] = series["ETH/USD"]
+            }));
+        var crossDefinition = registry.Definitions.Single(candidate => candidate.FamilyId == "platform.cross-sectional-momentum-rotation");
+        var crossWorker = Worker("{}", crossDefinition.FamilyId);
+        var crossConfiguration = Configuration(crossWorker, crossDefinition);
+        var runner = new PaperExperimentWorkerRunner(source, registry, provider);
+        var analyzed = await runner.AnalyzeAsync(crossWorker, crossConfiguration,
+            crossConfiguration.Assignments.Single(), Now);
+        Assert.NotEqual(ExperimentAnalysisOutcome.Blocked, analyzed.Outcome);
+
+        var blocked = await missing.EvaluateAsync(crossDefinition.FamilyId, series["BTC/USD"].Series!,
+            crossConfiguration.Assignments.Single().Provenance);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, blocked!.Outcome);
+        Assert.Contains("SOL/USD", blocked.Reason, StringComparison.Ordinal);
+
+        var stale = new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, Now,
+            series["BTC/USD"].Series!.Candles.Take(90).ToArray());
+        foreach (var family in new[]
+                 {
+                     "platform.session-conditioned-breakout",
+                     "platform.regime-switching-ensemble"
+                 })
+        {
+            var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
+            var worker = Worker("{}", family);
+            var configuration = Configuration(worker, definition);
+            var staleResult = await provider.EvaluateAsync(family, stale, configuration.Assignments.Single().Provenance);
+            Assert.Equal(ExperimentAnalysisOutcome.Blocked, staleResult!.Outcome);
+            Assert.Contains("exactly", staleResult.Reason, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed class FixedUniverseCandleSource : IExperimentCandleSeriesSource
+    {
+        private readonly IReadOnlyDictionary<string, ExperimentCandleSeriesResult> _series;
+        public FixedUniverseCandleSource(IReadOnlyDictionary<string, ExperimentCandleSeriesResult> series) => _series = series;
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_series.TryGetValue(request.Symbol, out var result)
+                ? result
+                : ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.NoData));
+    }
+
+    private static Dictionary<string, ExperimentCandleSeriesResult> FixedUniverseSeries() =>
+        new[] { ("BTC/USD", 100m), ("ETH/USD", 90m), ("SOL/USD", 80m) }
+            .ToDictionary(pair => pair.Item1, pair =>
+            {
+                var candles = Enumerable.Range(0, 91).Select(index =>
+                {
+                    var open = Now.AddHours(-91 + index);
+                    var close = pair.Item2 + index;
+                    return new Candle(pair.Item1, CandleInterval.OneHour, open, open.AddHours(1),
+                        close - 1m, close + 1m, close - 2m, close, 1m, true, false);
+                }).ToArray();
+                return ExperimentCandleSeriesResult.Available(
+                    new ExperimentCandleSeries(pair.Item1, CandleInterval.OneHour, Now, candles));
+            });
+
     private sealed class FakeTimeProvider : TimeProvider
     {
         private readonly DateTimeOffset _now;
