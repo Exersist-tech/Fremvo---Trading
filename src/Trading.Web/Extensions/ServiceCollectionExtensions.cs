@@ -26,6 +26,7 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<ICandleRepository, EfCandleRepository>();
         services.AddScoped<IScanRequestRepository, EfScanRequestRepository>();
         services.AddScoped<IScanResultRepository, EfScanResultRepository>();
+        services.AddScoped<ScannerResultsQueryService>();
 
         return services;
     }

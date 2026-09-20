@@ -8,6 +8,7 @@ using Azure.Security.KeyVault.Secrets;
 using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
+using Trading.Application.Scanner;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Application.UseCases.Identity;
@@ -351,6 +352,42 @@ app.MapGet("/api/audit", async (IAuditQueryService queryService, CancellationTok
         e.CorrelationId
     }));
 });
+
+// Scanner evidence is read-only. Ownership comes exclusively from the signed-in
+// principal; identifiers only select a scan and run within that owner's records.
+app.MapGet("/api/scanner/results", async (
+    ClaimsPrincipal principal,
+    ScannerResultsQueryService scannerResults,
+    Guid scanRequestId,
+    Guid scanRunId,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (scanRequestId == Guid.Empty || scanRunId == Guid.Empty)
+    {
+        return Results.BadRequest(new { error = "A scanner result selection is required." });
+    }
+
+    try
+    {
+        var page = await scannerResults
+            .GetAsync(userId.Value, scanRequestId, scanRunId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return page is null ? Results.NotFound() : Results.Ok(page);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Scanner results are temporarily unavailable.");
+    }
+}).RequireAuthorization();
 
 app.MapPost("/api/audit", async (IAuditEventWriter writer, CancellationToken cancellationToken, AuditEvent request) =>
 {
@@ -2645,6 +2682,49 @@ app.MapGet("/positions", () => Results.Content(
         <div id="status" class="notice">Loading.</div>
         <div id="summary"></div>
         <div id="positions"><p class="empty">Loading.</p></div>
+      </main>
+    </body>
+    </html>
+    """,
+    "text/html")).RequireAuthorization();
+
+app.MapGet("/scanner", () => Results.Content(
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="stylesheet" href="/app.css" />
+      <script defer src="/nav.js"></script>
+      <script defer src="/scanner-results.js"></script>
+      <title>Scanner results</title>
+    </head>
+    <body>
+      <main class="page-wide">
+        <h1>Scanner results</h1>
+        <p class="lede">
+          Read-only closed-candle evidence from a completed scanner run. Presentation preserves
+          the server's recorded ranking and does not calculate any market values in the browser.
+        </p>
+
+        <div class="notice">
+          <strong>Historical and technical analysis only.</strong>
+          Scanner output is not financial advice and does not submit trades.
+        </div>
+
+        <div id="status" class="notice">Loading scanner evidence.</div>
+
+        <section class="card" aria-label="Scanner scope">
+          <h2 id="scanName">Scanner scope</h2>
+          <p><strong>Symbols:</strong> <span id="scope">Not loaded.</span></p>
+          <p><strong>Interval:</strong> <span id="interval">Not loaded.</span></p>
+        </section>
+
+        <section>
+          <h2>Recorded results</h2>
+          <div id="results"><p class="empty">No scanner run selected.</p></div>
+        </section>
       </main>
     </body>
     </html>
