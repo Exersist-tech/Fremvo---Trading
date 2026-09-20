@@ -343,6 +343,7 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .pair-selector {
+  position: relative;
   display: flex;
   align-items: stretch;
   flex-direction: column;
@@ -394,12 +395,18 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .pair-results {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  z-index: 20;
   display: none;
   max-height: 14rem;
   overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
 }
 
 .pair-results.has-results {
@@ -430,10 +437,20 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .pair-search-empty {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  left: 0;
+  z-index: 20;
   display: none;
   margin: 0;
+  padding: 0.55rem 0.6rem;
   color: var(--muted);
   font-size: 0.82rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
 }
 
 .pair-search-empty.has-message {
