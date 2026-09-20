@@ -1549,7 +1549,7 @@ app.MapGet("/orders", () => Results.Content(
       <title>Orders and reconciliation</title>
     </head>
     <body>
-      <main>
+      <main class="page-wide chart-page">
         <h1>Orders and reconciliation</h1>
         <p class="lede">
           Every order placed on your behalf, together with any order whose exchange outcome could
@@ -2747,15 +2747,18 @@ app.MapGet("/portfolio", () => Results.Content(
       <title>Portfolio</title>
     </head>
     <body>
-      <main>
+      <main class="page-wide portfolio-page">
         <h1>Portfolio</h1>
-        <p class="lede">Read-only balances from your connected exchange accounts.</p>
+        <p class="lede">Read-only balances from your connected exchange accounts, separated by available and held amounts.</p>
         <div class="notice">
           <strong>Fresh reading only.</strong> Balances are requested from the exchange when this
           page loads. A failed request is shown as an error; no previous balance is reused.
           This page cannot transfer, withdraw, deposit, or place orders.
         </div>
-        <div class="toolbar"><button id="refresh" type="button">Refresh balances</button></div>
+        <div class="portfolio-actions">
+          <button id="refresh" type="button">Refresh balances</button>
+          <span class="portfolio-action-note">No portfolio value is estimated: exchange balances are shown in their native assets.</span>
+        </div>
         <div id="status" class="notice">Loading current balances.</div>
         <div id="portfolio"><p class="empty">Loading.</p></div>
       </main>

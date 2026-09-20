@@ -20,6 +20,18 @@
     row.appendChild(element);
   }
 
+  function stat(label, value) {
+    var item = document.createElement('div');
+    item.className = 'portfolio-stat';
+    var labelElement = document.createElement('span');
+    labelElement.textContent = label;
+    var valueElement = document.createElement('strong');
+    valueElement.textContent = String(value);
+    item.appendChild(labelElement);
+    item.appendChild(valueElement);
+    return item;
+  }
+
   function render(payload) {
     var host = $('portfolio');
     host.textContent = '';
@@ -35,22 +47,33 @@
 
     accounts.forEach(function (account) {
       var card = document.createElement('section');
-      card.className = 'card';
-      var title = document.createElement('h3');
+      card.className = 'card portfolio-account';
+      var header = document.createElement('div');
+      header.className = 'portfolio-account-header';
+      var heading = document.createElement('div');
+      var title = document.createElement('h2');
       title.textContent = account.displayName + ' · ' + account.exchange;
-      card.appendChild(title);
+      heading.appendChild(title);
 
       var freshness = document.createElement('p');
       if (account.error) {
         freshness.textContent = 'Current reading unavailable: ' + account.error;
         freshness.className = 'notice error';
-        card.appendChild(freshness);
+        heading.appendChild(freshness);
+        header.appendChild(heading);
+        card.appendChild(header);
         host.appendChild(card);
         return;
       }
 
-      freshness.textContent = 'Read from the exchange at ' + formatTime(account.retrievedAtUtc) + '.';
-      card.appendChild(freshness);
+      freshness.textContent = 'Read-only Spot balance';
+      heading.appendChild(freshness);
+      header.appendChild(heading);
+      var reading = document.createElement('div');
+      reading.className = 'portfolio-reading';
+      reading.textContent = 'Updated ' + formatTime(account.retrievedAtUtc);
+      header.appendChild(reading);
+      card.appendChild(header);
 
       var balances = (account.balances || []).filter(function (balance) {
         return Number(balance.total) !== 0;
@@ -64,6 +87,20 @@
         return;
       }
 
+      var heldCount = balances.filter(function (balance) {
+        return Number(balance.held) !== 0;
+      }).length;
+      var summary = document.createElement('div');
+      summary.className = 'portfolio-summary';
+      summary.appendChild(stat('Assets held', balances.length));
+      summary.appendChild(stat('Assets available', balances.filter(function (balance) {
+        return Number(balance.available) !== 0;
+      }).length));
+      summary.appendChild(stat('Assets with funds held', heldCount));
+      card.appendChild(summary);
+
+      var tableWrap = document.createElement('div');
+      tableWrap.className = 'portfolio-table-wrap';
       var table = document.createElement('table');
       var header = document.createElement('tr');
       ['Asset', 'Total', 'Available', 'Held'].forEach(function (name) {
@@ -80,7 +117,8 @@
         cell(row, balance.held, true);
         table.appendChild(row);
       });
-      card.appendChild(table);
+      tableWrap.appendChild(table);
+      card.appendChild(tableWrap);
       host.appendChild(card);
     });
   }
