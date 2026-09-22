@@ -1328,9 +1328,10 @@ app.MapGet("/experiments", () => Results.Content(
           <p class="muted">The backend discovers active liquid Kraken EUR Spot pairs, ranks at most
             40 pairs using 30 closed daily candles that predate the test, then evaluates the largest
             top-liquidity subset that fits the bounded candidate search with approved strategy
-            templates across 5, 15, 30, and 60 minute closed candles. It permits at most one worker
-            per strategy and prioritizes distinct intervals and pairs among the top ten
-            candidates and confirms them on untouched holdout data.
+            templates across 5, 15, 30, and 60 minute closed candles. Candidate evaluation is
+            balanced across pairs before adding timeframe variants. It permits at most one worker
+            per strategy and uses a different eligible pair for every slot when possible, reusing
+            pairs only when the discovered universe is smaller, then confirms finalists on untouched holdout data.
             Qualified finalists and clearly labeled unqualified exploration slots continue into
             fake-funds live-data paper observation.</p>
           <div class="notice">
