@@ -1,10 +1,15 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Trading.Application.Experiments;
 
 namespace Trading.Infrastructure.Data.Experiments;
 
 /// <summary>SQL-backed, owner-scoped activation store with optimistic atomic state transitions.</summary>
-public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivationRepository, IPaperTrainingActivationSource
+public sealed class EfPaperTrainingActivationRepository :
+    IPaperTrainingActivationRepository,
+    IPaperTrainingActivationReader,
+    IPaperTrainingActivationSource,
+    IPaperTrainingSubscriptionSource
 {
     private readonly TradingDbContext _context;
 
@@ -62,12 +67,45 @@ public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivati
             .Where(value => value.State == (int)PaperTrainingActivationState.Active)
             .Select(value => value.OwnerUserId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
 
-    private static PaperTrainingActivation ToDomain(PersistedPaperTrainingActivation value) => new(
-        value.OwnerUserId, (PaperTrainingActivationState)value.State,
-        PaperTrainingActivationService.ApprovedSlots.Take(value.SlotCount).ToArray(),
-        new(value.DurableClosedCandleSource, value.ApprovedResearchGroupsAndGates, value.WorkerRiskPolicy,
-            value.PaperFillPolicy, value.OutputLedger, value.ProtectiveScheduler),
-        value.ChangedAtUtc, value.ChangedBy);
+    public async Task<IReadOnlyCollection<PaperTrainingMarketSubscription>> GetActiveSubscriptionsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var serialized = await _context.PaperTrainingActivations.AsNoTracking()
+            .Where(value => value.State == (int)PaperTrainingActivationState.Active)
+            .Select(value => value.SlotsJson)
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        return serialized
+            .SelectMany(Deserialize<PaperTrainingWorkerSlot>)
+            .Where(slot => !string.IsNullOrWhiteSpace(slot.Symbol))
+            .SelectMany(slot => PaperTrainingAutoSelectionService.ApprovedIntervals.Select(
+                interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)))
+            .Distinct()
+            .OrderBy(subscription => subscription.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(subscription => subscription.Interval)
+            .ToArray();
+    }
+
+    private static PaperTrainingActivation ToDomain(PersistedPaperTrainingActivation value)
+    {
+        var slots = Deserialize<PaperTrainingWorkerSlot>(value.SlotsJson)
+            .Select(slot => slot.Interval == Trading.Domain.Market.CandleInterval.None
+                ? slot with { Interval = Trading.Domain.Market.CandleInterval.OneHour }
+                : slot)
+            .ToArray();
+        if (slots.Length == 0 && value.SlotCount > 0)
+            slots = PaperTrainingActivationService.ApprovedSlots.Take(value.SlotCount).ToArray();
+        var qualifications = Deserialize<PaperTrainingQualificationResult>(value.QualificationsJson)
+            .Select(result => result.Interval == Trading.Domain.Market.CandleInterval.None
+                ? result with { Interval = Trading.Domain.Market.CandleInterval.OneHour }
+                : result)
+            .ToArray();
+        return new(
+            value.OwnerUserId, (PaperTrainingActivationState)value.State, slots,
+            new(value.DurableClosedCandleSource, value.ApprovedResearchGroupsAndGates, value.WorkerRiskPolicy,
+                value.PaperFillPolicy, value.OutputLedger, value.ProtectiveScheduler),
+            value.ChangedAtUtc, value.ChangedBy,
+            qualifications);
+    }
 
     private static PersistedPaperTrainingActivation ToEntity(PaperTrainingActivation value)
     {
@@ -80,6 +118,8 @@ public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivati
     {
         destination.State = (int)source.State;
         destination.SlotCount = source.Slots.Count;
+        destination.SlotsJson = JsonSerializer.Serialize(source.Slots);
+        destination.QualificationsJson = JsonSerializer.Serialize(source.QualificationResults);
         destination.DurableClosedCandleSource = source.Prerequisites.DurableClosedCandleSource;
         destination.ApprovedResearchGroupsAndGates = source.Prerequisites.ApprovedResearchGroupsAndGates;
         destination.WorkerRiskPolicy = source.Prerequisites.WorkerRiskPolicy;
@@ -88,5 +128,19 @@ public sealed class EfPaperTrainingActivationRepository : IPaperTrainingActivati
         destination.ProtectiveScheduler = source.Prerequisites.ProtectiveScheduler;
         destination.ChangedAtUtc = source.ChangedAtUtc;
         destination.ChangedBy = source.ChangedBy;
+    }
+
+    private static T[] Deserialize<T>(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return [];
+        try
+        {
+            return JsonSerializer.Deserialize<T[]>(json) ?? [];
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException("Stored paper-training configuration is invalid.", exception);
+        }
     }
 }

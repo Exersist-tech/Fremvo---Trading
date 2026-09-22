@@ -131,25 +131,28 @@ public sealed class DurableExperimentCandleSeriesSource : IExperimentCandleSerie
         }
 
         var intervalDuration = TimeSpan.FromMinutes((int)request.Interval);
-        var fromUtc = request.AsOfUtc - TimeSpan.FromTicks(intervalDuration.Ticks * request.MaximumCount);
-        var candles = (await _repository.ListAsync(
+        var completedBoundaryUtc = AlignDown(request.AsOfUtc, intervalDuration);
+        var fromUtc = completedBoundaryUtc - TimeSpan.FromTicks(intervalDuration.Ticks * (request.MaximumCount + 1L));
+        var latestCompletedOpenUtc = completedBoundaryUtc - intervalDuration;
+        var persisted = (await _repository.ListAsync(
                 request.Symbol,
                 request.Interval,
                 fromUtc,
-                request.AsOfUtc,
+                latestCompletedOpenUtc,
                 cancellationToken)
             .ConfigureAwait(false))
             .ToArray();
 
-        if (candles.Length == 0)
+        if (persisted.Length == 0)
         {
             return ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.NoData);
         }
 
-        if (candles.Length > request.MaximumCount)
+        if (persisted.Length > request.MaximumCount + 1)
         {
             return ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.MaximumCountExceeded);
         }
+        var candles = persisted.TakeLast(request.MaximumCount).ToArray();
 
         var validation = Validate(candles, request, intervalDuration);
         if (validation != ExperimentCandleSeriesBlockReason.None)
@@ -158,7 +161,11 @@ public sealed class DurableExperimentCandleSeriesSource : IExperimentCandleSerie
         }
 
         var latest = candles[^1];
-        if (request.AsOfUtc - latest.CloseTimeUtc > _freshnessPolicy.MaximumAge)
+        var intervalFreshness = intervalDuration + intervalDuration;
+        var maximumAge = intervalFreshness < _freshnessPolicy.MaximumAge
+            ? intervalFreshness
+            : _freshnessPolicy.MaximumAge;
+        if (request.AsOfUtc - latest.CloseTimeUtc > maximumAge)
         {
             return ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.Stale);
         }
@@ -169,6 +176,9 @@ public sealed class DurableExperimentCandleSeriesSource : IExperimentCandleSerie
             request.AsOfUtc,
             Array.AsReadOnly(candles)));
     }
+
+    private static DateTimeOffset AlignDown(DateTimeOffset value, TimeSpan interval) =>
+        new(value.UtcTicks - (value.UtcTicks % interval.Ticks), TimeSpan.Zero);
 
     private static bool IsValidRequest(ExperimentCandleSeriesRequest request) =>
         !string.IsNullOrWhiteSpace(request.Symbol) &&

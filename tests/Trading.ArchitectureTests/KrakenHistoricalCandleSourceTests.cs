@@ -286,6 +286,24 @@ public sealed class KrakenHistoricalCandleSourceTests
     }
 
     [Fact]
+    public async Task FetchResolvesWebSocketDisplayNameToExactRestPairIdentifier()
+    {
+        using var handler = new StubHandler(TwoBarPayload);
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.com") };
+        var pair = new TradablePair(
+            "XBTUSD", "XBT/USD", "XXBT", "ZUSD", true, 0.0001m, 0.0001m, 0.1m);
+        var source = new KrakenHistoricalCandleSource(client, new SuppliedPairSource([pair]));
+
+        var candles = await source.FetchAsync(
+            "XBT/USD",
+            CandleInterval.OneMinute,
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("pair=XBTUSD", handler.LastRequest!.RequestUri!.Query, StringComparison.Ordinal);
+        Assert.All(candles, candle => Assert.Equal("XBT/USD", candle.Symbol));
+    }
+
+    [Fact]
     public async Task FetchSendsNoCredentialBecauseTheEndpointIsPublic()
     {
         using var handler = new StubHandler(TwoBarPayload);
@@ -354,5 +372,14 @@ public sealed class KrakenHistoricalCandleSourceTests
             HttpRequestMessage request,
             CancellationToken cancellationToken) =>
             throw new HttpRequestException("offline");
+    }
+
+    private sealed class SuppliedPairSource(IReadOnlyList<TradablePair> pairs) : ITradablePairSource
+    {
+        public Task<IReadOnlyList<TradablePair>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(pairs);
+        }
     }
 }

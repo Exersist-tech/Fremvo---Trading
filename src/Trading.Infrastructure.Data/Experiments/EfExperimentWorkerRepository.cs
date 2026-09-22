@@ -21,6 +21,23 @@ public sealed class EfExperimentWorkerRepository : IExperimentWorkerRepository, 
     public async Task<IReadOnlyCollection<ExperimentWorker>> ListAsync(Guid userId, CancellationToken cancellationToken = default) =>
         (await Query(userId).ToListAsync(cancellationToken).ConfigureAwait(false)).Select(ToDomain).ToArray();
 
+    public async Task<IReadOnlyCollection<ExperimentWorker>> ListByNamesAsync(
+        Guid userId,
+        IReadOnlyCollection<string> names,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+        var requested = names.Distinct(StringComparer.Ordinal).ToArray();
+        if (requested.Length == 0)
+            return [];
+        return (await Query(userId)
+                .Where(worker => requested.Contains(worker.Name))
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .Select(ToDomain)
+            .ToArray();
+    }
+
     public async Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(worker);

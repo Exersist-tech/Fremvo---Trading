@@ -114,6 +114,98 @@ public sealed class ExperimentProtectiveExitWorkerTests
             || name.Contains("Exchanges", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void ProfitablePeakWithRsiMacdAndHigherTimeframeRolloverTriggersExit()
+    {
+        var position = ProfitProtectionPosition();
+        var evidence = PaperTrainingAutoSelectionService.ApprovedIntervals.ToDictionary(
+            interval => interval,
+            ProfitProtectionSeries);
+
+        var result = ExperimentProfitProtectionPolicy.Evaluate(position, evidence);
+
+        Assert.True(result.ShouldExit, result.Reason);
+        Assert.Equal(106m, result.ExitPrice);
+        Assert.Equal(CandleInterval.FiveMinutes, result.TriggerCandle!.Interval);
+    }
+
+    [Fact]
+    public void ProfitProtectionRequiresProfitAndEveryTimeframe()
+    {
+        var evidence = PaperTrainingAutoSelectionService.ApprovedIntervals.ToDictionary(
+            interval => interval,
+            ProfitProtectionSeries);
+        var unprofitable = ProfitProtectionPosition() with { EntryPrice = 113m, StopLossPrice = 108m };
+
+        Assert.False(ExperimentProfitProtectionPolicy.Evaluate(unprofitable, evidence).ShouldExit);
+
+        evidence.Remove(CandleInterval.OneHour);
+        Assert.False(ExperimentProfitProtectionPolicy.Evaluate(ProfitProtectionPosition(), evidence).ShouldExit);
+    }
+
+    [Fact]
+    public async Task ConfirmedProfitRolloverClosesOnceThroughPaperPipeline()
+    {
+        var evidence = PaperTrainingAutoSelectionService.ApprovedIntervals.ToDictionary(
+            interval => interval,
+            interval => ExperimentCandleSeriesResult.Available(ProfitProtectionSeries(interval)));
+        evidence[CandleInterval.OneMinute] = ExperimentCandleSeriesResult.Available(
+            new ExperimentCandleSeries(
+                "BTC/USD",
+                CandleInterval.OneMinute,
+                Now,
+                [Candle(Now, 106m, 107m, 105m)]));
+        var harness = new Harness(new IntervalCandles(evidence), 100m, 95m, 120m);
+
+        var first = await harness.Orchestrator.EvaluateOwnerAsync(harness.User);
+        var second = await harness.Orchestrator.EvaluateOwnerAsync(harness.User);
+
+        Assert.True(Assert.Single(first).Submitted);
+        Assert.Contains(nameof(ExperimentProtectiveExitKind.MomentumReversal), first[0].Key!.ProtectiveExitIdentity, StringComparison.Ordinal);
+        Assert.Contains(second, result => result.Reason.Contains("already claimed", StringComparison.Ordinal));
+        var fill = Assert.Single(harness.Adapter.Ledger);
+        Assert.Equal(TradeDirection.Sell, fill.Direction);
+        Assert.Equal(106m, fill.Price);
+    }
+
+    private static ExperimentProtectiveExitPosition ProfitProtectionPosition() =>
+        new(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "BTC/USD",
+            1m,
+            100m,
+            Now.AddHours(-10),
+            95m,
+            120m);
+
+    private static ExperimentCandleSeries ProfitProtectionSeries(CandleInterval interval)
+    {
+        var duration = TimeSpan.FromMinutes((int)interval);
+        var closes = Enumerable.Range(0, 32)
+            .Select(index => 100m + (index * 0.25m) + (index % 2 == 0 ? 0.5m : -0.3m))
+            .Concat([110m, 114m, 106m])
+            .ToArray();
+        var candles = closes.Select((close, index) =>
+        {
+            var openTime = Now.AddTicks(-duration.Ticks * (closes.Length - index));
+            return new Candle(
+                "BTC/USD",
+                interval,
+                openTime,
+                openTime.Add(duration),
+                close - 0.2m,
+                close + (index == closes.Length - 2 ? 1m : 0.5m),
+                close - 0.5m,
+                close,
+                100m + index,
+                true,
+                false);
+        }).ToArray();
+        return new ExperimentCandleSeries("BTC/USD", interval, Now, candles);
+    }
+
     private static Candle Candle(DateTimeOffset close, decimal open, decimal high, decimal low) =>
         new("BTC/USD", CandleInterval.OneMinute, close.AddMinutes(-1), close, open, high, low, open, 1m, true, false);
 
@@ -124,14 +216,20 @@ public sealed class ExperimentProtectiveExitWorkerTests
         public InMemoryExecutionCommandRepository Commands { get; } = new();
         public ExperimentProtectiveExitOrchestrator Orchestrator { get; }
 
-        public Harness(Candle candle) : this(ExperimentCandleSeriesResult.Available(
-            new ExperimentCandleSeries("BTC/USD", CandleInterval.OneMinute, Now, [candle]))) { }
+        public Harness(Candle candle) : this(new FixedCandles(ExperimentCandleSeriesResult.Available(
+            new ExperimentCandleSeries("BTC/USD", CandleInterval.OneMinute, Now, [candle])))) { }
 
-        public Harness(ExperimentCandleSeriesResult candles)
+        public Harness(ExperimentCandleSeriesResult candles) : this(new FixedCandles(candles)) { }
+
+        public Harness(
+            IExperimentCandleSeriesSource candles,
+            decimal entryPrice = 300m,
+            decimal stopLossPrice = 290m,
+            decimal takeProfitPrice = 310m)
         {
             var worker = Guid.NewGuid();
-            var position = new ExperimentProtectiveExitPosition(User, worker, Guid.NewGuid(), "BTC/USD", 2m, 300m,
-                Now.AddHours(-1), 290m, 310m);
+            var position = new ExperimentProtectiveExitPosition(User, worker, Guid.NewGuid(), "BTC/USD", 2m, entryPrice,
+                Now.AddHours(-1), stopLossPrice, takeProfitPrice);
             var decisions = new InMemoryExperimentDecisionLedger();
             var pipeline = new TradePipeline(new InMemoryMarketEventRepository(), new InMemoryStrategyDecisionRepository(),
                 new InMemoryTradeIntentRepository(), new InMemoryRiskEvaluationRepository(), Commands,
@@ -140,7 +238,7 @@ public sealed class ExperimentProtectiveExitWorkerTests
                 timeProvider: new FixedTimeProvider(Now));
             var paper = new PaperExperimentTradeOrchestrator(decisions, new InMemoryExperimentPaperExecutionLedger(), pipeline, Adapter);
             Orchestrator = new ExperimentProtectiveExitOrchestrator(
-                new FixedPositions(position), new FixedCandles(candles), new InMemoryExperimentProtectiveExitLedger(),
+                new FixedPositions(position), candles, new InMemoryExperimentProtectiveExitLedger(),
                 decisions, paper, new FixedTimeProvider(Now));
         }
     }
@@ -155,6 +253,17 @@ public sealed class ExperimentProtectiveExitWorkerTests
     {
         public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(ExperimentCandleSeriesRequest request, CancellationToken cancellationToken = default) =>
             Task.FromResult(result);
+    }
+
+    private sealed class IntervalCandles(
+        IReadOnlyDictionary<CandleInterval, ExperimentCandleSeriesResult> results) : IExperimentCandleSeriesSource
+    {
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(results.TryGetValue(request.Interval, out var result)
+                ? result
+                : ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.NoData));
     }
 
     private sealed class RecordingAudit : IAuditEventWriter

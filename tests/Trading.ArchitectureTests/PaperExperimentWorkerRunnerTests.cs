@@ -25,6 +25,11 @@ public sealed class PaperExperimentWorkerRunnerTests
         "platform.rsi-pullback",
         "platform.macd-volume",
         "platform.volatility-compression-breakout",
+        "platform.rsi-macd-confluence",
+        "platform.ema-rsi-trend",
+        "platform.bollinger-macd-recovery",
+        "platform.donchian-volume-breakout",
+        "platform.ema-volume-pullback",
         "platform.cross-sectional-momentum-rotation",
         "platform.relative-strength-pullback-rotation",
         "platform.session-conditioned-breakout",
@@ -115,14 +120,56 @@ public sealed class PaperExperimentWorkerRunnerTests
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
 
-        Assert.Equal(10, registry.Definitions.Count);
+        Assert.Equal(15, registry.Definitions.Count);
+        Assert.Contains(registry.Definitions, definition =>
+            definition.FamilyId == "platform.rsi-macd-confluence");
         Assert.DoesNotContain(typeof(ApprovedExperimentStrategyRegistry).GetMethods(), method =>
             method.Name.Contains("Register", StringComparison.OrdinalIgnoreCase)
             || method.GetParameters().Any(parameter => typeof(Delegate).IsAssignableFrom(parameter.ParameterType)));
     }
 
+    [Theory]
+    [InlineData("platform.rsi-macd-confluence")]
+    [InlineData("platform.ema-rsi-trend")]
+    [InlineData("platform.bollinger-macd-recovery")]
+    [InlineData("platform.donchian-volume-breakout")]
+    [InlineData("platform.ema-volume-pullback")]
+    public void HybridStrategiesEvaluateDeterministicallyWithSufficientClosedHistory(string strategyId)
+    {
+        var candles = Enumerable.Range(0, 40)
+            .Select(index =>
+            {
+                var openTime = Now.AddHours(-40 + index);
+                var baseline = 100m + (index * 0.2m);
+                var close = baseline + (index % 3 == 0 ? -0.3m : 0.4m);
+                return new Candle(
+                    "BTC/USD",
+                    CandleInterval.OneHour,
+                    openTime,
+                    openTime.AddHours(1),
+                    baseline,
+                    Math.Max(baseline, close) + 0.5m,
+                    Math.Min(baseline, close) - 0.5m,
+                    close,
+                    100m + index,
+                    true,
+                    false);
+            })
+            .ToArray();
+        var series = new ExperimentCandleSeries("BTC/USD", CandleInterval.OneHour, Now, candles);
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+
+        var first = registry.EvaluateHistorical(strategyId, series, "{}");
+        var second = registry.EvaluateHistorical(strategyId, series, "{}");
+
+        Assert.NotEqual(ExperimentAnalysisOutcome.Blocked, first.Outcome);
+        Assert.Equal(first.Outcome, second.Outcome);
+        Assert.Equal(first.Reason, second.Reason);
+        Assert.Equal(first.Value, second.Value);
+    }
+
     [Fact]
-    public async Task AttestedObservationsMapDeterministicallyAndNeverAddExposure()
+    public async Task AttestedObservationsMapDeterministicallyAndRequireFavorableMarkForAdds()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
         var definition = registry.Definitions.First();
@@ -139,14 +186,25 @@ public sealed class PaperExperimentWorkerRunnerTests
 
         var first = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
         var repeated = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis, snapshot, identity);
-        var existingExposure = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(worker, configuration, configuration.Assignments.Single(), analysis,
-            snapshot with { PositionQuantity = 1m }, identity);
+        var noMark = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(
+            worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
+        var neutralLedgerPolicy = new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now));
+        var preservedNeutral = await neutralLedgerPolicy.DecideAsync(
+            worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
+        worker.ApplyPaperTrade(1m, 100m, 0m, "buy", Now);
+        worker.RecordFavorablePaperMark(110m);
+        var favorableAdd = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(
+            worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
+        var conflictingLaterAdd = await neutralLedgerPolicy.DecideAsync(
+            worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
 
         Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
         Assert.Equal(first, repeated);
-        Assert.Equal(ExperimentProposalAction.Neutral, existingExposure.Proposal.Action);
-        Assert.DoesNotContain(Enum.GetNames<ExperimentProposalAction>(), action => action.Equals("Add", StringComparison.OrdinalIgnoreCase));
-        Assert.Empty(worker.Ledger);
+        Assert.Equal(ExperimentProposalAction.Neutral, noMark.Proposal.Action);
+        Assert.Equal(ExperimentProposalAction.Neutral, preservedNeutral.Proposal.Action);
+        Assert.Equal(preservedNeutral, conflictingLaterAdd);
+        Assert.Equal(ExperimentProposalAction.Add, favorableAdd.Proposal.Action);
+        Assert.Single(worker.Ledger);
     }
 
     [Fact]
@@ -175,14 +233,117 @@ public sealed class PaperExperimentWorkerRunnerTests
     }
 
     [Fact]
+    public async Task PaperAnalysisRequiresPrimarySignalAndAnotherTimeframeConfirmation()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.Single(candidate =>
+            candidate.FamilyId == "platform.ema-trend-continuation");
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(
+            worker,
+            definition,
+            signalInterval: CandleInterval.FifteenMinutes,
+            allowedIntervals: PaperTrainingAutoSelectionService.ApprovedIntervals);
+        var source = new MultiIntervalCandleSource();
+        var runner = new PaperExperimentWorkerRunner(source, registry);
+
+        var result = await runner.AnalyzeAcrossPaperTimeframesAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            Now);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Analyzed, result.Outcome);
+        Assert.Equal(CandleInterval.FifteenMinutes, result.Evidence!.Interval);
+        Assert.Equal(64, result.Evidence.ContextFingerprint.Length);
+        Assert.Equal(
+            PaperTrainingAutoSelectionService.ApprovedIntervals.Order(),
+            source.RequestedIntervals.Order());
+        Assert.Contains("Multi-timeframe confirmation passed", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PaperAnalysisFailsClosedWhenARequiredTimeframeIsUnavailable()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.Single(candidate =>
+            candidate.FamilyId == "platform.ema-trend-continuation");
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(
+            worker,
+            definition,
+            signalInterval: CandleInterval.FifteenMinutes,
+            allowedIntervals: PaperTrainingAutoSelectionService.ApprovedIntervals);
+        var source = new MultiIntervalCandleSource(CandleInterval.ThirtyMinutes);
+        var runner = new PaperExperimentWorkerRunner(source, registry);
+
+        var result = await runner.AnalyzeAcrossPaperTimeframesAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            Now);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, result.Outcome);
+        Assert.NotNull(result.Evidence);
+        Assert.Contains("30m confirmation evidence is unavailable", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SupportingTimeframesAreCutOffAtThePrimaryCandleClose()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.Single(candidate =>
+            candidate.FamilyId == "platform.ema-trend-continuation");
+        var worker = Worker("{}", definition.FamilyId);
+        var configuration = Configuration(
+            worker,
+            definition,
+            signalInterval: CandleInterval.FifteenMinutes,
+            allowedIntervals: PaperTrainingAutoSelectionService.ApprovedIntervals);
+        var primaryClose = Now.AddMinutes(-5);
+        var source = new MultiIntervalCandleSource(primaryCloseUtc: primaryClose);
+        var runner = new PaperExperimentWorkerRunner(source, registry);
+
+        var result = await runner.AnalyzeAcrossPaperTimeframesAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            Now);
+
+        Assert.NotEqual(ExperimentAnalysisOutcome.Blocked, result.Outcome);
+        Assert.Equal(Now, source.Requests[0].AsOfUtc);
+        Assert.All(source.Requests.Skip(1), request => Assert.Equal(primaryClose, request.AsOfUtc));
+        Assert.Equal(primaryClose, result.Evidence!.AsOfUtc);
+    }
+
+    [Fact]
     public async Task SupplementalProviderEvaluatesEachFixedFamilyAndBlocksAnIncompleteUniverse()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
         var series = FixedUniverseSeries();
         var source = new FixedUniverseCandleSource(series);
         var provider = new PlatformSupplementalExperimentEvidenceProvider(source);
+        var fixedFamilySeries = series["BTC/USD"].Series!;
+        var inexactFixedFamilySeries = new ExperimentCandleSeries(
+            fixedFamilySeries.Symbol,
+            fixedFamilySeries.Interval,
+            fixedFamilySeries.AsOfUtc.AddSeconds(1),
+            fixedFamilySeries.Candles);
+        Assert.Null(await provider.EvaluateAsync(
+            "platform.rsi-pullback",
+            inexactFixedFamilySeries,
+            Configuration(
+                Worker("{}", "platform.rsi-pullback"),
+                registry.Definitions.Single(candidate => candidate.FamilyId == "platform.rsi-pullback"))
+                .Assignments.Single().Provenance));
 
-        foreach (var family in ExpectedPhase5BFamilies.Skip(6))
+        foreach (var family in new[]
+                 {
+                     "platform.cross-sectional-momentum-rotation",
+                     "platform.relative-strength-pullback-rotation",
+                     "platform.session-conditioned-breakout",
+                     "platform.regime-switching-ensemble"
+                 })
         {
             var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
             var worker = Worker("{}", family);
@@ -269,6 +430,53 @@ public sealed class PaperExperimentWorkerRunnerTests
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
+    private sealed class MultiIntervalCandleSource(
+        CandleInterval? unavailable = null,
+        DateTimeOffset? primaryCloseUtc = null)
+        : IExperimentCandleSeriesSource
+    {
+        private readonly List<ExperimentCandleSeriesRequest> _requests = [];
+
+        public IReadOnlyList<CandleInterval> RequestedIntervals => _requests.Select(request => request.Interval).ToArray();
+        public List<ExperimentCandleSeriesRequest> Requests => _requests;
+
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _requests.Add(request);
+            if (request.Interval == unavailable)
+                return Task.FromResult(ExperimentCandleSeriesResult.Blocked(
+                    ExperimentCandleSeriesBlockReason.NoData));
+
+            var duration = TimeSpan.FromMinutes((int)request.Interval);
+            var closeUtc = request.Interval == CandleInterval.FifteenMinutes && primaryCloseUtc.HasValue
+                ? primaryCloseUtc.Value
+                : request.AsOfUtc;
+            var candles = Enumerable.Range(0, 3)
+                .Select(index =>
+                {
+                    var openTime = closeUtc.AddTicks(duration.Ticks * (index - 3));
+                    return new Candle(
+                        "BTC/USD",
+                        request.Interval,
+                        openTime,
+                        openTime.Add(duration),
+                        100m + index,
+                        102m + index,
+                        99m + index,
+                        101m + index,
+                        1m,
+                        true,
+                        false);
+                })
+                .ToArray();
+            return Task.FromResult(ExperimentCandleSeriesResult.Available(
+                new ExperimentCandleSeries("BTC/USD", request.Interval, closeUtc, candles)));
+        }
+    }
+
     private static ExperimentWorker Worker(string parameters, string strategyId = "platform.ema-trend-continuation")
     {
         var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "worker", strategyId, "BTC/USD", 1_000m, Now, 1);
@@ -281,7 +489,9 @@ public sealed class PaperExperimentWorkerRunnerTests
         ExperimentWorker worker,
         ApprovedExperimentStrategyDefinition definition,
         string? familyId = null,
-        bool acceptedGate = true)
+        bool acceptedGate = true,
+        CandleInterval signalInterval = CandleInterval.OneHour,
+        IReadOnlyList<CandleInterval>? allowedIntervals = null)
     {
         var approval = StrategyApproval.CreateDraft(
             Guid.NewGuid(),
@@ -298,10 +508,13 @@ public sealed class PaperExperimentWorkerRunnerTests
             new StrategyApprovalRequirements(
                 new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, InstrumentId) },
                 3, 1m, 1m, 1m, TimeSpan.FromHours(1),
-                new[] { CandleInterval.OneHour },
+                allowedIntervals ?? new[] { CandleInterval.OneHour },
                 new[] { TradingProductType.Spot },
                 new[] { StrategyApprovalMode.Paper },
-                new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.OneHour, CandleInterval.OneHour)));
+                new StrategyTimeframeConfiguration(
+                    CandleInterval.OneHour,
+                    signalInterval,
+                    allowedIntervals is null ? CandleInterval.OneHour : CandleInterval.FiveMinutes)));
         var actor = approval.CreatedBy;
         approval = approval.TransitionTo(StrategyApprovalState.UnderReview, actor, Now)
             .TransitionTo(StrategyApprovalState.Approved, actor, Now, actor);

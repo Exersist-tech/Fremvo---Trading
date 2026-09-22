@@ -66,7 +66,8 @@ public sealed class ExperimentPaperFillModelTests
 
         var adjusted = Apply(model, worker, Request(TradeDirection.Buy, 1.09m, 10m, 1m));
         var beforeCash = worker.CashBalance;
-        var rejected = Apply(model, worker, Request(TradeDirection.Buy, 0.19m, 10m, 1m));
+        worker.RecordFavorablePaperMark(11m);
+        var rejected = Apply(model, worker, Request(TradeDirection.Buy, 0.19m, 11m, 1m));
 
         Assert.Equal(ExperimentPaperFillStatus.Filled, adjusted.Status);
         Assert.Equal(1m, adjusted.FilledQuantity);
@@ -147,7 +148,9 @@ public sealed class ExperimentPaperFillModelTests
         eligibility.Grant(scope with { Purpose = EligibilityPurpose.Research }, Now, Now, TimeSpan.FromMinutes(5));
         eligibility.Grant(scope with { Purpose = EligibilityPurpose.Backtest }, Now, Now, TimeSpan.FromMinutes(5));
         eligibility.Grant(scope, Now, Now, TimeSpan.FromMinutes(5));
-        var action = request.Direction == TradeDirection.Buy ? ExperimentProposalAction.Open : ExperimentProposalAction.Reduce;
+        var action = request.Direction == TradeDirection.Buy
+            ? worker.PositionQuantity > 0m ? ExperimentProposalAction.Add : ExperimentProposalAction.Open
+            : ExperimentProposalAction.Reduce;
         var evaluation = new ExperimentWorkerRiskEvaluationRequest(
             worker,
             new(worker.UserId, worker.Id, ExperimentResearchGroup.A, 1, worker.StrategyId, true),

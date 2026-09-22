@@ -60,6 +60,18 @@ public sealed class KrakenStreamingCandleSourceTests
     }
 
     [Fact]
+    public void FinalizingAFormingUpdateRemovesOnlyTheIncompleteFlag()
+    {
+        var forming = Assert.Single(KrakenOhlcV2Protocol.Map(Update));
+
+        var closed = KrakenStreamingCandleSource.AsClosed(forming);
+
+        Assert.True(closed.IsClosed);
+        Assert.True(closed.CanBeUsedForClosedCandleSignal);
+        Assert.DoesNotContain(DataQualityIssue.Incomplete, closed.QualityFlags);
+    }
+
+    [Fact]
     public void MapperRejectsMalformedOhlcMessages()
     {
         Assert.Throws<MarketDataSourceException>(() => KrakenOhlcV2Protocol.Map("{not json"));

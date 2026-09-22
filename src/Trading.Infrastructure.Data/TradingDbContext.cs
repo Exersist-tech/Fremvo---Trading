@@ -183,6 +183,8 @@ public sealed class TradingDbContext : DbContext
             entity.HasKey(value => value.OwnerUserId);
             entity.Property(value => value.State).IsRequired();
             entity.Property(value => value.SlotCount).IsRequired();
+            entity.Property(value => value.SlotsJson).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(value => value.QualificationsJson).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(value => value.ChangedAtUtc).IsRequired();
             entity.Property(value => value.ChangedBy).IsRequired();
             entity.Property(value => value.RowVersion).IsRowVersion();

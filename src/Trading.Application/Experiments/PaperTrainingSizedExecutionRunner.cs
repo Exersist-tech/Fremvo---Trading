@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Trading.Domain.Experiments;
 using Trading.Risk;
 using Trading.Strategies;
@@ -49,6 +50,12 @@ public interface IExperimentPaperPlanEvidenceRepository
 /// </summary>
 public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
 {
+    private static readonly Action<ILogger, Guid, string, Exception?> s_logSkipped =
+        LoggerMessage.Define<Guid, string>(
+            LogLevel.Information,
+            new EventId(1, "PaperTrainingFillSkipped"),
+            "Paper worker {WorkerId} did not advance to a simulated fill. Stage={Reason}.");
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> _lastSkipReasons = new();
     private readonly PaperExperimentWorkerRunner _analysis;
     private readonly IExperimentResearchGroupConfigurationSource _configurations;
     private readonly IPaperTrainingSizingSnapshotSource _snapshots;
@@ -59,6 +66,7 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
     private readonly IPaperTradingLedgerRepository _ledger;
     private readonly IExperimentPaperPlanEvidenceRepository _plans;
     private readonly TimeProvider _time;
+    private readonly ILogger<PaperTrainingSizedExecutionRunner>? _logger;
 
     public PaperTrainingSizedExecutionRunner(
         PaperExperimentWorkerRunner analysis,
@@ -70,7 +78,8 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         IExperimentWorkerRepository workers,
         IPaperTradingLedgerRepository ledger,
         IExperimentPaperPlanEvidenceRepository plans,
-        TimeProvider time)
+        TimeProvider time,
+        ILogger<PaperTrainingSizedExecutionRunner>? logger = null)
     {
         _analysis = analysis ?? throw new ArgumentNullException(nameof(analysis));
         _configurations = configurations ?? throw new ArgumentNullException(nameof(configurations));
@@ -82,6 +91,7 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
         _plans = plans ?? throw new ArgumentNullException(nameof(plans));
         _time = time ?? throw new ArgumentNullException(nameof(time));
+        _logger = logger;
     }
 
     public async Task RunOnceAsync(ExperimentWorker worker, CancellationToken cancellationToken)
@@ -95,13 +105,46 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         if (configuration is null || assignment is null || !configuration.IsRunnableFor(worker, assignment))
             return;
 
-        var observation = await _analysis.AnalyzeAsync(worker, configuration, assignment, now, cancellationToken).ConfigureAwait(false);
-        if (observation.Outcome != ExperimentAnalysisOutcome.Analyzed || observation.Evidence is null)
+        var observation = await _analysis.AnalyzeAcrossPaperTimeframesAsync(
+            worker, configuration, assignment, now, cancellationToken).ConfigureAwait(false);
+        if (observation.Evidence is null || observation.Outcome == ExperimentAnalysisOutcome.Blocked)
+        {
+            ReportSkip(worker, $"analysis: {observation.Reason}");
+            return;
+        }
+
+        var evidence = observation.Evidence;
+        var identity = new ExperimentClosedCandleIdentity(
+            evidence.Symbol,
+            evidence.Interval,
+            evidence.OpenTimeUtc,
+            evidence.CloseTimeUtc,
+            evidence.AsOfUtc);
+        var decision = await _decisions.DecideAsync(
+            worker,
+            configuration,
+            assignment,
+            observation,
+            new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, worker.PositionQuantity, evidence.AsOfUtc),
+            identity,
+            cancellationToken).ConfigureAwait(false);
+        if (decision.Proposal.Action is not (ExperimentProposalAction.Open or ExperimentProposalAction.Add))
             return;
 
         var snapshot = await _snapshots.GetAsync(worker, configuration, assignment, observation, cancellationToken).ConfigureAwait(false);
         if (snapshot is null || !IsExactPlan(snapshot.Plan, worker, observation.Evidence, snapshot.Context.Candle))
+        {
+            ReportSkip(worker, "sizing: no exact approved paper sizing snapshot was available");
             return;
+        }
+
+        var candle = snapshot.Context.Candle;
+        if (worker.PositionQuantity > 0m)
+        {
+            if (candle.ClosePrice <= worker.AverageEntryPrice)
+                return;
+            worker.RecordFavorablePaperMark(candle.ClosePrice);
+        }
 
         var sizing = snapshot.SizingInput;
         if (sizing.EntryPrice != snapshot.Plan.EntryReferencePrice || sizing.ProtectiveStopPrice != snapshot.Plan.ProtectiveStopPrice
@@ -109,13 +152,11 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
             return;
         var sized = PaperRiskPositionSizer.Size(sizing);
         if (!sized.IsAccepted)
+        {
+            ReportSkip(worker, $"sizing: {sized.Explanation}");
             return;
+        }
 
-        var candle = snapshot.Context.Candle;
-        var identity = new ExperimentClosedCandleIdentity(candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc, candle.AsOfUtc);
-        var decision = await _decisions.DecideAsync(worker, configuration, assignment, observation, snapshot.Context.Portfolio, identity, cancellationToken).ConfigureAwait(false);
-        if (decision.Proposal.Action != ExperimentProposalAction.Open)
-            return;
         await _plans.SaveAsync(new ExperimentPaperPlanEvidence(
             decision.Key, snapshot.Plan.ProtectiveStopPrice, snapshot.Plan.ConservativeTargetPrice, now), cancellationToken).ConfigureAwait(false);
 
@@ -123,8 +164,12 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         if (fill is null || fill.RequestedQuantity != sized.Quantity || fill.ReferencePrice != snapshot.Plan.EntryReferencePrice)
             return;
         if (!_workerRisk.Evaluate(snapshot.WorkerRiskRequest).IsAllowed)
+        {
+            ReportSkip(worker, "risk: the worker risk evaluator denied the proposed paper fill");
             return;
+        }
 
+        _lastSkipReasons.TryRemove(worker.Id, out _);
         // The pipeline receives the sizer output verbatim; it is never clamped or rounded here.
         var result = await _paper.ProcessSizedAsync(decision, snapshot.Context, sized.Quantity, cancellationToken).ConfigureAwait(false);
         if (result.PipelineResult?.Executed != true || result.PaperFill is null)
@@ -137,6 +182,17 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
                 adapterFill.Direction == Trading.Domain.Execution.TradeDirection.Buy ? "buy" : "sell", adapterFill.ExecutedAtUtc);
             await _ledger.AddAsync(worker.UserId, worker.Ledger.Last(), cancellationToken).ConfigureAwait(false);
             await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private void ReportSkip(ExperimentWorker worker, string reason)
+    {
+        if (_logger is null || !_lastSkipReasons.TryGetValue(worker.Id, out var previous)
+            || !string.Equals(previous, reason, StringComparison.Ordinal))
+        {
+            _lastSkipReasons[worker.Id] = reason;
+            if (_logger is not null)
+                s_logSkipped(_logger, worker.Id, reason, null);
         }
     }
 

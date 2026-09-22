@@ -16,11 +16,11 @@ public sealed class Worker : BackgroundService
             new EventId(1, "ExperimentTickCompleted"),
             "Experiment tick completed. Workers advanced: {Completed}. Workers faulted: {Faulted}.");
 
-    private static readonly Action<ILogger, Guid, Exception?> s_logPoolFaulted =
-        LoggerMessage.Define<Guid>(
+    private static readonly Action<ILogger, Guid, string, Exception?> s_logPoolFaulted =
+        LoggerMessage.Define<Guid, string>(
             LogLevel.Error,
             new EventId(2, "ExperimentPoolFaulted"),
-            "An experiment pool faulted and was skipped for this tick. Owner: {OwnerId}.");
+            "An experiment pool faulted and was skipped for this tick. Owner: {OwnerId}. Error type: {ErrorType}.");
 
     private readonly ILogger<Worker> _logger;
     private readonly ExperimentWorkerPool _pool;
@@ -73,7 +73,7 @@ public sealed class Worker : BackgroundService
         var faulted = 0;
 
         var activeOwners = await _activationSource.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var userId in _options.EnabledUserIds.Intersect(activeOwners))
+        foreach (var userId in activeOwners)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -89,12 +89,12 @@ public sealed class Worker : BackgroundService
                 throw;
             }
 #pragma warning disable CA1031 // One user's pool must never stop another user's pool.
-            catch (Exception)
+            catch (Exception exception)
 #pragma warning restore CA1031
             {
-                // Only the surrogate owner id is logged. No exception detail is emitted so a fault
-                // can never leak credentials or connection strings into telemetry.
-                s_logPoolFaulted(_logger, userId, null);
+                // The exception type is safe operational evidence. Messages and stack traces remain
+                // excluded because they can contain connection strings or exchange response data.
+                s_logPoolFaulted(_logger, userId, exception.GetType().Name, null);
                 faulted++;
             }
         }

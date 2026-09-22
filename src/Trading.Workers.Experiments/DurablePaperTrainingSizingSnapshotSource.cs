@@ -25,6 +25,11 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
         ["platform.rsi-pullback"] = "rsi-pullback-v1",
         ["platform.macd-volume"] = "macd-volume-trend-acceleration-v1",
         ["platform.volatility-compression-breakout"] = "volatility-compression-breakout-v1",
+        ["platform.rsi-macd-confluence"] = "rsi-macd-confluence-v1",
+        ["platform.ema-rsi-trend"] = "ema-rsi-trend-v1",
+        ["platform.bollinger-macd-recovery"] = "bollinger-macd-recovery-v1",
+        ["platform.donchian-volume-breakout"] = "donchian-volume-breakout-v1",
+        ["platform.ema-volume-pullback"] = "ema-volume-pullback-v1",
         ["platform.cross-sectional-momentum-rotation"] = "cross-sectional-momentum-rotation-v1",
         ["platform.relative-strength-pullback-rotation"] = "relative-strength-pullback-rotation-v1",
         ["platform.session-conditioned-breakout"] = "session-conditioned-breakout-v1",
@@ -60,7 +65,7 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
             return null;
         using var scope = _scopes.CreateScope();
         var series = await scope.ServiceProvider.GetRequiredService<ICandleRepository>().ListAsync(worker.MarketSymbol, evidence.Interval, evidence.OpenTimeUtc - TimeSpan.FromTicks(duration.Ticks * 13),
-            evidence.CloseTimeUtc, cancellationToken).ConfigureAwait(false);
+            evidence.OpenTimeUtc, cancellationToken).ConfigureAwait(false);
         var candles = series.OrderBy(candle => candle.OpenTimeUtc).ThenBy(candle => candle.CloseTimeUtc).ToArray();
         if (!HasExactClosedEvidence(candles, evidence, duration))
             return null;
@@ -73,12 +78,14 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
         var now = _time.GetUtcNow();
         if (now.Offset != TimeSpan.Zero || now < evidence.AsOfUtc)
             return null;
+        var isAddition = worker.PositionQuantity > 0m;
+        var favorableAddApproved = isAddition && candles[^1].Close > worker.AverageEntryPrice;
         var exposure = worker.PositionQuantity * candles[^1].Close;
         var sizing = new PaperRiskSizingInput(worker.CashBalance + exposure, worker.CashBalance, plan.EntryReferencePrice, plan.ProtectiveStopPrice,
             PaperPositionDirection.Long, worker.PositionQuantity, exposure, worker.PositionQuantity > 0m ? PaperPositionDirection.Long : null,
-            worker.PriorFavorableMarkPrice is decimal favorableMark && favorableMark > worker.AverageEntryPrice, new PaperExchangeFilters(0.1m, 0.00000001m, 0.00000001m, 10m),
-            new PaperWorkerSizingBudget(0.0025m, 100m, 100m, 1m),
-            new PaperRiskSizingPolicy(0.0025m, 0.0025m, 100m, 100m, 1m, TimeSpan.FromMinutes(5)),
+            favorableAddApproved, new PaperExchangeFilters(0.1m, 0.00000001m, 0.00000001m, 10m),
+            CreateWorkerBudget(worker),
+            CreatePlatformPolicy(worker),
             evidence.AsOfUtc, evidence.AsOfUtc, now);
         var sized = PaperRiskPositionSizer.Size(sizing);
         if (!sized.IsAccepted)
@@ -88,15 +95,41 @@ public sealed class DurablePaperTrainingSizingSnapshotSource : IPaperTrainingSiz
         var fill = new ExperimentPaperFillRequest(worker.MarketSymbol, TradeDirection.Buy, sized.Quantity, plan.EntryReferencePrice, false, 1m, evidence.AsOfUtc);
         var risk = new ExperimentWorkerRiskEvaluationRequest(worker,
             new(worker.UserId, worker.Id, assignment.Group, configuration.Version, worker.StrategyId, true),
-            new(1m, 100m, worker.PositionControls.MaxAdditionsPerPosition),
+            new(worker.PositionControls.MaxPositionQuantity, Math.Min(100m, worker.PositionControls.MaxPositionNotional),
+                worker.PositionControls.MaxAdditionsPerPosition),
             new(worker.UserId, worker.Id, worker.PositionQuantity, exposure, worker.AdditionCount),
             s_instrumentId, eligibility, new(EligibilityPurpose.Paper, evidence.Interval, TradingProductType.Spot), TimeSpan.FromMinutes(5),
             new StalenessPolicy(TimeSpan.FromMinutes(5)), evidence.AsOfUtc, evidence.AsOfUtc, now, new TradingModeFlags(), null,
-            false, false, false, false, new RiskLimitHierarchy(100m, 1m), ExperimentProposalAction.Open, fill);
+            false, false, false, false,
+            new RiskLimitHierarchy(Math.Min(100m, worker.PositionControls.MaxPositionNotional),
+                worker.PositionControls.MaxPositionQuantity),
+            isAddition ? ExperimentProposalAction.Add : ExperimentProposalAction.Open, fill);
         var context = new ExperimentPaperWorkerContext(worker, new(worker.UserId, worker.Id, worker.PositionQuantity, evidence.AsOfUtc),
             new(worker.MarketSymbol, evidence.Interval, evidence.OpenTimeUtc, evidence.CloseTimeUtc, evidence.AsOfUtc, candles[^1].Close, candles[^1].Volume,
                 candles[^1].QualityFlags.Select(flag => flag.ToString()).ToArray()));
         return new(plan, context, sizing, risk);
+    }
+
+    internal static PaperWorkerSizingBudget CreateWorkerBudget(ExperimentWorker worker)
+    {
+        ArgumentNullException.ThrowIfNull(worker);
+        return new(
+            0.0025m,
+            100m,
+            Math.Min(100m, worker.PositionControls.MaxPositionNotional),
+            worker.PositionControls.MaxPositionQuantity);
+    }
+
+    internal static PaperRiskSizingPolicy CreatePlatformPolicy(ExperimentWorker worker)
+    {
+        ArgumentNullException.ThrowIfNull(worker);
+        return new(
+            0.0025m,
+            0.0025m,
+            100m,
+            Math.Min(100m, worker.PositionControls.MaxPositionNotional),
+            worker.PositionControls.MaxPositionQuantity,
+            TimeSpan.FromMinutes(5));
     }
 
     private static bool HasExactClosedEvidence(Candle[] candles, ExperimentDecisionEvidence evidence, TimeSpan duration) =>

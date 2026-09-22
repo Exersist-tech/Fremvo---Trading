@@ -98,10 +98,6 @@ public sealed class PaperRiskPositionSizer
         if (!AreFresh(input, policy))
             return PaperRiskSizingResult.Denied("Market or account sizing input is missing, stale, non-UTC, or future-dated.");
 
-        if (!IsAligned(input.EntryPrice.Value, filters.PriceTick)
-            || !IsAligned(input.ProtectiveStopPrice.Value, filters.PriceTick))
-            return PaperRiskSizingResult.Denied("Entry and protective stop prices must align to the exchange price tick.");
-
         var entry = input.EntryPrice.Value;
         var stop = input.ProtectiveStopPrice.Value;
         var direction = input.Direction.Value;
@@ -184,8 +180,6 @@ public sealed class PaperRiskPositionSizer
             && input.EvaluatedAtUtc.Value - input.MarketSnapshotAtUtc.Value <= policy.MaximumInputAge
             && input.EvaluatedAtUtc.Value - input.AccountSnapshotAtUtc.Value <= policy.MaximumInputAge;
     }
-
-    private static bool IsAligned(decimal value, decimal step) => value % step == 0m;
 
     private static decimal FloorToStep(decimal value, decimal step) => Math.Floor(value / step) * step;
 }

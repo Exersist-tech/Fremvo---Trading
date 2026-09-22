@@ -2,6 +2,7 @@ using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
 using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
+using Trading.Domain.Market;
 
 namespace Trading.ArchitectureTests;
 
@@ -62,7 +63,8 @@ public sealed class PaperTrainingActivationTests
 
         Assert.Equal(10, request.Slots.Count);
         Assert.All(request.Slots, slot => Assert.Equal(PaperTrainingActivationService.FixedStartingCash, slot.StartingCash));
-        Assert.Equal(PaperTrainingActivationService.ApprovedSlots, request.Slots);
+        Assert.Equal(PaperTrainingActivationService.ApprovedSlots.Take(10), request.Slots);
+        Assert.Equal(15, PaperTrainingActivationService.ApprovedSlots.Count);
         Assert.Equal(10, request.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(ExpectedGroupSizes, request.Slots.GroupBy(slot => slot.Group).OrderBy(group => group.Key).Select(group => group.Count()));
         Assert.All(request.Slots, slot => Assert.StartsWith("phase5b-", slot.ProvenanceId, StringComparison.Ordinal));
@@ -97,6 +99,118 @@ public sealed class PaperTrainingActivationTests
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
             service.StartAsync(owner, Guid.NewGuid(), RoleType.User, 1, CompletePrerequisites()));
         Assert.True((await service.StartAsync(owner, Guid.NewGuid(), RoleType.Administrator, 1, CompletePrerequisites())).IsActive);
+    }
+
+    [Fact]
+    public async Task QualifiedStartActivatesQualifiedAndExplicitPaperExplorationSlotsAndRetainsEvidence()
+    {
+        var repository = new InMemoryPaperTrainingActivationRepository();
+        var service = new PaperTrainingActivationService(
+            repository, new InMemoryAuditEventWriter(), new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+        var selected = PaperTrainingActivationService.ApprovedSlots.Take(2).ToArray();
+        var results = new[]
+        {
+            new PaperTrainingQualificationResult(
+                selected[0].Slot, selected[0].Symbol, true, 2m, 4, 5m, new string('A', 64), "Passed."),
+            new PaperTrainingQualificationResult(
+                selected[1].Slot, selected[1].Symbol, false, -1m, 2, 8m, new string('B', 64), "Failed.",
+                PaperOnlyExploration: true)
+        };
+
+        var activation = await service.StartQualifiedAsync(
+            owner, owner, RoleType.User, selected, results, CompletePrerequisites());
+
+        Assert.True(activation.IsActive);
+        Assert.Equal(selected, activation.Slots);
+        Assert.Equal(results, activation.QualificationResults);
+        Assert.Equal(new[] { owner }, await repository.GetActiveOwnerIdsAsync());
+    }
+
+    [Fact]
+    public async Task QualifiedStartDoesNotActivateARejectedNonExplorationSlot()
+    {
+        var repository = new InMemoryPaperTrainingActivationRepository();
+        var service = new PaperTrainingActivationService(
+            repository, new InMemoryAuditEventWriter(), new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+        var selected = PaperTrainingActivationService.ApprovedSlots.Take(2).ToArray();
+        var results = selected.Select(slot => new PaperTrainingQualificationResult(
+            slot.Slot, slot.Symbol, false, -1m, 2, 8m, new string('B', 64), "Failed.")).ToArray();
+
+        var activation = await service.StartQualifiedAsync(
+            owner, owner, RoleType.User, selected, results, CompletePrerequisites());
+
+        Assert.Equal(PaperTrainingActivationState.Disabled, activation.State);
+        Assert.Empty(activation.Slots);
+    }
+
+    [Fact]
+    public async Task QualifiedStartRejectsEvidenceForAnotherInterval()
+    {
+        var repository = new InMemoryPaperTrainingActivationRepository();
+        var service = new PaperTrainingActivationService(
+            repository, new InMemoryAuditEventWriter(), new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+        var selected = PaperTrainingActivationService.ApprovedSlots[0] with
+        {
+            Interval = CandleInterval.FiveMinutes
+        };
+        var mismatched = new PaperTrainingQualificationResult(
+            selected.Slot,
+            selected.Symbol,
+            true,
+            1m,
+            3,
+            2m,
+            new string('C', 64),
+            "Passed.",
+            selected.StrategyId,
+            Interval: CandleInterval.OneHour);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.StartQualifiedAsync(
+                owner, owner, RoleType.User, [selected], [mismatched], CompletePrerequisites()));
+    }
+
+    [Fact]
+    public async Task QualifiedStartAllowsAnApprovedTemplateOnADiscoveredSymbol()
+    {
+        var repository = new InMemoryPaperTrainingActivationRepository();
+        var service = new PaperTrainingActivationService(
+            repository, new InMemoryAuditEventWriter(), new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+        var discovered = PaperTrainingActivationService.ApprovedSlots[0] with
+        {
+            Symbol = "ETH/USD",
+            Seed = 42
+        };
+        var result = new PaperTrainingQualificationResult(
+            discovered.Slot, discovered.Symbol, true, 1m, 3, 2m, new string('C', 64), "Passed.");
+
+        var activation = await service.StartQualifiedAsync(
+            owner, owner, RoleType.User, [discovered], [result], CompletePrerequisites());
+
+        Assert.Equal("ETH/USD", Assert.Single(activation.Slots).Symbol);
+        Assert.Equal(
+            PaperTrainingAutoSelectionService.ApprovedIntervals,
+            (await repository.GetActiveSubscriptionsAsync())
+                .Where(subscription => subscription.Symbol == "ETH/USD")
+                .Select(subscription => subscription.Interval));
+    }
+
+    [Fact]
+    public void QualificationPolicyAllowsOnlyStricterUserGates()
+    {
+        Assert.Equal(
+            PaperTrainingQualificationGate.PlatformDefault,
+            PaperTrainingQualificationGate.PlatformDefault.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new PaperTrainingQualificationGate(-0.01m, 3, 20m).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new PaperTrainingQualificationGate(0m, 2, 20m).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new PaperTrainingQualificationGate(0m, 3, 20.01m).Validate());
     }
 
     private static PaperTrainingPrerequisites CompletePrerequisites() => new(true, true, true, true, true, true);

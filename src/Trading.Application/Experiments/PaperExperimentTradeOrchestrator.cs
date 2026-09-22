@@ -149,18 +149,18 @@ public sealed class PaperExperimentTradeOrchestrator
         CancellationToken cancellationToken = default)
         => await ProcessCoreAsync(proposal, context, null, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>Submits an opening decision using the exact already-approved sizer output.</summary>
+    /// <summary>Submits an opening or add decision using the exact already-approved sizer output.</summary>
     public async Task<ExperimentPaperTradeResult> ProcessSizedAsync(
         ExperimentDecisionRecord proposal,
         ExperimentPaperWorkerContext context,
-        decimal exactOpenQuantity,
+        decimal exactBuyQuantity,
         CancellationToken cancellationToken = default)
-        => await ProcessCoreAsync(proposal, context, exactOpenQuantity, cancellationToken).ConfigureAwait(false);
+        => await ProcessCoreAsync(proposal, context, exactBuyQuantity, cancellationToken).ConfigureAwait(false);
 
     private async Task<ExperimentPaperTradeResult> ProcessCoreAsync(
         ExperimentDecisionRecord proposal,
         ExperimentPaperWorkerContext context,
-        decimal? exactOpenQuantity,
+        decimal? exactBuyQuantity,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(proposal);
@@ -176,11 +176,13 @@ public sealed class PaperExperimentTradeOrchestrator
 
         if (proposal.Proposal.Action == ExperimentProposalAction.Neutral)
             return ExperimentPaperTradeResult.Skipped("No actionable experimental condition.");
-        if (proposal.Proposal.Action is not (ExperimentProposalAction.Open or ExperimentProposalAction.Reduce or ExperimentProposalAction.Close))
+        if (proposal.Proposal.Action is not (ExperimentProposalAction.Open or ExperimentProposalAction.Add
+            or ExperimentProposalAction.Reduce or ExperimentProposalAction.Close))
             return ExperimentPaperTradeResult.Skipped("Experimental proposal action is not permitted.");
-        if (exactOpenQuantity is not null && proposal.Proposal.Action == ExperimentProposalAction.Open
-            && exactOpenQuantity is not > 0m)
-            return ExperimentPaperTradeResult.Skipped("Opening paper proposals require an exact approved sizing quantity.");
+        if (exactBuyQuantity is not null
+            && proposal.Proposal.Action is ExperimentProposalAction.Open or ExperimentProposalAction.Add
+            && exactBuyQuantity is not > 0m)
+            return ExperimentPaperTradeResult.Skipped("Opening and add paper proposals require an exact approved sizing quantity.");
 
         var correlationId = $"paper-experiment-{Fingerprint(proposal.Key)}";
         var claim = new ExperimentPaperExecutionAssociation(proposal.Key, correlationId, ExperimentPaperExecutionStatus.Claimed);
@@ -205,7 +207,7 @@ public sealed class PaperExperimentTradeOrchestrator
             result = await _pipeline.ProcessAsync(
                 marketEvent,
                 new PipelineContext(proposal.Key.UserId, TradingMode.Paper, correlationId),
-                new ProposalStrategy(proposal, context.Portfolio.PositionQuantity, exactOpenQuantity ?? _openQuantity),
+                new ProposalStrategy(proposal, context.Portfolio.PositionQuantity, exactBuyQuantity ?? _openQuantity),
                 ToPipelinePortfolio(context.Portfolio),
                 _paperAdapter,
                 cancellationToken).ConfigureAwait(false);
@@ -281,19 +283,21 @@ public sealed class PaperExperimentTradeOrchestrator
     {
         private readonly ExperimentDecisionRecord _proposal;
         private readonly decimal _positionQuantity;
-        private readonly decimal _openQuantity;
-        public ProposalStrategy(ExperimentDecisionRecord proposal, decimal positionQuantity, decimal openQuantity) =>
-            (_proposal, _positionQuantity, _openQuantity) = (proposal, positionQuantity, openQuantity);
+        private readonly decimal _buyQuantity;
+        public ProposalStrategy(ExperimentDecisionRecord proposal, decimal positionQuantity, decimal buyQuantity) =>
+            (_proposal, _positionQuantity, _buyQuantity) = (proposal, positionQuantity, buyQuantity);
         public Guid StrategyId => GuidFromFingerprint(Fingerprint(_proposal.Key));
         public StrategyDecision Evaluate(MarketEvent marketEvent) => new(
             Guid.NewGuid(), StrategyId, marketEvent.Symbol,
-            _proposal.Proposal.Action == ExperimentProposalAction.Open ? SignalDirection.Buy : SignalDirection.Sell,
+            _proposal.Proposal.Action is ExperimentProposalAction.Open or ExperimentProposalAction.Add
+                ? SignalDirection.Buy
+                : SignalDirection.Sell,
             1m, marketEvent.EventTimeUtc, _proposal.Proposal.Reason);
         public PipelineIntentDetails GetIntentDetails(MarketEvent marketEvent, StrategyDecision decision) =>
             _proposal.Proposal.Action switch
             {
-                ExperimentProposalAction.Open => new(_openQuantity),
-                ExperimentProposalAction.Reduce => new(Math.Min(_openQuantity, _positionQuantity), ReduceOnly: true),
+                ExperimentProposalAction.Open or ExperimentProposalAction.Add => new(_buyQuantity),
+                ExperimentProposalAction.Reduce => new(Math.Min(_buyQuantity, _positionQuantity), ReduceOnly: true),
                 ExperimentProposalAction.Close => new(_positionQuantity, ReduceOnly: true, CloseOnly: true),
                 _ => throw new InvalidOperationException("Only actionable paper experiment proposals reach intent construction.")
             };

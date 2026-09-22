@@ -3,6 +3,7 @@ using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
 using Trading.Domain.Experiments;
 using Trading.Domain.Identity;
+using Trading.Domain.Market;
 
 namespace Trading.Application.Experiments;
 
@@ -22,7 +23,43 @@ public enum PaperTrainingActivationState
 /// references, never browser or user supplied strategy configuration.</summary>
 public sealed record PaperTrainingWorkerSlot(
     int Slot, ExperimentResearchGroup Group, string StrategyId, string Symbol, decimal StartingCash, int Seed,
-    string ParameterSetId, string ProvenanceId);
+    string ParameterSetId, string ProvenanceId, CandleInterval Interval = CandleInterval.OneHour);
+
+public sealed record PaperTrainingQualificationGate(
+    decimal MinimumNetReturnPercent,
+    int MinimumCompletedTrades,
+    decimal MaximumDrawdownPercent)
+{
+    public static PaperTrainingQualificationGate PlatformDefault { get; } = new(0m, 3, 20m);
+
+    public PaperTrainingQualificationGate Validate()
+    {
+        if (MinimumNetReturnPercent < PlatformDefault.MinimumNetReturnPercent)
+            throw new ArgumentOutOfRangeException(nameof(MinimumNetReturnPercent),
+                $"Minimum return cannot be below {PlatformDefault.MinimumNetReturnPercent}%.");
+        if (MinimumCompletedTrades < PlatformDefault.MinimumCompletedTrades)
+            throw new ArgumentOutOfRangeException(nameof(MinimumCompletedTrades),
+                $"Minimum completed trades cannot be below {PlatformDefault.MinimumCompletedTrades}.");
+        if (MaximumDrawdownPercent is <= 0m or > 100m
+            || MaximumDrawdownPercent > PlatformDefault.MaximumDrawdownPercent)
+            throw new ArgumentOutOfRangeException(nameof(MaximumDrawdownPercent),
+                $"Maximum drawdown must be positive and no greater than {PlatformDefault.MaximumDrawdownPercent}%.");
+        return this;
+    }
+}
+
+public sealed record PaperTrainingQualificationResult(
+    int Slot,
+    string Symbol,
+    bool Accepted,
+    decimal NetReturnPercent,
+    int CompletedTrades,
+    decimal MaximumDrawdownPercent,
+    string DatasetFingerprint,
+    string Reason,
+    string? StrategyId = null,
+    bool PaperOnlyExploration = false,
+    CandleInterval Interval = CandleInterval.OneHour);
 
 public sealed record PaperTrainingPrerequisites(
     bool DurableClosedCandleSource,
@@ -38,9 +75,12 @@ public sealed record PaperTrainingActivation(
     IReadOnlyList<PaperTrainingWorkerSlot> Slots,
     PaperTrainingPrerequisites Prerequisites,
     DateTimeOffset ChangedAtUtc,
-    Guid ChangedBy)
+    Guid ChangedBy,
+    IReadOnlyList<PaperTrainingQualificationResult>? Qualifications = null)
 {
     public bool IsActive => State == PaperTrainingActivationState.Active;
+    public IReadOnlyList<PaperTrainingQualificationResult> QualificationResults =>
+        Qualifications ?? Array.Empty<PaperTrainingQualificationResult>();
 }
 
 /// <summary>
@@ -53,18 +93,41 @@ public interface IPaperTrainingActivationRepository
     Task<bool> TrySaveAsync(PaperTrainingActivation activation, PaperTrainingActivationState? expectedState, CancellationToken cancellationToken = default);
 }
 
+public interface IPaperTrainingActivationReader
+{
+    Task<PaperTrainingActivation?> GetAsync(Guid ownerId, CancellationToken cancellationToken = default);
+}
+
 public interface IPaperTrainingActivationSource
 {
     Task<IReadOnlyCollection<Guid>> GetActiveOwnerIdsAsync(CancellationToken cancellationToken = default);
 }
 
+public sealed record PaperTrainingMarketSubscription(string Symbol, CandleInterval Interval);
+
+public interface IPaperTrainingSubscriptionSource
+{
+    Task<IReadOnlyCollection<PaperTrainingMarketSubscription>> GetActiveSubscriptionsAsync(
+        CancellationToken cancellationToken = default);
+}
+
 /// <summary>Safe host default: no owner is active until a durable activation source is supplied.</summary>
-public sealed class DisabledPaperTrainingActivationSource : IPaperTrainingActivationSource
+public sealed class DisabledPaperTrainingActivationSource :
+    IPaperTrainingActivationSource,
+    IPaperTrainingSubscriptionSource
 {
     public Task<IReadOnlyCollection<Guid>> GetActiveOwnerIdsAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult<IReadOnlyCollection<Guid>>(Array.Empty<Guid>());
+    }
+
+    public Task<IReadOnlyCollection<PaperTrainingMarketSubscription>> GetActiveSubscriptionsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<IReadOnlyCollection<PaperTrainingMarketSubscription>>(
+            Array.Empty<PaperTrainingMarketSubscription>());
     }
 }
 
@@ -72,7 +135,11 @@ public sealed class DisabledPaperTrainingActivationSource : IPaperTrainingActiva
 /// In-memory test double only. Production composition must supply a durable repository before
 /// activation can be enabled; this type is intentionally not registered by the experiment host.
 /// </summary>
-public sealed class InMemoryPaperTrainingActivationRepository : IPaperTrainingActivationRepository, IPaperTrainingActivationSource
+public sealed class InMemoryPaperTrainingActivationRepository :
+    IPaperTrainingActivationRepository,
+    IPaperTrainingActivationReader,
+    IPaperTrainingActivationSource,
+    IPaperTrainingSubscriptionSource
 {
     private readonly ConcurrentDictionary<Guid, PaperTrainingActivation> _activations = new();
 
@@ -103,6 +170,16 @@ public sealed class InMemoryPaperTrainingActivationRepository : IPaperTrainingAc
 
     public Task<IReadOnlyCollection<Guid>> GetActiveOwnerIdsAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyCollection<Guid>>(_activations.Values.Where(value => value.IsActive).Select(value => value.OwnerId).ToArray());
+
+    public Task<IReadOnlyCollection<PaperTrainingMarketSubscription>> GetActiveSubscriptionsAsync(
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyCollection<PaperTrainingMarketSubscription>>(_activations.Values
+            .Where(value => value.IsActive)
+            .SelectMany(value => value.Slots)
+            .SelectMany(slot => PaperTrainingAutoSelectionService.ApprovedIntervals.Select(
+                interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)))
+            .Distinct()
+            .ToArray());
 }
 
 /// <summary>
@@ -125,7 +202,12 @@ public sealed class PaperTrainingActivationService
         new(7, ExperimentResearchGroup.B, "platform.cross-sectional-momentum-rotation", "BTC/USD", FixedStartingCash, 104801, "cross-sectional-momentum-parameters@1", "phase5b-momentum-v1"),
         new(8, ExperimentResearchGroup.C, "platform.relative-strength-pullback-rotation", "BTC/USD", FixedStartingCash, 104803, "relative-strength-pullback-parameters@1", "phase5b-relative-strength-v1"),
         new(9, ExperimentResearchGroup.C, "platform.session-conditioned-breakout", "DOGE/EUR", FixedStartingCash, 104827, "session-conditioned-breakout-parameters@1", "phase5b-session-v1"),
-        new(10, ExperimentResearchGroup.C, "platform.regime-switching-ensemble", "ADA/EUR", FixedStartingCash, 104831, "regime-switching-ensemble-parameters@1", "phase5b-regime-v1")
+        new(10, ExperimentResearchGroup.C, "platform.regime-switching-ensemble", "ADA/EUR", FixedStartingCash, 104831, "regime-switching-ensemble-parameters@1", "phase5b-regime-v1"),
+        new(11, ExperimentResearchGroup.A, "platform.rsi-macd-confluence", "XRP/EUR", FixedStartingCash, 104849, "rsi-macd-confluence-parameters@1", "phase5b-rsi-macd-v1"),
+        new(12, ExperimentResearchGroup.A, "platform.ema-rsi-trend", "TRX/EUR", FixedStartingCash, 104851, "ema-rsi-trend-parameters@1", "phase5b-ema-rsi-v1"),
+        new(13, ExperimentResearchGroup.B, "platform.bollinger-macd-recovery", "DOGE/EUR", FixedStartingCash, 104869, "bollinger-macd-recovery-parameters@1", "phase5b-bollinger-macd-v1"),
+        new(14, ExperimentResearchGroup.C, "platform.donchian-volume-breakout", "ADA/EUR", FixedStartingCash, 104879, "donchian-volume-breakout-parameters@1", "phase5b-donchian-volume-v1"),
+        new(15, ExperimentResearchGroup.C, "platform.ema-volume-pullback", "XRP/EUR", FixedStartingCash, 104891, "ema-volume-pullback-parameters@1", "phase5b-ema-volume-v1")
     ];
 
     private readonly IPaperTrainingActivationRepository _repository;
@@ -161,6 +243,72 @@ public sealed class PaperTrainingActivationService
             throw new InvalidOperationException("Paper-training start changed concurrently; no workers were started.");
         await AuditAsync(active, actorId, "PaperTrainingStarted", cancellationToken).ConfigureAwait(false);
         return active;
+    }
+
+    public async Task<PaperTrainingActivation> StartQualifiedAsync(
+        Guid ownerId,
+        Guid actorId,
+        RoleType actorRole,
+        IReadOnlyList<PaperTrainingWorkerSlot> requestedSlots,
+        IReadOnlyList<PaperTrainingQualificationResult> qualifications,
+        PaperTrainingPrerequisites prerequisites,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(requestedSlots);
+        ArgumentNullException.ThrowIfNull(qualifications);
+        if (actorRole is not (RoleType.User or RoleType.Administrator or RoleType.RiskOfficer))
+            throw new UnauthorizedAccessException("Only an owner, Administrator, or RiskOfficer may start paper training.");
+        if (actorRole == RoleType.User)
+            RequireOwner(ownerId, actorId);
+        ValidatePrerequisites(prerequisites);
+        if (requestedSlots.Count is < 1 or > MaximumSlots
+            || requestedSlots.Select(slot => slot.Slot).Distinct().Count() != requestedSlots.Count)
+            throw new ArgumentException($"Select between one and {MaximumSlots} distinct approved slots.", nameof(requestedSlots));
+        if (requestedSlots.Any(slot => !IsApprovedTemplate(slot)))
+            throw new ArgumentException("Every paper-training slot must come from the approved platform catalog.", nameof(requestedSlots));
+        if (requestedSlots.Any(slot => !PaperTrainingAutoSelectionService.ApprovedIntervals.Contains(slot.Interval)))
+            throw new ArgumentException("Every paper-training slot must use an approved paper interval.", nameof(requestedSlots));
+        if (requestedSlots.Any(slot => slot.StartingCash <= 0m))
+            throw new ArgumentOutOfRangeException(nameof(requestedSlots), "Every fake starting balance must be positive.");
+        var requestedSlotIds = requestedSlots.Select(slot => slot.Slot).ToHashSet();
+        var qualificationSlotIds = qualifications.Select(result => result.Slot).ToHashSet();
+        if (qualifications.Count != requestedSlots.Count
+            || qualificationSlotIds.Count != qualifications.Count
+            || !qualificationSlotIds.SetEquals(requestedSlotIds))
+            throw new ArgumentException("Every requested slot requires one qualification result.", nameof(qualifications));
+        var slotsById = requestedSlots.ToDictionary(slot => slot.Slot);
+        if (qualifications.Any(result =>
+                !string.Equals(result.Symbol, slotsById[result.Slot].Symbol, StringComparison.OrdinalIgnoreCase)
+                || result.Interval != slotsById[result.Slot].Interval
+                || (result.StrategyId is not null
+                    && !string.Equals(result.StrategyId, slotsById[result.Slot].StrategyId, StringComparison.Ordinal))))
+            throw new ArgumentException(
+                "Qualification evidence must match the exact slot strategy, symbol, and interval.",
+                nameof(qualifications));
+
+        var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false);
+        if (current?.IsActive == true)
+            throw new InvalidOperationException("Paper training is already active for this owner.");
+
+        var runnableSlotIds = qualifications
+            .Where(result => result.Accepted || result.PaperOnlyExploration)
+            .Select(result => result.Slot)
+            .ToHashSet();
+        var runnableSlots = requestedSlots.Where(slot => runnableSlotIds.Contains(slot.Slot)).ToArray();
+        var state = runnableSlots.Length == 0
+            ? PaperTrainingActivationState.Disabled
+            : PaperTrainingActivationState.Active;
+        var activation = new PaperTrainingActivation(
+            ownerId, state, runnableSlots, prerequisites, UtcNow(), actorId, qualifications.ToArray());
+        if (!await _repository.TrySaveAsync(activation, current?.State, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Paper-training start changed concurrently; no workers were started.");
+        var auditAction = state != PaperTrainingActivationState.Active
+            ? "PaperTrainingQualificationRejected"
+            : qualifications.Any(result => result.PaperOnlyExploration)
+                ? "PaperTrainingExplorationStarted"
+                : "PaperTrainingQualifiedAndStarted";
+        await AuditAsync(activation, actorId, auditAction, cancellationToken).ConfigureAwait(false);
+        return activation;
     }
 
     public Task<PaperTrainingActivation> DisableAsync(Guid ownerId, Guid actorId, RoleType actorRole, CancellationToken cancellationToken = default) =>
@@ -203,6 +351,14 @@ public sealed class PaperTrainingActivationService
         if (requestedSlots is < 1 or > MaximumSlots)
             throw new ArgumentOutOfRangeException(nameof(requestedSlots), $"Paper training supports one to {MaximumSlots} fixed worker slots.");
     }
+
+    private static bool IsApprovedTemplate(PaperTrainingWorkerSlot slot) =>
+        !string.IsNullOrWhiteSpace(slot.Symbol)
+        && s_catalog.Any(approved =>
+            approved.Group == slot.Group
+            && approved.StrategyId.Equals(slot.StrategyId, StringComparison.Ordinal)
+            && approved.ParameterSetId.Equals(slot.ParameterSetId, StringComparison.Ordinal)
+            && approved.ProvenanceId.Equals(slot.ProvenanceId, StringComparison.Ordinal));
 
     private static void RequireOwner(Guid ownerId, Guid actorId)
     {
