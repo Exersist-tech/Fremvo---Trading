@@ -217,18 +217,14 @@ public sealed class PaperTrainingAutoSelectionService
             .ToArray();
         if (templates.Length == 0)
             throw new InvalidOperationException("No approved strategy has a historical paper evaluator.");
-        var maximumPairs = Math.Max(1, MaximumQualificationCandidates / (templates.Length * request.Intervals.Count));
-        var candidates = universe
-            .Take(maximumPairs)
-            .SelectMany(pair => templates.SelectMany(template => request.Intervals.Select(interval => template with
-            {
-                Slot = 0,
-                Symbol = pair.Symbol,
-                StartingCash = request.StartingCash,
-                Seed = StableSeed(template.StrategyId, pair.Symbol, interval),
-                Interval = interval
-            })))
-            .Take(MaximumQualificationCandidates)
+        var shortlistedPairs = universe
+            .Take(PaperTrainingActivationService.MaximumSlots)
+            .ToArray();
+        var candidates = BuildBalancedCandidates(
+                shortlistedPairs,
+                templates,
+                request.Intervals,
+                request.StartingCash)
             .Select((slot, index) => slot with { Slot = index + 1 })
             .ToArray();
 
@@ -272,6 +268,38 @@ public sealed class PaperTrainingAutoSelectionService
             };
         }).ToArray();
         return new(finalists, combined, universe);
+    }
+
+    private static IEnumerable<PaperTrainingWorkerSlot> BuildBalancedCandidates(
+        PaperTrainingUniverseCandidate[] pairs,
+        PaperTrainingWorkerSlot[] templates,
+        IReadOnlyList<CandleInterval> intervals,
+        decimal startingCash)
+    {
+        var count = 0;
+        for (var intervalRound = 0; intervalRound < intervals.Count; intervalRound++)
+        {
+            for (var strategyIndex = 0; strategyIndex < templates.Length; strategyIndex++)
+            {
+                for (var pairIndex = 0; pairIndex < pairs.Length; pairIndex++)
+                {
+                    if (count++ >= MaximumQualificationCandidates)
+                        yield break;
+
+                    var template = templates[strategyIndex];
+                    var pair = pairs[pairIndex];
+                    var interval = intervals[(intervalRound + strategyIndex + pairIndex) % intervals.Count];
+                    yield return template with
+                    {
+                        Slot = 0,
+                        Symbol = pair.Symbol,
+                        StartingCash = startingCash,
+                        Seed = StableSeed(template.StrategyId, pair.Symbol, interval),
+                        Interval = interval
+                    };
+                }
+            }
+        }
     }
 
     private async Task<IReadOnlyList<PaperTrainingQualificationResult>> QualifyByIntervalAsync(
@@ -321,9 +349,8 @@ public sealed class PaperTrainingAutoSelectionService
             var next = ranked
                 .Where(candidate => !strategyCounts.TryGetValue(candidate.Slot.StrategyId, out var count)
                     || count < MaximumWorkersPerStrategy)
-                .OrderByDescending(candidate =>
-                    (intervals.Contains(candidate.Slot.Interval) ? 0 : 2)
-                    + (symbols.Contains(candidate.Slot.Symbol) ? 0 : 1))
+                .OrderBy(candidate => symbols.Contains(candidate.Slot.Symbol))
+                .ThenBy(candidate => intervals.Contains(candidate.Slot.Interval))
                 .ThenBy(candidate => candidate.Rank)
                 .FirstOrDefault();
             if (next.Slot is null)

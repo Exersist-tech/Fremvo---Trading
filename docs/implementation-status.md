@@ -9,12 +9,15 @@
 - The authenticated `/experiments` Start flow discovers Kraken's active
   EUR-quoted Spot pairs from the venue catalogue, requires thirty complete
   pre-test daily candles and at least EUR 1M median daily quote volume, and ranks a
-  maximum of 40 pairs. The ten most liquid pairs form a bounded 240-candidate
-  search across six approved historical evaluators and 5-minute, 15-minute,
-  30-minute, and 1-hour candles. Each interval uses 600 closed candles split
+  maximum of 40 pairs. The ten most liquid eligible pairs form a bounded
+  250-candidate search across approved historical evaluators and 5-minute,
+  15-minute, 30-minute, and 1-hour candles. Candidate construction gives every
+  shortlisted pair every strategy once before assigning additional timeframe
+  variants. Each interval uses 600 closed candles split
   into 420 validation and 180 untouched holdout candles, remaining below the
-  venue response limit. Finalist ranking rewards new strategies, intervals,
-  and symbols before filling any remaining positions by performance. At most ten finalists are measured on
+  venue response limit. Finalist ranking requires a new strategy and prefers a
+  new symbol before interval diversity and performance, producing ten distinct
+  pairs when enough pass discovery and falling back to reuse otherwise. At most ten finalists are measured on
   untouched holdout; passers remain qualified and failures may run only as
   explicitly labeled fake-funds exploration with no live eligibility. Replays apply taker fees, adverse slippage, and next-candle
   execution. Qualification evidence, exact selected slots, and Stop state

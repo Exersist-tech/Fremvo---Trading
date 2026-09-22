@@ -178,6 +178,7 @@ public sealed class PaperTrainingUniverseDiscoveryTests
         Assert.Equal(
             10,
             result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, result.Slots.Select(slot => slot.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.All(
             result.Slots.GroupBy(slot => slot.StrategyId, StringComparer.Ordinal),
             group => Assert.True(group.Count() <= PaperTrainingAutoSelectionService.MaximumWorkersPerStrategy));
@@ -187,6 +188,48 @@ public sealed class PaperTrainingUniverseDiscoveryTests
             or "platform.bollinger-macd-recovery"
             or "platform.donchian-volume-breakout"
             or "platform.ema-volume-pullback");
+    }
+
+    [Fact]
+    public async Task AutoSelectionUsesTenDifferentPairsBeforeReusingAnyPair()
+    {
+        var fromUtc = new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero);
+        var toUtc = fromUtc.AddDays(30);
+        var source = new GeneratedCandleSource(fromUtc);
+        var pairs = Enumerable.Range(1, 12)
+            .Select(index => Pair($"TOKEN{index:D2}/EUR"))
+            .ToArray();
+        var selection = new PaperTrainingAutoSelectionService(
+            new PaperTrainingUniverseDiscovery(
+                new SuppliedPairSource(pairs),
+                source,
+                PaperTrainingUniversePolicy.PlatformDefault),
+            new PaperTrainingHistoricalQualification(
+                source,
+                ApprovedExperimentStrategyRegistry.CreatePlatformDefault()));
+
+        var result = await selection.SelectAsync(new(
+            1_000m,
+            PaperTrainingAutoSelectionService.ApprovedIntervals,
+            fromUtc,
+            toUtc,
+            PaperTrainingQualificationGate.PlatformDefault));
+        var repeated = await selection.SelectAsync(new(
+            1_000m,
+            PaperTrainingAutoSelectionService.ApprovedIntervals,
+            fromUtc,
+            toUtc,
+            PaperTrainingQualificationGate.PlatformDefault));
+
+        Assert.Equal(10, result.Slots.Count);
+        Assert.Equal(10, result.Slots.Select(slot => slot.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(10, result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(
+            PaperTrainingAutoSelectionService.ApprovedIntervals.Order(),
+            result.Slots.Select(slot => slot.Interval).Distinct().Order());
+        Assert.Equal(
+            result.Slots.Select(slot => (slot.StrategyId, slot.Symbol, slot.Interval, slot.Seed)),
+            repeated.Slots.Select(slot => (slot.StrategyId, slot.Symbol, slot.Interval, slot.Seed)));
     }
 
     private static TradablePair Pair(string displayName, bool active = true)

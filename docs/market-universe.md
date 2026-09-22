@@ -79,8 +79,11 @@ selection, and untouched holdout to be labeled qualified. Automatic selection
 evaluates the largest bounded top-liquidity subset across eleven approved strategy evaluators and
 5-minute, 15-minute, 30-minute, and 1-hour candles. Each interval receives an
 equal 600-candle sample split into 420 validation and 180 untouched holdout
-candles. The ten-worker selection enforces one worker per strategy and then favors unseen intervals and
-symbols before using performance rank to fill remaining capacity. The strongest
+candles. Candidate construction is pair-balanced: every shortlisted liquid pair
+receives every approved strategy once before any pair receives additional
+timeframe variants. The ten-worker selection enforces one worker per strategy,
+uses a different pair for every slot when enough eligible pairs exist, and only
+then reuses pairs while favoring unseen intervals and performance rank. The strongest
 unqualified finalists may use otherwise empty worker capacity only for explicitly
 labeled fake-funds forward exploration; this never grants live eligibility.
 

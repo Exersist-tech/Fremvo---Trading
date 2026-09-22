@@ -74,11 +74,12 @@ The web Start control uses 600 closed candles per interval so every timeframe
 has the same sample count and remains within Kraken's response limit. The first
 420 candles are validation data used to rank candidates; the ten strongest
 diversity-first strategy/pair/interval candidates are evaluated on the untouched
-final 180 candles. To keep work bounded, the candidate search evaluates the
-largest top-liquidity subset that fits its 250-candidate ceiling.
-Selection permits at most one active worker per strategy, so the ten-worker pool
-tests ten distinct strategy families rather than filling slots with repeated
-copies of one high-ranked family.
+final 180 candles. To keep work bounded, candidate construction uses at most the
+ten most liquid eligible pairs and balances its 250-candidate ceiling across
+them: each pair receives every approved strategy once before any pair receives
+additional timeframe variants. Selection permits at most one active worker per
+strategy and chooses an unused pair first, so the pool uses ten different pairs
+when available and falls back to pair reuse only when fewer are eligible.
 API callers may supply both endpoints of an explicit 10-to-40-day UTC range;
 the end controls the completed-candle cutoff and the start controls the earlier
 liquidity snapshot. A slot starts forward paper
