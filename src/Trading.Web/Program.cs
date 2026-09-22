@@ -97,6 +97,12 @@ builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
 builder.Services.Configure<PaperTrainingPrerequisiteOptions>(
     builder.Configuration.GetSection(PaperTrainingPrerequisiteOptions.SectionName));
 builder.Services.AddScoped<PaperTrainingActivationService>();
+builder.Services.AddSingleton(PaperTrainingUniversePolicy.PlatformDefault);
+builder.Services.AddScoped<PaperTrainingUniverseDiscovery>();
+builder.Services.AddScoped<PaperTrainingAutoSelectionService>();
+builder.Services.AddScoped<PaperTrainingMonitorService>();
+builder.Services.AddSingleton(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+builder.Services.AddScoped<PaperTrainingHistoricalQualification>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
     new AuditQueryService(provider.GetRequiredService<TradingDbContext>().AuditEvents));
 
@@ -266,11 +272,6 @@ static bool WantsHtmlPage(HttpRequest request) =>
         value is not null && value.Contains("text/html", StringComparison.OrdinalIgnoreCase));
 
 builder.Services.AddAuthorization();
-
-// Experiment state is paper-only and non-durable. Registering the in-memory store here keeps
-// experiment data out of the trading database until a durable store is designed for it.
-builder.Services.AddSingleton<IExperimentWorkerRepository, InMemoryExperimentWorkerRepository>();
-builder.Services.AddSingleton<ExperimentWorkerPool>();
 
 // Halt state is shared by every trading path in this process. It is registered as a singleton so
 // an emergency stop takes effect immediately for all callers.
@@ -1002,7 +1003,7 @@ app.MapGet("/optimization/plan-validation", () => Results.Content(
     "text/html")).RequireAuthorization();
 
 // Paper-training configuration is deliberately separate from the legacy research-worker API:
-// the browser can request only a count from the fixed platform catalog, never trading inputs.
+// the browser can select only platform gates, never arbitrary strategy code or parameters.
 app.MapGet("/api/paper-training", async (
     ClaimsPrincipal principal,
     IPaperTrainingActivationRepository repository,
@@ -1018,20 +1019,33 @@ app.MapPost("/api/paper-training", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
+    PaperTrainingAutoSelectionService selectionService,
+    IExchangeAccountRepository accounts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
     var ownerId = CurrentUser.TryGetUserId(principal);
     if (ownerId is null) return Results.Unauthorized();
     try
     {
-        var activation = await service.StartAsync(
-            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal), request.Slots,
+        var connected = (await accounts.ListForUserAsync(ownerId.Value, cancellationToken).ConfigureAwait(false))
+            .Any(account => account.CanTrade);
+        if (!connected)
+            return Results.BadRequest(new { error = "Connect and validate an exchange account before starting paper training." });
+
+        var selection = await selectionService.SelectAsync(
+            request.ToAutoSelectionRequest(timeProvider.GetUtcNow()),
+            cancellationToken).ConfigureAwait(false);
+        var activation = await service.StartQualifiedAsync(
+            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal),
+            selection.Slots, selection.Qualifications,
             prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
-        return Results.Created("/api/paper-training", PaperTrainingResponse.From(activation));
+        return Results.Accepted("/api/paper-training", PaperTrainingResponse.From(activation));
     }
     catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (MarketDataSourceException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireAuthorization();
 
 app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
@@ -1039,20 +1053,35 @@ app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
+    PaperTrainingAutoSelectionService selectionService,
+    IExchangeAccountRepository accounts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
     var actorId = CurrentUser.TryGetUserId(principal);
     if (actorId is null) return Results.Unauthorized();
     try
     {
-        var activation = await service.StartAsync(ownerId, actorId.Value, PaperTrainingRole.From(principal),
-            request.Slots, prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
+        var actorRole = PaperTrainingRole.From(principal);
+        if (actorRole == RoleType.User && actorId.Value != ownerId)
+            return Results.Forbid();
+        var connected = (await accounts.ListForUserAsync(ownerId, cancellationToken).ConfigureAwait(false))
+            .Any(account => account.CanTrade);
+        if (!connected)
+            return Results.BadRequest(new { error = "The owner must have a connected and validated exchange account." });
+        var selection = await selectionService.SelectAsync(
+            request.ToAutoSelectionRequest(timeProvider.GetUtcNow()),
+            cancellationToken).ConfigureAwait(false);
+        var activation = await service.StartQualifiedAsync(
+            ownerId, actorId.Value, actorRole, selection.Slots, selection.Qualifications,
+            prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
         return Results.Ok(PaperTrainingResponse.From(activation));
     }
     catch (UnauthorizedAccessException) { return Results.Forbid(); }
     catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (MarketDataSourceException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireAuthorization();
 
 app.MapPost("/api/paper-training/{ownerId:guid}/disable", async (
@@ -1069,6 +1098,22 @@ app.MapPost("/api/paper-training/{ownerId:guid}/disable", async (
         return Results.Ok(PaperTrainingResponse.From(activation));
     }
     catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}).RequireAuthorization();
+
+app.MapPost("/api/paper-training/me/disable", async (
+    ClaimsPrincipal principal,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    try
+    {
+        var activation = await service.DisableAsync(
+            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal), cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireAuthorization();
 
@@ -1091,7 +1136,7 @@ app.MapPost("/api/paper-training/{ownerId:guid}/emergency-stop", async (
 
 app.MapGet("/api/experiments", async (
     ClaimsPrincipal principal,
-    IExperimentWorkerRepository repository,
+    PaperTrainingMonitorService monitorService,
     CancellationToken cancellationToken) =>
 {
     // The owning user comes from the signed-in principal only. There is no user id parameter, so
@@ -1102,32 +1147,41 @@ app.MapGet("/api/experiments", async (
         return Results.Unauthorized();
     }
 
-    var workers = await repository.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var monitor = await monitorService.GetAsync(userId.Value, cancellationToken).ConfigureAwait(false);
 
     return Results.Ok(new
     {
         maxWorkers = ExperimentWorker.MaxWorkersPerUser,
-        used = workers.Count,
+        used = monitor.Workers.Count(worker => worker.WorkerId is not null),
+        activeSlots = monitor.Workers.Count,
         tradingMode = "Paper",
         disclaimer = ExperimentDisclaimer,
-        workers = workers
-            .OrderBy(w => w.CreatedAtUtc)
-            .Select(w => new
+        workers = monitor.Workers.Select(worker => new
             {
-                w.Id,
-                w.Name,
-                strategyTemplateId = w.StrategyId,
-                w.MarketSymbol,
-                status = w.Status.ToString(),
-                w.RandomSeed,
-                w.StartingCash,
-                w.CashBalance,
-                w.PositionQuantity,
-                w.AverageEntryPrice,
-                w.RealizedProfitAndLoss,
-                w.FailureReason,
-                tradeCount = w.Ledger.Count,
-                w.CreatedAtUtc
+                worker.Slot,
+                worker.WorkerId,
+                worker.StrategyId,
+                worker.Symbol,
+                worker.Interval,
+                worker.AnalysisIntervals,
+                qualification = worker.Qualification.ToString(),
+                worker.RuntimeStatus,
+                worker.Seed,
+                worker.StartingCash,
+                worker.CashBalance,
+                worker.PositionQuantity,
+                worker.AverageEntryPrice,
+                worker.PositionCost,
+                worker.CurrentPrice,
+                worker.CurrentPriceAsOfUtc,
+                worker.PositionMarketValue,
+                worker.UnrealizedProfitAndLoss,
+                worker.RealizedProfitAndLoss,
+                worker.AdditionCount,
+                worker.MaximumAdditions,
+                worker.TradeCount,
+                worker.FailureReason,
+                worker.RecentTrades
             })
     });
 }).RequireAuthorization();
@@ -1207,7 +1261,8 @@ app.MapGet("/experiment-results", () => Results.Content(
       <main class="page-wide">
         <h1>Experiment research results</h1>
         <nav class="workspace-tabs" aria-label="Experiment sections">
-          <a href="/experiments">Workers</a>
+          <a href="/experiments#setup">Setup workers</a>
+          <a href="/experiments#workers">Workers</a>
           <a class="active" href="/experiment-results" aria-current="page">Results</a>
         </nav>
         <p class="lede">Immutable snapshots from isolated paper workers. This page is read-only.</p>
@@ -1231,77 +1286,294 @@ app.MapGet("/experiments", () => Results.Content(
       <title>Experiment workers — Exersist Trading</title>
       <style>
         body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
-        .container { max-width: 1000px; margin: 0 auto; padding: 32px 20px 80px; }
         h1 { font-size: 2rem; margin-bottom: 8px; }
         p.muted { color:#9bb6cd; line-height:1.6; }
         .badge { display:inline-block; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:700;
                  border:1px solid rgba(98,208,255,0.4); background:rgba(98,208,255,0.12); color:#62d0ff; }
         .notice { border:1px solid rgba(255,209,102,0.35); background:rgba(255,209,102,0.08); color:#ffd166;
                   border-radius:12px; padding:14px 16px; margin:18px 0; line-height:1.5; }
+        .setup-panel { max-width:1000px; }
         table { width:100%; border-collapse:collapse; margin-top:18px; }
         th, td { text-align:left; padding:10px 12px; border-bottom:1px solid #24415d; font-size:14px; }
+        .table-wrap { overflow-x:auto; }
         th { color:#9bb6cd; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.05em; }
+        .interval-summary { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 4px; }
+        .interval-badge { display:inline-block; white-space:nowrap; border:1px solid rgba(98,208,255,0.45);
+                         border-radius:999px; padding:4px 10px; background:rgba(98,208,255,0.12);
+                         color:#9fe2ff; font-size:12px; font-weight:700; }
+        .worker-row { background:rgba(15,28,43,0.45); }
+        .trade-row td { padding:0 12px 10px 42px; background:rgba(8,20,32,0.7); }
+        .trade-detail { display:flex; flex-wrap:wrap; gap:8px 18px; padding:9px 12px;
+                        border-left:3px solid #62d0ff; color:#cfe6fa; }
+        .trade-detail strong { color:#62d0ff; }
+        .trade-detail .buy { color:#7ee787; }
+        .trade-detail .sell { color:#ff9b9b; }
+        .positive { color:#7ee787; }
+        .negative { color:#ff9b9b; }
         pre { background:#0f1c2b; border:1px solid #24415d; border-radius:12px; padding:14px; white-space:pre-wrap;
               word-break:break-word; color:#cfe6fa; }
       </style>
     </head>
     <body>
-      <div class="container">
+      <main class="page-wide chart-page">
         <h1>Experiment workers <span class="badge">Paper only</span></h1>
         <nav class="workspace-tabs" aria-label="Experiment sections">
-          <a class="active" href="/experiments" aria-current="page">Workers</a>
+          <a id="setup-tab" href="/experiments#setup">Setup workers</a>
+          <a id="workers-tab" href="/experiments#workers">Workers</a>
           <a href="/experiment-results">Results</a>
         </nav>
-        <p class="muted">
-          Start one to ten fixed, platform-approved paper-training slots immediately after all
-          paper-only prerequisites pass.
-        </p>
-
-        <div class="notice">
-          Paper only: workers use fake funds and cannot place an order on a real exchange.
-          Live account stages are untouched. Disable or emergency stop ends paper training.
-        </div>
 
         <div id="state"></div>
-        <form id="request-form">
-          <label for="slots">Fixed paper-training slots (1–10)</label>
-          <input id="slots" type="number" min="1" max="10" value="1" required />
-          <button type="submit">Start paper training</button>
-        </form>
-        <table id="grid" hidden>
-          <thead>
-            <tr>
-              <th>Name</th><th>Symbol</th><th>Status</th><th>Seed</th>
-              <th>Cash</th><th>Position</th><th>Realized P&amp;L</th><th>Trades</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+        <section id="setup-panel" class="setup-panel" hidden>
+          <p class="muted">The backend discovers active liquid Kraken EUR Spot pairs, ranks at most
+            40 pairs using 30 closed daily candles that predate the test, then evaluates the largest
+            top-liquidity subset that fits the bounded candidate search with approved strategy
+            templates across 5, 15, 30, and 60 minute closed candles. It permits at most one worker
+            per strategy and prioritizes distinct intervals and pairs among the top ten
+            candidates and confirms them on untouched holdout data.
+            Qualified finalists and clearly labeled unqualified exploration slots continue into
+            fake-funds live-data paper observation.</p>
+          <div class="notice">
+            Paper only: workers use fake funds and cannot place an order on a real exchange.
+            Live account stages are untouched. Disable or emergency stop ends paper training.
+          </div>
+          <form id="request-form">
+            <label for="starting-cash">Fake starting balance per worker</label>
+            <input id="starting-cash" type="number" min="100" step="0.01" value="1000" required />
+            <p class="muted">Intervals are selected automatically from the approved 5, 15, 30,
+              and 60 minute set. Every candidate uses 600 closed candles: the first 420 for
+              validation and the final 180 for untouched holdout.</p>
+            <label for="minimum-return">Minimum net return (%)</label>
+            <input id="minimum-return" type="number" min="0" step="0.01" value="0" required />
+            <label for="minimum-trades">Minimum completed trades</label>
+            <input id="minimum-trades" type="number" min="3" value="3" required />
+            <label for="maximum-drawdown">Maximum drawdown (%)</label>
+            <input id="maximum-drawdown" type="number" min="0.01" max="20" step="0.01" value="20" required />
+            <button id="start" type="submit">Discover, qualify, and start up to ten paper experiments</button>
+            <button id="stop" type="button">Stop paper training</button>
+          </form>
+          <div id="qualifications"></div>
+        </section>
+        <section id="workers-panel">
+          <p class="muted">Every worker analyzes closed 5-minute, 15-minute, 30-minute, and 1-hour
+            candles together. Its primary timeframe supplies the trade signal and candle identity;
+            at least one other timeframe must confirm it. Profitable positions may close before
+            their fixed target only after a 5-minute peak rollover, weakening RSI and MACD, and
+            confirmation from a higher timeframe. This view refreshes every ten seconds.</p>
+          <div id="interval-summary" class="interval-summary" aria-label="Primary worker timeframes"></div>
+          <div class="table-wrap">
+            <table id="grid" hidden>
+              <thead>
+                <tr>
+                  <th>Slot</th><th>Strategy</th><th>Pair</th><th>Primary timeframe</th>
+                  <th>Analysis timeframes</th><th>Qualification</th>
+                  <th>Worker status</th><th>Cash</th><th>Position</th><th>Average entry</th>
+                  <th>Current price</th><th>Market value</th><th>Unrealized P&amp;L</th>
+                  <th>Realized P&amp;L</th><th>Adds used</th><th>Trades</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
 
       <script>
         const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
-        (async () => {
-          const state = document.getElementById('state');
-          const res = await fetch('/api/paper-training');
-          if (res.status === 401) {
-            state.innerHTML = '<p class="muted">Sign in to view paper-training status.</p>';
-            return;
+        const state = document.getElementById('state');
+        const qualifications = document.getElementById('qualifications');
+        const grid = document.getElementById('grid');
+        const setupPanel = document.getElementById('setup-panel');
+        const workersPanel = document.getElementById('workers-panel');
+        const intervalSummary = document.getElementById('interval-summary');
+        const setupTab = document.getElementById('setup-tab');
+        const workersTab = document.getElementById('workers-tab');
+        let loading = false;
+        const text = (tag, value, className) => {
+          const element = document.createElement(tag);
+          element.textContent = value;
+          if (className) element.className = className;
+          return element;
+        };
+        const value = number => number === null || number === undefined ? 'Waiting' : n(number);
+        const intervalLabel = interval => ({
+          5: '5 min',
+          15: '15 min',
+          30: '30 min',
+          60: '1 hour'
+        })[interval] || String(interval);
+        const selectTab = () => {
+          const setupSelected = location.hash === '#setup';
+          setupPanel.hidden = !setupSelected;
+          workersPanel.hidden = setupSelected;
+          setupTab.classList.toggle('active', setupSelected);
+          workersTab.classList.toggle('active', !setupSelected);
+          if (setupSelected) {
+            setupTab.setAttribute('aria-current', 'page');
+            workersTab.removeAttribute('aria-current');
+          } else {
+            setupTab.removeAttribute('aria-current');
+            workersTab.setAttribute('aria-current', 'page');
           }
-          const data = await res.json();
-          state.innerHTML = '<p class="muted">Paper-training status: <strong>' + data.state +
-            '</strong>. Fixed slots started: ' + data.slots + ' of 10.</p><p class="muted">' +
-            data.notice + '</p>';
-        })();
+        };
+        const renderWorkers = data => {
+          const body = grid.querySelector('tbody');
+          body.replaceChildren();
+          intervalSummary.replaceChildren();
+          const intervalCounts = new Map();
+          (data.workers || []).forEach(worker =>
+            intervalCounts.set(worker.interval, (intervalCounts.get(worker.interval) || 0) + 1));
+          [...intervalCounts.entries()]
+            .sort((left, right) => Number(left[0]) - Number(right[0]))
+            .forEach(([interval, count]) =>
+              intervalSummary.appendChild(text(
+                'span',
+                intervalLabel(interval) + ' primary: ' + count + (count === 1 ? ' worker' : ' workers'),
+                'interval-badge')));
+          if (intervalCounts.size === 0)
+            intervalSummary.appendChild(text('span', 'No active primary timeframes', 'muted'));
+          (data.workers || []).forEach(worker => {
+            const row = document.createElement('tr');
+            row.className = 'worker-row';
+            [
+              worker.slot,
+              worker.strategyId,
+              worker.symbol
+            ].forEach(item => row.appendChild(text('td', String(item))));
+            const intervalCell = document.createElement('td');
+            intervalCell.appendChild(text('span', intervalLabel(worker.interval), 'interval-badge'));
+            row.appendChild(intervalCell);
+            row.appendChild(text(
+              'td',
+              (worker.analysisIntervals || []).map(intervalLabel).join(' · ')));
+            [
+              worker.qualification,
+              worker.runtimeStatus,
+              value(worker.cashBalance),
+              value(worker.positionQuantity),
+              value(worker.averageEntryPrice),
+              value(worker.currentPrice),
+              value(worker.positionMarketValue),
+              value(worker.unrealizedProfitAndLoss),
+              value(worker.realizedProfitAndLoss),
+              worker.additionCount == null || worker.maximumAdditions == null
+                ? 'Waiting'
+                : worker.additionCount + ' / ' + worker.maximumAdditions,
+              worker.tradeCount
+            ].forEach(item => row.appendChild(text('td', String(item))));
+            if (worker.currentPriceAsOfUtc)
+              row.children[10].title = 'Latest stored 5-minute candle at ' +
+                new Date(worker.currentPriceAsOfUtc).toLocaleString();
+            const unrealizedCell = row.children[12];
+            if (worker.unrealizedProfitAndLoss > 0) unrealizedCell.className = 'positive';
+            if (worker.unrealizedProfitAndLoss < 0) unrealizedCell.className = 'negative';
+            body.appendChild(row);
+
+            if (!worker.recentTrades || worker.recentTrades.length === 0) {
+              const tradeRow = document.createElement('tr');
+              tradeRow.className = 'trade-row';
+              const tradeCell = document.createElement('td');
+              tradeCell.colSpan = 16;
+              tradeCell.appendChild(text('div', 'No simulated trades yet', 'trade-detail muted'));
+              tradeRow.appendChild(tradeCell);
+              body.appendChild(tradeRow);
+            } else {
+              worker.recentTrades.forEach((trade, index) => {
+                const tradeRow = document.createElement('tr');
+                tradeRow.className = 'trade-row';
+                const tradeCell = document.createElement('td');
+                tradeCell.colSpan = 16;
+                const detail = document.createElement('div');
+                detail.className = 'trade-detail';
+                detail.appendChild(text('strong', 'Trade ' + (worker.tradeCount - index)));
+                detail.appendChild(text('span', new Date(trade.occurredAtUtc).toLocaleString()));
+                detail.appendChild(text(
+                  'span',
+                  trade.direction.toUpperCase(),
+                  trade.direction.toLowerCase() === 'buy' ? 'buy' : 'sell'));
+                detail.appendChild(text('span', 'Quantity: ' + n(trade.quantity)));
+                detail.appendChild(text('span', 'Fill: ' + n(trade.executionPrice)));
+                detail.appendChild(text('span', 'Fee: ' + n(trade.fee)));
+                detail.appendChild(text('span', 'Average entry: ' + value(worker.averageEntryPrice)));
+                detail.appendChild(text('span', 'Current: ' + value(worker.currentPrice)));
+                tradeCell.appendChild(detail);
+                tradeRow.appendChild(tradeCell);
+                body.appendChild(tradeRow);
+              });
+            }
+          });
+          grid.hidden = !data.workers || data.workers.length === 0;
+        };
+        const load = async () => {
+          if (loading) return;
+          loading = true;
+          try {
+            const [activationResponse, workersResponse] = await Promise.all([
+              fetch('/api/paper-training'),
+              fetch('/api/experiments')
+            ]);
+            if (activationResponse.status === 401 || workersResponse.status === 401) {
+              state.replaceChildren(text('p', 'Sign in to view paper-training status.', 'muted'));
+              return;
+            }
+            if (!activationResponse.ok || !workersResponse.ok)
+              throw new Error('The paper-worker monitor could not be loaded.');
+            const [data, workers] = await Promise.all([
+              activationResponse.json(),
+              workersResponse.json()
+            ]);
+            state.replaceChildren(
+              text('p', 'Paper-training status: ' + data.state + '. Active slots: ' + data.slots + ' of 10.', 'muted'),
+              text('p', data.notice, 'muted'));
+            qualifications.replaceChildren();
+            (data.qualifications || []).forEach(item => {
+              const disposition = item.accepted ? 'qualified' :
+                (item.paperOnlyExploration ? 'exploration' : 'rejected');
+              qualifications.appendChild(text('p',
+                (item.strategyId || 'approved strategy') + ' / ' + item.symbol + ' / ' +
+                  intervalLabel(item.interval) + ': ' +
+                  disposition + '. ' + item.reason,
+                item.accepted ? 'muted' : 'notice'));
+            });
+            renderWorkers(workers);
+          } catch (error) {
+            state.replaceChildren(text('p', error.message, 'notice'));
+          } finally {
+            loading = false;
+          }
+        };
+        selectTab();
+        window.addEventListener('hashchange', selectTab);
+        load();
+        setInterval(load, 10000);
         document.getElementById('request-form').addEventListener('submit', async event => {
           event.preventDefault();
+          document.getElementById('start').disabled = true;
+          state.replaceChildren(text('p',
+            'Discovering liquid Kraken Spot pairs, then running validation and untouched holdout qualification.',
+            'muted'));
           const response = await fetch('/api/paper-training', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ slots: Number(document.getElementById('slots').value) })
+            body: JSON.stringify({
+              startingCash: Number(document.getElementById('starting-cash').value),
+              minimumNetReturnPercent: Number(document.getElementById('minimum-return').value),
+              minimumCompletedTrades: Number(document.getElementById('minimum-trades').value),
+              maximumDrawdownPercent: Number(document.getElementById('maximum-drawdown').value)
+            })
           });
-          if (response.ok) location.reload();
-          else document.getElementById('state').innerHTML =
-            '<p class="notice">Paper training was not started. All deployment prerequisites must be configured.</p>';
+          document.getElementById('start').disabled = false;
+          if (response.ok) {
+            location.hash = 'workers';
+            await load();
+          }
+          else {
+            const error = await response.json();
+            state.replaceChildren(text('p', error.error || 'Paper training was not started.', 'notice'));
+          }
+        });
+        document.getElementById('stop').addEventListener('click', async () => {
+          const response = await fetch('/api/paper-training/me/disable', { method: 'POST' });
+          if (response.ok) await load();
         });
       </script>
     </body>
@@ -3807,14 +4079,45 @@ internal sealed record CreateExperimentWorkerRequest(
     decimal StartingCash,
     int RandomSeed);
 
-/// <summary>Paper training accepts only a fixed catalog slot count; ownership is from the principal.</summary>
-internal sealed record PaperTrainingRequest(int Slots);
+internal sealed record PaperTrainingRequest(
+    decimal StartingCash,
+    DateTimeOffset? FromUtc,
+    DateTimeOffset? ToUtc,
+    decimal MinimumNetReturnPercent,
+    int MinimumCompletedTrades,
+    decimal MaximumDrawdownPercent)
+{
+    public PaperTrainingAutoSelectionRequest ToAutoSelectionRequest(DateTimeOffset nowUtc)
+    {
+        if (FromUtc.HasValue != ToUtc.HasValue)
+            throw new ArgumentException("Supply both historical dates or neither.");
+
+        var endUtc = ToUtc?.ToUniversalTime() ?? StartOfCurrentUtcHour(nowUtc);
+        var startUtc = FromUtc?.ToUniversalTime() ?? endUtc.AddDays(-30);
+        return new(
+            StartingCash,
+            PaperTrainingAutoSelectionService.ApprovedIntervals,
+            startUtc,
+            endUtc,
+            new PaperTrainingQualificationGate(
+                MinimumNetReturnPercent,
+                MinimumCompletedTrades,
+                MaximumDrawdownPercent));
+    }
+
+    private static DateTimeOffset StartOfCurrentUtcHour(DateTimeOffset value)
+    {
+        var utc = value.ToUniversalTime();
+        return new DateTimeOffset(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, TimeSpan.Zero);
+    }
+}
 
 internal sealed record PaperTrainingResponse(
     string State,
     int Slots,
     DateTimeOffset? ChangedAtUtc,
     IReadOnlyList<object> Catalog,
+    IReadOnlyList<PaperTrainingQualificationResult> Qualifications,
     string Notice)
 {
     public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
@@ -3822,12 +4125,18 @@ internal sealed record PaperTrainingResponse(
             activation?.State.ToString() ?? "NotStarted",
             activation?.Slots.Count ?? 0,
             activation?.ChangedAtUtc,
-            PaperTrainingActivationService.ApprovedSlots.Select(slot => (object)new
+            PaperTrainingActivationService.ApprovedSlots
+                .Where(slot => PaperTrainingHistoricalQualification.Supports(slot.StrategyId))
+                .GroupBy(slot => slot.StrategyId, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .Select(slot => (object)new
             {
-                slot.Slot, slot.Group, slot.StrategyId, slot.Symbol, slot.StartingCash,
-                slot.ParameterSetId, slot.ProvenanceId
+                slot.Group, slot.StrategyId,
+                slot.ParameterSetId, slot.ProvenanceId,
+                Intervals = PaperTrainingAutoSelectionService.ApprovedIntervals
             }).ToArray(),
-            "Paper only: fake funds only. Starting requires every deployment prerequisite; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
+            activation?.QualificationResults ?? Array.Empty<PaperTrainingQualificationResult>(),
+            "Paper only: fake funds only. Exploration slots are not historically qualified and never grant live eligibility. Starting requires every deployment prerequisite; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
 }
 
 internal static class PaperTrainingRole

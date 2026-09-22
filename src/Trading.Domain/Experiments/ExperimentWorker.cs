@@ -269,8 +269,7 @@ public sealed class ExperimentWorker
     {
         var worker = new ExperimentWorker(id, userId, name, strategyId, marketSymbol, startingCash, createdAtUtc, randomSeed, controls);
         worker.UpdateStrategyParameters(strategyParameters);
-        if (status is ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused)
-            worker.Start();
+        worker.Start();
 
         foreach (var entry in (ledger ?? throw new ArgumentNullException(nameof(ledger)))
             .OrderBy(entry => entry.OccurredAtUtc)
@@ -278,7 +277,14 @@ public sealed class ExperimentWorker
         {
             if (entry.WorkerId != id)
                 throw new InvalidOperationException("A persisted paper ledger entry belongs to another worker.");
-            worker.ApplyPaperTrade(entry.Quantity, entry.ExecutionPrice, entry.Fee, entry.Direction, entry.OccurredAtUtc, entry.Id);
+            worker.ApplyPaperTradeCore(
+                entry.Quantity,
+                entry.ExecutionPrice,
+                entry.Fee,
+                entry.Direction,
+                entry.OccurredAtUtc,
+                entry.Id,
+                isPersistedReplay: true);
         }
 
         if (status == ExperimentWorkerStatus.Paused)
@@ -364,6 +370,23 @@ public sealed class ExperimentWorker
         string direction,
         DateTimeOffset? occurredAtUtc = null,
         Guid? ledgerEntryId = null)
+        => ApplyPaperTradeCore(
+            quantity,
+            executionPrice,
+            fee,
+            direction,
+            occurredAtUtc ?? DateTimeOffset.UtcNow,
+            ledgerEntryId,
+            isPersistedReplay: false);
+
+    private void ApplyPaperTradeCore(
+        decimal quantity,
+        decimal executionPrice,
+        decimal fee,
+        string direction,
+        DateTimeOffset tradeTime,
+        Guid? ledgerEntryId,
+        bool isPersistedReplay)
     {
         if (Status != ExperimentWorkerStatus.Running)
         {
@@ -393,10 +416,9 @@ public sealed class ExperimentWorker
                 "Quantity must be positive; use the direction to express buy or sell.");
         }
 
-        var tradeTime = occurredAtUtc ?? DateTimeOffset.UtcNow;
         if (tradeTime.Offset != TimeSpan.Zero)
         {
-            throw new ArgumentException("Paper-trading occurrence time must be UTC.", nameof(occurredAtUtc));
+            throw new ArgumentException("Paper-trading occurrence time must be UTC.", nameof(tradeTime));
         }
 
         var directionLower = direction.Trim();
@@ -418,7 +440,7 @@ public sealed class ExperimentWorker
 
         if (isBuy)
         {
-            ApplyPaperBuy(quantity, executionPrice, fee, notional);
+            ApplyPaperBuy(quantity, executionPrice, fee, notional, isPersistedReplay);
         }
         else
         {
@@ -450,7 +472,12 @@ public sealed class ExperimentWorker
             directionLower));
     }
 
-    private void ApplyPaperBuy(decimal quantity, decimal executionPrice, decimal fee, decimal notional)
+    private void ApplyPaperBuy(
+        decimal quantity,
+        decimal executionPrice,
+        decimal fee,
+        decimal notional,
+        bool isPersistedReplay)
     {
         var previousQuantity = PositionQuantity;
         var nextQuantity = checked(previousQuantity + quantity);
@@ -471,7 +498,7 @@ public sealed class ExperimentWorker
         {
             if (_additionCount >= _positionControls.MaxAdditionsPerPosition)
                 throw new InvalidOperationException("Paper buy exceeds this worker's maximum additions per position.");
-            if (_favorableMarkPrice is null || _favorableMarkPrice <= AverageEntryPrice)
+            if (!isPersistedReplay && (_favorableMarkPrice is null || _favorableMarkPrice <= AverageEntryPrice))
                 throw new InvalidOperationException("Paper position add requires a prior realized favorable mark.");
             if (executionPrice < AverageEntryPrice)
                 throw new InvalidOperationException("Paper position add below average entry is forbidden to prevent averaging down.");
@@ -499,6 +526,11 @@ public interface IExperimentWorkerRepository
     Task<ExperimentWorker?> GetAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyCollection<ExperimentWorker>> ListAsync(Guid userId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyCollection<ExperimentWorker>> ListByNamesAsync(
+        Guid userId,
+        IReadOnlyCollection<string> names,
+        CancellationToken cancellationToken = default);
 
     Task<int> CountAsync(Guid userId, CancellationToken cancellationToken = default);
 

@@ -53,8 +53,8 @@ public sealed class DurableExperimentCandleSeriesSourceTests
         var result = await source.GetClosedSeriesAsync(Request(2));
 
         Assert.True(result.IsAvailable);
-        Assert.Equal(At(10), repository.FromUtc);
-        Assert.Equal(AsOf, repository.ToUtc);
+        Assert.Equal(At(9), repository.FromUtc);
+        Assert.Equal(At(11), repository.ToUtc);
         Assert.Equal("BTC/USD", repository.Symbol);
         Assert.Equal(CandleInterval.OneHour, repository.Interval);
 
@@ -65,12 +65,28 @@ public sealed class DurableExperimentCandleSeriesSourceTests
     }
 
     [Fact]
+    public async Task UnalignedEvaluationTimeStillRequestsTheFullClosedCandleWindowAsync()
+    {
+        var repository = new RecordingRepository(Candle(9), Candle(10), Candle(11));
+        var source = Source(repository);
+        var unalignedAsOf = AsOf.AddMinutes(37);
+
+        var result = await source.GetClosedSeriesAsync(
+            new ExperimentCandleSeriesRequest("BTC/USD", CandleInterval.OneHour, unalignedAsOf, 3));
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal(At(8), repository.FromUtc);
+        Assert.Equal(At(11), repository.ToUtc);
+        Assert.Equal(3, result.Series!.Candles.Count);
+    }
+
+    [Fact]
     public async Task BlocksNoDataAsync() =>
         await AssertBlockedAsync(Array.Empty<Candle>(), ExperimentCandleSeriesBlockReason.NoData);
 
     [Fact]
     public async Task BlocksRepositoryResultsExceedingRequestedMaximumAsync() =>
-        await AssertBlockedAsync(new[] { Candle(8), Candle(9), Candle(10), Candle(11) },
+        await AssertBlockedAsync(new[] { Candle(7), Candle(8), Candle(9), Candle(10), Candle(11) },
             ExperimentCandleSeriesBlockReason.MaximumCountExceeded, maximumCount: 3);
 
     [Fact]
@@ -103,6 +119,29 @@ public sealed class DurableExperimentCandleSeriesSourceTests
     [Fact]
     public async Task BlocksStaleLatestCandleAsync() =>
         await AssertBlockedAsync(new[] { Candle(8) }, ExperimentCandleSeriesBlockReason.Stale);
+
+    [Fact]
+    public async Task ScalesFreshnessToTheRequestedIntervalAsync()
+    {
+        var staleFiveMinuteCandle = new Candle(
+            "BTC/USD",
+            CandleInterval.FiveMinutes,
+            AsOf.AddMinutes(-20),
+            AsOf.AddMinutes(-15),
+            100m,
+            101m,
+            99m,
+            100m,
+            1m,
+            true,
+            false);
+
+        var result = await Source(new RecordingRepository(staleFiveMinuteCandle))
+            .GetClosedSeriesAsync(new("BTC/USD", CandleInterval.FiveMinutes, AsOf, 3));
+
+        Assert.False(result.IsAvailable);
+        Assert.Equal(ExperimentCandleSeriesBlockReason.Stale, result.BlockReason);
+    }
 
     [Fact]
     public void SourceHasNoExchangeOrSecretDependency()

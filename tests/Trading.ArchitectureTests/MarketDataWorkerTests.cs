@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Trading.Application.Experiments;
 using Trading.Domain.Market;
 using Trading.MarketData;
 using Trading.Workers.MarketData;
@@ -7,6 +8,43 @@ namespace Trading.ArchitectureTests;
 
 public sealed class MarketDataWorkerTests
 {
+    [Fact]
+    public void BackfillSelectsRequiredSafeContiguousCompletedCandles()
+    {
+        var boundary = new DateTimeOffset(2026, 9, 22, 6, 0, 0, TimeSpan.Zero);
+        var subscription = new CandleSubscription("BTC/EUR", CandleInterval.FiveMinutes);
+        var candles = Enumerable.Range(0, PaperTrainingCandleBackfillService.RequiredCandleCount + 2)
+            .Select(index =>
+            {
+                var open = boundary.AddMinutes(
+                    (index - (PaperTrainingCandleBackfillService.RequiredCandleCount + 2)) * 5);
+                return new Candle(
+                    "BTC/EUR",
+                    CandleInterval.FiveMinutes,
+                    open,
+                    open.AddMinutes(5),
+                    100m,
+                    101m,
+                    99m,
+                    100m,
+                    10m,
+                    true,
+                    false);
+            })
+            .ToArray();
+
+        var selected = PaperTrainingCandleBackfillService.SelectContiguousClosedHistory(
+            candles,
+            subscription,
+            boundary);
+
+        Assert.Equal(PaperTrainingCandleBackfillService.RequiredCandleCount, selected.Count);
+        Assert.Equal(
+            boundary.AddMinutes(-5 * PaperTrainingCandleBackfillService.RequiredCandleCount),
+            selected[0].OpenTimeUtc);
+        Assert.Equal(boundary, selected[^1].CloseTimeUtc);
+    }
+
     [Fact]
     public void DisabledOrUnconfiguredWorkersProduceNoSubscriptions()
     {
@@ -35,6 +73,41 @@ public sealed class MarketDataWorkerTests
     }
 
     [Fact]
+    public void ActivePaperIntervalsAreMergedWithoutCreatingACrossProduct()
+    {
+        var subscriptions = Worker.GetSubscriptions(
+            new MarketDataStreamingOptions
+            {
+                Enabled = true,
+                Symbols = ["BTC/USD"],
+                Intervals = [CandleInterval.OneHour],
+            },
+            [
+                new PaperTrainingMarketSubscription("ETH/USD", CandleInterval.FiveMinutes),
+                new PaperTrainingMarketSubscription("btc/usd", CandleInterval.ThirtyMinutes),
+                new PaperTrainingMarketSubscription("XRP/EUR", CandleInterval.OneDay)
+            ]);
+
+        Assert.Collection(
+            subscriptions.OrderBy(subscription => subscription.Symbol).ThenBy(subscription => subscription.Interval),
+            subscription =>
+            {
+                Assert.Equal("BTC/USD", subscription.Symbol);
+                Assert.Equal(CandleInterval.ThirtyMinutes, subscription.Interval);
+            },
+            subscription =>
+            {
+                Assert.Equal("BTC/USD", subscription.Symbol);
+                Assert.Equal(CandleInterval.OneHour, subscription.Interval);
+            },
+            subscription =>
+            {
+                Assert.Equal("ETH/USD", subscription.Symbol);
+                Assert.Equal(CandleInterval.FiveMinutes, subscription.Interval);
+            });
+    }
+
+    [Fact]
     public void TenMinuteIsNeverSentAsANativeKrakenSubscription()
     {
         var subscriptions = Worker.GetSubscriptions(new MarketDataStreamingOptions
@@ -47,6 +120,21 @@ public sealed class MarketDataWorkerTests
 
         var subscription = Assert.Single(subscriptions);
         Assert.Equal(CandleInterval.OneMinute, subscription.Interval);
+    }
+
+    [Fact]
+    public void SubscriptionRefreshKeepsAStableStreamAndReconnectsOnlyForChanges()
+    {
+        var current = new[]
+        {
+            new CandleSubscription("XRP/EUR", CandleInterval.FiveMinutes),
+            new CandleSubscription("XRP/EUR", CandleInterval.OneHour)
+        };
+
+        Assert.True(Worker.HaveSameSubscriptions(current, current.Reverse().ToArray()));
+        Assert.False(Worker.HaveSameSubscriptions(
+            current,
+            [new CandleSubscription("XRP/EUR", CandleInterval.FiveMinutes)]));
     }
 
     [Fact]

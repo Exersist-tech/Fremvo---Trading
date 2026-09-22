@@ -8,6 +8,7 @@ using Trading.Backtesting;
 using Trading.Infrastructure.Data.Backtesting;
 using Trading.Infrastructure.Data.Experiments;
 using Trading.Application.Experiments;
+using Trading.Domain.Experiments;
 
 namespace Trading.Web.Extensions;
 
@@ -33,8 +34,13 @@ internal static class ServiceCollectionExtensions
         services.AddScoped<IScanResultRepository, EfScanResultRepository>();
         services.AddScoped<ScannerResultsQueryService>();
         services.AddScoped<IExperimentResultLedger, EfExperimentResultLedger>();
+        services.AddScoped<EfExperimentWorkerRepository>();
+        services.AddScoped<IExperimentWorkerRepository>(provider =>
+            provider.GetRequiredService<EfExperimentWorkerRepository>());
         services.AddScoped<EfPaperTrainingActivationRepository>();
         services.AddScoped<IPaperTrainingActivationRepository>(provider =>
+            provider.GetRequiredService<EfPaperTrainingActivationRepository>());
+        services.AddScoped<IPaperTrainingActivationReader>(provider =>
             provider.GetRequiredService<EfPaperTrainingActivationRepository>());
 
         return services;

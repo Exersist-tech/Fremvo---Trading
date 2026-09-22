@@ -3,12 +3,13 @@ using System.Security.Cryptography;
 using System.Text;
 using Trading.Domain.Experiments;
 using Trading.Domain.Market;
+using Trading.Indicators;
 using Trading.MarketData;
 using Trading.MarketData.Experiments;
 
 namespace Trading.Application.Experiments;
 
-public enum ExperimentProtectiveExitKind { StopLoss = 0, TakeProfit }
+public enum ExperimentProtectiveExitKind { StopLoss = 0, TakeProfit, MomentumReversal }
 
 /// <summary>
 /// Owner- and worker-scoped paper-position evidence. Implementations must obtain this from the
@@ -91,6 +92,116 @@ public interface IExperimentProtectiveExitOwnerEvaluator
     Task<IReadOnlyList<ExperimentProtectiveExitEvaluationResult>> EvaluateOwnerAsync(
         Guid userId,
         CancellationToken cancellationToken = default);
+}
+
+public sealed record ExperimentProfitProtectionDecision(
+    bool ShouldExit,
+    decimal? ExitPrice,
+    Candle? TriggerCandle,
+    string Reason);
+
+/// <summary>
+/// Closed-candle profit protection. It does not predict a top: it requires an already-profitable
+/// position, a confirmed 5-minute peak rollover, weakening RSI and MACD, and deterioration on at
+/// least one higher timeframe.
+/// </summary>
+public static class ExperimentProfitProtectionPolicy
+{
+    public const decimal MinimumRewardRiskMultiple = 0.5m;
+    private const int RequiredCandles = 35;
+
+    public static ExperimentProfitProtectionDecision Evaluate(
+        ExperimentProtectiveExitPosition position,
+        IReadOnlyDictionary<CandleInterval, ExperimentCandleSeries> evidence)
+    {
+        ArgumentNullException.ThrowIfNull(position);
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        if (position.StopLossPrice is not decimal stop || stop >= position.EntryPrice)
+            return NoExit("A valid opening risk distance is required for profit protection.");
+        if (PaperTrainingAutoSelectionService.ApprovedIntervals.Any(interval =>
+                !evidence.TryGetValue(interval, out var series)
+                || !IsValidSeries(series, position, interval)))
+            return NoExit("Complete safe 5m, 15m, 30m, and 1h evidence is required for profit protection.");
+
+        var primary = evidence[CandleInterval.FiveMinutes].Candles;
+        var latest = primary[^1];
+        decimal minimumProtectedPrice;
+        try
+        {
+            minimumProtectedPrice = checked(position.EntryPrice
+                + ((position.EntryPrice - stop) * MinimumRewardRiskMultiple));
+        }
+        catch (OverflowException)
+        {
+            return NoExit("Profit-protection threshold arithmetic overflowed.");
+        }
+        if (latest.Close < minimumProtectedPrice)
+            return NoExit("The position has not reached the minimum 0.5R profit-protection threshold.");
+
+        var prior = primary.Take(primary.Count - 1).ToArray();
+        var priorRsi = new RelativeStrengthIndexCalculator(14).Calculate(prior);
+        var currentRsi = new RelativeStrengthIndexCalculator(14).Calculate(primary);
+        var priorMacd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(prior);
+        var currentMacd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(primary);
+        if (priorRsi.Value is null || currentRsi.Value is null || priorMacd.Value is null || currentMacd.Value is null)
+            return NoExit("Profit-protection indicators do not have sufficient closed history.");
+
+        var confirmedPeak = primary[^2].High > primary[^3].High
+            && latest.High < primary[^2].High
+            && latest.Close < primary[^2].Close;
+        var rsiRolledOver = priorRsi.Value.Value >= 60m
+            && currentRsi.Value.Value < priorRsi.Value.Value;
+        var macdWeakening = currentMacd.Value.Value.Histogram < priorMacd.Value.Value.Histogram;
+        if (!confirmedPeak || !rsiRolledOver || !macdWeakening)
+            return NoExit("The profitable 5-minute position has no confirmed RSI/MACD peak rollover.");
+
+        var higherTimeframeConfirmation = PaperTrainingAutoSelectionService.ApprovedIntervals
+            .Where(interval => interval != CandleInterval.FiveMinutes)
+            .Any(interval => IsWeakening(evidence[interval].Candles));
+        if (!higherTimeframeConfirmation)
+            return NoExit("No 15m, 30m, or 1h timeframe confirms momentum deterioration.");
+
+        return new(
+            true,
+            latest.Close,
+            latest,
+            "Profitable 5-minute peak rollover confirmed by weakening RSI, MACD, and a higher timeframe.");
+    }
+
+    private static bool IsValidSeries(
+        ExperimentCandleSeries series,
+        ExperimentProtectiveExitPosition position,
+        CandleInterval interval) =>
+        series is not null
+        && series.Interval == interval
+        && string.Equals(series.Symbol, position.Symbol, StringComparison.OrdinalIgnoreCase)
+        && series.Candles.Count >= RequiredCandles
+        && series.Candles.All(candle =>
+            candle.CanBeUsedForClosedCandleSignal
+            && candle.Interval == interval
+            && string.Equals(candle.Symbol, position.Symbol, StringComparison.OrdinalIgnoreCase)
+            && candle.OpenTimeUtc.Offset == TimeSpan.Zero
+            && candle.CloseTimeUtc.Offset == TimeSpan.Zero
+            && candle.CloseTimeUtc <= series.AsOfUtc)
+        && series.AsOfUtc.Offset == TimeSpan.Zero
+        && series.Candles.Zip(series.Candles.Skip(1), static (left, right) =>
+            left.CloseTimeUtc == right.OpenTimeUtc).All(value => value)
+        && series.Candles[^1].CloseTimeUtc > position.OpenedAtUtc;
+
+    private static bool IsWeakening(IReadOnlyList<Candle> candles)
+    {
+        var prior = candles.Take(candles.Count - 1).ToArray();
+        var priorRsi = new RelativeStrengthIndexCalculator(14).Calculate(prior);
+        var currentRsi = new RelativeStrengthIndexCalculator(14).Calculate(candles);
+        return priorRsi.Value is not null
+            && currentRsi.Value is not null
+            && candles[^1].Close < candles[^2].Close
+            && currentRsi.Value.Value < priorRsi.Value.Value;
+    }
+
+    private static ExperimentProfitProtectionDecision NoExit(string reason) =>
+        new(false, null, null, reason);
 }
 
 /// <summary>
@@ -197,48 +308,97 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
 
             var triggered = trigger.Value;
             var identity = $"{triggered.Kind}|{position.StopLossPrice}|{position.TakeProfitPrice}";
-            var key = new ExperimentProtectiveExitKey(position.UserId, position.WorkerId, position.PositionId, identity, candle.CloseTimeUtc);
-            var claim = await _exits.ClaimAsync(key, cancellationToken).ConfigureAwait(false);
-            if (claim != ExperimentProtectiveExitClaimResult.Claimed)
-            {
-                results.Add(new(key, false, "Protective exit was already claimed and will not be retried."));
-                return results;
-            }
-
-            try
-            {
-                var decision = CreateDecision(position, candle, triggered.Kind, asOfUtc);
-                var written = await _decisions.RecordAsync(position.UserId, decision, cancellationToken).ConfigureAwait(false);
-                if (written.Result == ExperimentDecisionWriteResult.Conflict || written.Record is null)
-                {
-                    await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Decision ledger conflict.", cancellationToken).ConfigureAwait(false);
-                    results.Add(new(key, false, "Decision conflict is terminal and requires reconciliation."));
-                    return results;
-                }
-
-                var worker = position.Worker ?? CreateWorkerView(position);
-                var context = new ExperimentPaperWorkerContext(
-                    worker,
-                    new ExperimentWorkerPortfolioSnapshot(position.UserId, position.WorkerId, position.Quantity, asOfUtc),
-                    new ExperimentPaperCandleSnapshot(position.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
-                        asOfUtc, triggered.ExitPrice, candle.Volume, candle.QualityFlags.Select(flag => flag.ToString()).ToArray()));
-                var result = await _paper.ProcessAsync(written.Record, context, cancellationToken).ConfigureAwait(false);
-                var status = result.PipelineResult?.RequiresReconciliation == true ? ExperimentPaperExecutionStatus.Unknown
-                    : result.PipelineResult?.Executed == true ? ExperimentPaperExecutionStatus.Completed
-                    : ExperimentPaperExecutionStatus.Blocked;
-                await _exits.CompleteAsync(key, status, result.Reason ?? result.PipelineResult?.BlockedReason ?? string.Empty, cancellationToken).ConfigureAwait(false);
-                results.Add(new(key, result.Submitted && result.PipelineResult?.Executed == true,
-                    result.PipelineResult?.BlockedReason ?? (result.Submitted ? "Submitted to the paper pipeline." : result.Reason ?? "Paper pipeline did not supply a reason.")));
-                return results;
-            }
-            catch
-            {
-                await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Pipeline outcome is unknown.", cancellationToken).ConfigureAwait(false);
-                throw;
-            }
+            results.Add(await SubmitAsync(
+                position, candle, triggered.Kind, triggered.ExitPrice, identity, asOfUtc, cancellationToken).ConfigureAwait(false));
+            return results;
         }
 
+        var momentum = await EvaluateProfitProtectionAsync(position, asOfUtc, cancellationToken).ConfigureAwait(false);
+        if (!momentum.ShouldExit || momentum.ExitPrice is null || momentum.TriggerCandle is null)
+            return results;
+        var momentumIdentity = $"{ExperimentProtectiveExitKind.MomentumReversal}|v1|{momentum.Reason}";
+        results.Add(await SubmitAsync(
+            position,
+            momentum.TriggerCandle,
+            ExperimentProtectiveExitKind.MomentumReversal,
+            momentum.ExitPrice.Value,
+            momentumIdentity,
+            asOfUtc,
+            cancellationToken).ConfigureAwait(false));
         return results;
+    }
+
+    private async Task<ExperimentProfitProtectionDecision> EvaluateProfitProtectionAsync(
+        ExperimentProtectiveExitPosition position,
+        DateTimeOffset asOfUtc,
+        CancellationToken cancellationToken)
+    {
+        var reads = PaperTrainingAutoSelectionService.ApprovedIntervals
+            .Select(async interval => (
+                Interval: interval,
+                Result: await _candles.GetClosedSeriesAsync(
+                    new ExperimentCandleSeriesRequest(position.Symbol, interval, asOfUtc, 35),
+                    cancellationToken).ConfigureAwait(false)))
+            .ToArray();
+        var completed = await Task.WhenAll(reads).ConfigureAwait(false);
+        if (completed.Any(item => !item.Result.IsAvailable || item.Result.Series is null))
+            return new(false, null, null, "Complete multi-timeframe profit-protection evidence is unavailable.");
+        return ExperimentProfitProtectionPolicy.Evaluate(
+            position,
+            completed.ToDictionary(item => item.Interval, item => item.Result.Series!));
+    }
+
+    private async Task<ExperimentProtectiveExitEvaluationResult> SubmitAsync(
+        ExperimentProtectiveExitPosition position,
+        Candle candle,
+        ExperimentProtectiveExitKind kind,
+        decimal exitPrice,
+        string identity,
+        DateTimeOffset asOfUtc,
+        CancellationToken cancellationToken)
+    {
+        var key = new ExperimentProtectiveExitKey(
+            position.UserId, position.WorkerId, position.PositionId, identity, candle.CloseTimeUtc);
+        var claim = await _exits.ClaimAsync(key, cancellationToken).ConfigureAwait(false);
+        if (claim != ExperimentProtectiveExitClaimResult.Claimed)
+            return new(key, false, "Protective exit was already claimed and will not be retried.");
+
+        try
+        {
+            var decision = CreateDecision(position, candle, kind, identity, asOfUtc);
+            var written = await _decisions.RecordAsync(position.UserId, decision, cancellationToken).ConfigureAwait(false);
+            if (written.Result == ExperimentDecisionWriteResult.Conflict || written.Record is null)
+            {
+                await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Decision ledger conflict.", cancellationToken).ConfigureAwait(false);
+                return new(key, false, "Decision conflict is terminal and requires reconciliation.");
+            }
+
+            var worker = position.Worker ?? CreateWorkerView(position);
+            var context = new ExperimentPaperWorkerContext(
+                worker,
+                new ExperimentWorkerPortfolioSnapshot(position.UserId, position.WorkerId, position.Quantity, asOfUtc),
+                new ExperimentPaperCandleSnapshot(position.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
+                    asOfUtc, exitPrice, candle.Volume, candle.QualityFlags.Select(flag => flag.ToString()).ToArray()));
+            var result = await _paper.ProcessAsync(written.Record, context, cancellationToken).ConfigureAwait(false);
+            var status = result.PipelineResult?.RequiresReconciliation == true ? ExperimentPaperExecutionStatus.Unknown
+                : result.PipelineResult?.Executed == true ? ExperimentPaperExecutionStatus.Completed
+                : ExperimentPaperExecutionStatus.Blocked;
+            await _exits.CompleteAsync(
+                key,
+                status,
+                result.Reason ?? result.PipelineResult?.BlockedReason ?? string.Empty,
+                cancellationToken).ConfigureAwait(false);
+            return new(
+                key,
+                result.Submitted && result.PipelineResult?.Executed == true,
+                result.PipelineResult?.BlockedReason
+                ?? (result.Submitted ? "Submitted to the paper pipeline." : result.Reason ?? "Paper pipeline did not supply a reason."));
+        }
+        catch
+        {
+            await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Pipeline outcome is unknown.", cancellationToken).ConfigureAwait(false);
+            throw;
+        }
     }
 
     private static bool IsValid(ExperimentProtectiveExitPosition position) =>
@@ -265,10 +425,11 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
         ExperimentProtectiveExitPosition position,
         Candle candle,
         ExperimentProtectiveExitKind kind,
+        string triggerIdentity,
         DateTimeOffset asOfUtc)
     {
         var positionFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{ProtectiveExitFingerprint}|{position.PositionId:D}|{position.StopLossPrice}|{position.TakeProfitPrice}")));
+            $"{ProtectiveExitFingerprint}|{position.PositionId:D}|{position.StopLossPrice}|{position.TakeProfitPrice}|{triggerIdentity}")));
         var key = new ExperimentDecisionKey(position.UserId, position.WorkerId, ProtectiveExitDecisionVersion,
             ExperimentResearchGroup.A, ProtectiveExitStrategy, ProtectiveExitDecisionVersion, positionFingerprint,
             position.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc, asOfUtc);

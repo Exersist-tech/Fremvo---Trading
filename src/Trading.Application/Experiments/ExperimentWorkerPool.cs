@@ -238,6 +238,20 @@ public sealed class InMemoryExperimentWorkerRepository : IExperimentWorkerReposi
         return Task.FromResult(result);
     }
 
+    public Task<IReadOnlyCollection<ExperimentWorker>> ListByNamesAsync(
+        Guid userId,
+        IReadOnlyCollection<string> names,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+        cancellationToken.ThrowIfCancellationRequested();
+        var requested = names.ToHashSet(StringComparer.Ordinal);
+        IReadOnlyCollection<ExperimentWorker> result = _byUser.TryGetValue(userId, out var workers)
+            ? workers.Values.Where(worker => requested.Contains(worker.Name)).ToArray()
+            : Array.Empty<ExperimentWorker>();
+        return Task.FromResult(result);
+    }
+
     public Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(worker);

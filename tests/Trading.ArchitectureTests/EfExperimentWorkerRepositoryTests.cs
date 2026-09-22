@@ -66,6 +66,49 @@ public sealed class EfExperimentWorkerRepositoryTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => repository.AddAsync(owner, conflict));
     }
 
+    [Theory]
+    [InlineData(ExperimentWorkerStatus.Failed)]
+    [InlineData(ExperimentWorkerStatus.Completed)]
+    public async Task ReplaysLedgerBeforeRestoringTerminalStatus(ExperimentWorkerStatus terminalStatus)
+    {
+        var database = Guid.NewGuid().ToString("N");
+        var owner = Guid.NewGuid();
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(),
+            owner,
+            "terminal worker",
+            "platform.ema-trend-continuation",
+            "BTC/USD",
+            1_000m,
+            Now,
+            7);
+        worker.Start();
+        worker.ApplyPaperTrade(0.00132237m, 75_621.6m, 0.04999987m, "buy", Now);
+        if (terminalStatus == ExperimentWorkerStatus.Failed)
+            worker.Fail("Expected test failure.");
+        else
+            worker.Complete();
+
+        await using (var context = Context(database))
+        {
+            var repository = new EfExperimentWorkerRepository(context);
+            await repository.SaveAsync(worker);
+            await repository.AddAsync(owner, worker.Ledger.Single());
+        }
+
+        await using (var context = Context(database))
+        {
+            var replayed = await new EfExperimentWorkerRepository(context).GetAsync(owner, worker.Id);
+
+            Assert.NotNull(replayed);
+            Assert.Equal(terminalStatus, replayed.Status);
+            Assert.Equal(worker.CashBalance, replayed.CashBalance);
+            Assert.Equal(worker.PositionQuantity, replayed.PositionQuantity);
+            Assert.Equal(worker.AverageEntryPrice, replayed.AverageEntryPrice);
+            Assert.Single(replayed.Ledger);
+        }
+    }
+
     [Fact]
     public async Task ApprovedPlanEvidenceIsOwnerScopedAndImmutable()
     {
@@ -92,6 +135,46 @@ public sealed class EfExperimentWorkerRepositoryTests
             Assert.Empty(await repository.ListAsync(Guid.NewGuid(), key.WorkerId));
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 repository.SaveAsync(evidence with { ProtectiveStopPrice = 89m }));
+        }
+    }
+
+    [Fact]
+    public async Task PaperTrainingActivationPersistsSelectedSlotsAndQualificationEvidence()
+    {
+        var database = Guid.NewGuid().ToString("N");
+        var owner = Guid.NewGuid();
+        var slot = PaperTrainingActivationService.ApprovedSlots[3] with
+        {
+            StartingCash = 2_500m,
+            Interval = CandleInterval.FifteenMinutes
+        };
+        var result = new PaperTrainingQualificationResult(
+            slot.Slot, slot.Symbol, false, -1.5m, 3, 4m, new string('C', 64),
+            "Unqualified paper exploration only.",
+            PaperOnlyExploration: true,
+            Interval: slot.Interval);
+        var activation = new PaperTrainingActivation(
+            owner,
+            PaperTrainingActivationState.Active,
+            [slot],
+            new(true, true, true, true, true, true),
+            Now,
+            owner,
+            [result]);
+
+        await using (var context = Context(database))
+        {
+            var repository = new EfPaperTrainingActivationRepository(context);
+            Assert.True(await repository.TrySaveAsync(activation, null));
+        }
+
+        await using (var context = Context(database))
+        {
+            var stored = await new EfPaperTrainingActivationRepository(context).GetAsync(owner);
+
+            Assert.NotNull(stored);
+            Assert.Equal(slot, Assert.Single(stored.Slots));
+            Assert.Equal(result, Assert.Single(stored.QualificationResults));
         }
     }
 

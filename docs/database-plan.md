@@ -142,6 +142,18 @@ See `docs/strategy-research-plan.md`.
 
 ## 7. Experiment workers (Phase 7)
 
+- `PaperTrainingActivations` (OwnerUserId PK, State, SlotCount,
+  SlotsJson, QualificationsJson, prerequisite flags, ChangedAtUtc, ChangedBy,
+  RowVersion) — one owner-scoped durable activation. `SlotsJson` contains only
+  server-approved strategy/symbol slot identities and fake starting balances.
+  `QualificationsJson` records per-slot historical return, completed trades,
+  maximum drawdown, dataset SHA-256 fingerprint, acceptance, and a safe reason.
+  The rowversion protects concurrent Start/Stop transitions. No credential,
+  secret reference, API payload, or live-order capability is stored.
+  Existing deployments apply
+  `docs/database/20260921-paper-training-qualification.sql` before starting the
+  new web and experiment-worker versions; development rebuilds its disposable
+  local schema automatically.
 - `ExperimentWorkers` (Id, OwnerUserId nullable [platform-owned if null],
   Mode [Paper/Live], StrategyParameterSetId FK, Status, RandomSeed,
   CreatedAtUtc) — constrained to at most 10 concurrently `Running` rows

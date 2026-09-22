@@ -101,7 +101,7 @@ public sealed class ApprovedPaperExecutionPlanProfile
 }
 
 /// <summary>
-/// Registered, fixed adapters for the ten approved families. They only turn a
+/// Registered, fixed adapters for the approved families. They only turn a
 /// completed research observation plus safe closed candle evidence into an inert plan.
 /// </summary>
 public sealed class ApprovedPaperExecutionPlanCatalog
@@ -112,6 +112,8 @@ public sealed class ApprovedPaperExecutionPlanCatalog
             {
                 "ema-trend-continuation-v1", "donchian-breakout-ensemble-v1", "bollinger-mean-reversion-v1",
                 "rsi-pullback-v1", "macd-volume-trend-acceleration-v1", "volatility-compression-breakout-v1",
+                "rsi-macd-confluence-v1", "ema-rsi-trend-v1", "bollinger-macd-recovery-v1",
+                "donchian-volume-breakout-v1", "ema-volume-pullback-v1",
                 "cross-sectional-momentum-rotation-v1", "relative-strength-pullback-rotation-v1",
                 "session-conditioned-breakout-v1", "regime-switching-ensemble-v1"
             }.Select(id => new ApprovedPaperExecutionPlanProfile(new StrategyTemplateId(id), $"platform.paper-plan/{id}@1"))

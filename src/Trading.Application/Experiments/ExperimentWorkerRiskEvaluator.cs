@@ -91,8 +91,17 @@ public sealed class ExperimentWorkerRiskEvaluator
         if (!increasing)
             return EvaluateSafetyExit(request);
 
-        if (request.ProposedAction != ExperimentProposalAction.Open || fill.Direction != Trading.Domain.Execution.TradeDirection.Buy)
-            return Denied("Only an approved open proposal may increase an experiment position.");
+        if (request.ProposedAction is not (ExperimentProposalAction.Open or ExperimentProposalAction.Add)
+            || fill.Direction != Trading.Domain.Execution.TradeDirection.Buy)
+            return Denied("Only an approved open or favorable-add proposal may increase an experiment position.");
+        if (request.ProposedAction == ExperimentProposalAction.Open && worker.PositionQuantity != 0m)
+            return Denied("An open proposal requires a flat experiment worker.");
+        if (request.ProposedAction == ExperimentProposalAction.Add
+            && (worker.PositionQuantity <= 0m
+                || worker.PriorFavorableMarkPrice is not decimal favorableMark
+                || favorableMark <= worker.AverageEntryPrice
+                || fill.ReferencePrice < worker.AverageEntryPrice))
+            return Denied("A position add requires existing exposure and a favorable mark above average entry; averaging down is forbidden.");
         if (request.Approval.UserId == Guid.Empty || request.Approval.WorkerId != worker.Id
             || request.Approval.UserId != worker.UserId || !request.Approval.IsApproved
             || request.Approval.GroupConfigurationVersion <= 0

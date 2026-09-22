@@ -23,10 +23,12 @@ public sealed class KrakenHistoricalCandleSource : IHistoricalCandleSource
     internal const string OhlcPath = "/0/public/OHLC";
 
     private readonly HttpClient _httpClient;
+    private readonly ITradablePairSource? _pairs;
 
-    public KrakenHistoricalCandleSource(HttpClient httpClient)
+    public KrakenHistoricalCandleSource(HttpClient httpClient, ITradablePairSource? pairs = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _pairs = pairs;
     }
 
     public async Task<IReadOnlyList<Candle>> FetchAsync(
@@ -43,7 +45,9 @@ public sealed class KrakenHistoricalCandleSource : IHistoricalCandleSource
         // Throws for an interval Kraken does not serve, so the caller routes to
         // the derived-candle builder instead of receiving a different size.
         var krakenInterval = KrakenIntervalMap.ToKrakenMinutes(interval);
-        var requestUri = BuildRequestUri(symbol, krakenInterval, sinceUtc);
+        var displaySymbol = symbol.Trim();
+        var requestSymbol = await ResolveRequestSymbolAsync(displaySymbol, cancellationToken).ConfigureAwait(false);
+        var requestUri = BuildRequestUri(requestSymbol, krakenInterval, sinceUtc);
 
         string payload;
         try
@@ -65,7 +69,23 @@ public sealed class KrakenHistoricalCandleSource : IHistoricalCandleSource
             throw new MarketDataSourceException("The request to Kraken for candles timed out.", exception);
         }
 
-        return KrakenOhlcMapper.Map(payload, symbol.Trim(), interval);
+        return KrakenOhlcMapper.Map(payload, displaySymbol, interval);
+    }
+
+    private async Task<string> ResolveRequestSymbolAsync(
+        string displaySymbol,
+        CancellationToken cancellationToken)
+    {
+        if (_pairs is null || !displaySymbol.Contains('/', StringComparison.Ordinal))
+            return displaySymbol;
+
+        var pairs = await _pairs.ListAsync(cancellationToken).ConfigureAwait(false);
+        var pair = pairs.SingleOrDefault(candidate =>
+            candidate.DisplayName.Equals(displaySymbol, StringComparison.OrdinalIgnoreCase)
+            || candidate.Symbol.Equals(displaySymbol, StringComparison.OrdinalIgnoreCase));
+        return pair?.Symbol
+            ?? throw new MarketDataSourceException(
+                $"Kraken's current pair catalogue does not contain {displaySymbol}.");
     }
 
     internal static Uri BuildRequestUri(string symbol, int krakenInterval, DateTimeOffset sinceUtc)

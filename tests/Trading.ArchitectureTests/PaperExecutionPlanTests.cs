@@ -13,7 +13,7 @@ public sealed class PaperExecutionPlanTests
     {
         var catalog = new ApprovedPaperExecutionPlanCatalog();
 
-        Assert.Equal(10, catalog.TemplateIds.Count);
+        Assert.Equal(15, catalog.TemplateIds.Count);
         foreach (var templateId in catalog.TemplateIds)
         {
             var proposal = new StrategyAnalysisProposal(

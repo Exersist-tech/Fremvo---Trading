@@ -167,6 +167,32 @@ public sealed class ExperimentWorkerTests
     }
 
     [Fact]
+    public void ReplayReconstructsAcceptedFavorableAddsButRejectsAveragingDownLedger()
+    {
+        var worker = CreateRunningWorker(1_000m);
+        worker.ApplyPaperTrade(1m, 100m, 0m, "buy", new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero));
+        worker.RecordFavorablePaperMark(110m);
+        worker.ApplyPaperTrade(0.5m, 110m, 0m, "buy", new DateTimeOffset(2026, 9, 20, 11, 0, 0, TimeSpan.Zero));
+
+        var replayed = ExperimentWorker.Replay(
+            worker.Id, worker.UserId, worker.Name, worker.StrategyId, worker.MarketSymbol,
+            worker.StartingCash, worker.CreatedAtUtc, worker.RandomSeed, worker.StrategyParameters,
+            worker.PositionControls, worker.Status, worker.FailureReason, worker.Ledger);
+
+        Assert.Equal(worker.PositionQuantity, replayed.PositionQuantity);
+        Assert.Equal(worker.AverageEntryPrice, replayed.AverageEntryPrice);
+        Assert.Equal(1, replayed.AdditionCount);
+
+        var adverseLedger = worker.Ledger.Take(1).Append(new PaperTradingLedgerEntry(
+            Guid.NewGuid(), worker.Id, worker.MarketSymbol, 0.5m, 99m, 0m,
+            new DateTimeOffset(2026, 9, 20, 11, 0, 0, TimeSpan.Zero), "buy"));
+        Assert.Throws<InvalidOperationException>(() => ExperimentWorker.Replay(
+            worker.Id, worker.UserId, worker.Name, worker.StrategyId, worker.MarketSymbol,
+            worker.StartingCash, worker.CreatedAtUtc, worker.RandomSeed, worker.StrategyParameters,
+            worker.PositionControls, worker.Status, worker.FailureReason, adverseLedger));
+    }
+
+    [Fact]
     public void AddFailureLeavesWorkerLedgerAndBalancesUnchanged()
     {
         var worker = CreateRunningWorker(1_000m);

@@ -1,6 +1,7 @@
 # Market Universe and Instrument Eligibility
 
-Planning document. No trading code is implemented from this document.
+Planning document with the initial paper-training discovery subset now
+implemented. Live-trading eligibility remains unimplemented and unavailable.
 
 This document defines how the platform decides **which instruments may be
 used, for what purpose, and in which trading mode**. It is the gate that
@@ -68,6 +69,20 @@ This list is an **initial research seed, not a permanent list and not an
 automatically live-tradable list.** It is stored as configuration (seed
 data), is versioned, and may be changed by an administrator without a code
 change.
+
+The paper-training Start flow does not use this fixed seed. It loads the
+current Kraken Spot catalogue, filters active EUR-quoted cryptocurrency pairs,
+requires thirty complete daily candles preceding validation and at least EUR 1M
+median daily EUR quote volume, then ranks at most 40 pairs. This grants no
+general or live eligibility: candidates still have to pass strategy validation,
+selection, and untouched holdout to be labeled qualified. Automatic selection
+evaluates the largest bounded top-liquidity subset across eleven approved strategy evaluators and
+5-minute, 15-minute, 30-minute, and 1-hour candles. Each interval receives an
+equal 600-candle sample split into 420 validation and 180 untouched holdout
+candles. The ten-worker selection enforces one worker per strategy and then favors unseen intervals and
+symbols before using performance rank to fill remaining capacity. The strongest
+unqualified finalists may use otherwise empty worker capacity only for explicitly
+labeled fake-funds forward exploration; this never grants live eligibility.
 
 ### 2.1 Known caveats in the seed list
 

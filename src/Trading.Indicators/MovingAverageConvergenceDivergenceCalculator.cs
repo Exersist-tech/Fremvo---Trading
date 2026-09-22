@@ -38,13 +38,20 @@ public sealed class MovingAverageConvergenceDivergenceCalculator
         }
 
         var closes = candles.Select(candle => candle.Close).ToArray();
+        var fast = ClosedCandleSeries.Average(closes.Take(FastPeriod).ToArray());
+        var fastMultiplier = 2m / (FastPeriod + 1m);
+        for (var index = FastPeriod; index < SlowPeriod; index++)
+            fast += (closes[index] - fast) * fastMultiplier;
+
+        var slow = ClosedCandleSeries.Average(closes.Take(SlowPeriod).ToArray());
+        var slowMultiplier = 2m / (SlowPeriod + 1m);
         var lines = new decimal[candles.Count - SlowPeriod + 1];
-        for (var closeIndex = SlowPeriod - 1; closeIndex < closes.Length; closeIndex++)
+        lines[0] = fast - slow;
+        for (var closeIndex = SlowPeriod; closeIndex < closes.Length; closeIndex++)
         {
-            var prefix = closes.Take(closeIndex + 1).ToArray();
-            lines[closeIndex - SlowPeriod + 1] =
-                ExponentialMovingAverageCalculator.CalculateSeeded(prefix, FastPeriod)
-                - ExponentialMovingAverageCalculator.CalculateSeeded(prefix, SlowPeriod);
+            fast += (closes[closeIndex] - fast) * fastMultiplier;
+            slow += (closes[closeIndex] - slow) * slowMultiplier;
+            lines[closeIndex - SlowPeriod + 1] = fast - slow;
         }
 
         var line = lines[^1];

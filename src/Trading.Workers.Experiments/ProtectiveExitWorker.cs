@@ -97,7 +97,7 @@ public sealed class ProtectiveExitWorker : BackgroundService
         cancellationToken.ThrowIfCancellationRequested();
         var submitted = 0;
         var activeOwners = await _activations.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var owner in _options.EnabledUserIds.Intersect(activeOwners).Distinct())
+        foreach (var owner in activeOwners.Distinct())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (owner == Guid.Empty)

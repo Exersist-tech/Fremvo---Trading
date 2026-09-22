@@ -49,6 +49,47 @@ public sealed class EfCandleRepository : ICandleRepository
         }
     }
 
+    public async Task<CandleWriteResult> UpsertAuthoritativeHistoryAsync(
+        Candle candle,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(candle);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!candle.CanBeUsedForClosedCandleSignal || candle.IsDerived)
+        {
+            throw new ArgumentException(
+                "Authoritative history must be a native, closed candle without blocking quality flags.",
+                nameof(candle));
+        }
+
+        var existing = await FindAsync(
+            candle.Symbol,
+            candle.Interval,
+            candle.OpenTimeUtc.ToUniversalTime(),
+            cancellationToken).ConfigureAwait(false);
+        if (existing is null)
+        {
+            return await UpsertAsync(candle, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!HasSameMarketData(existing, candle))
+        {
+            return CandleWriteResult.Conflict;
+        }
+
+        if (IsEquivalent(existing, candle))
+        {
+            return CandleWriteResult.Duplicate;
+        }
+
+        existing.CloseTimeUtc = candle.CloseTimeUtc.ToUniversalTime();
+        existing.IsClosed = true;
+        existing.IsDerived = false;
+        existing.QualityFlags = SerializeQualityFlags(candle.QualityFlags);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return CandleWriteResult.Duplicate;
+    }
+
     public async Task<Candle?> GetLatestAsync(
         string symbol,
         CandleInterval interval,
@@ -157,15 +198,18 @@ public sealed class EfCandleRepository : ICandleRepository
         DeserializeQualityFlags(candle.QualityFlags));
 
     private static bool IsEquivalent(PersistedCandle persisted, Candle candle) =>
+        HasSameMarketData(persisted, candle) &&
+        persisted.IsClosed == candle.IsClosed &&
+        persisted.IsDerived == candle.IsDerived &&
+        string.Equals(persisted.QualityFlags, SerializeQualityFlags(candle.QualityFlags), StringComparison.Ordinal);
+
+    private static bool HasSameMarketData(PersistedCandle persisted, Candle candle) =>
         persisted.CloseTimeUtc == candle.CloseTimeUtc.ToUniversalTime() &&
         persisted.Open == candle.Open &&
         persisted.High == candle.High &&
         persisted.Low == candle.Low &&
         persisted.Close == candle.Close &&
-        persisted.Volume == candle.Volume &&
-        persisted.IsClosed == candle.IsClosed &&
-        persisted.IsDerived == candle.IsDerived &&
-        string.Equals(persisted.QualityFlags, SerializeQualityFlags(candle.QualityFlags), StringComparison.Ordinal);
+        persisted.Volume == candle.Volume;
 
     private static string SerializeQualityFlags(IReadOnlyCollection<DataQualityIssue> qualityFlags) =>
         string.Join(

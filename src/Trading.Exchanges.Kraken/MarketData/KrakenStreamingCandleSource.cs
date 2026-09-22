@@ -80,10 +80,11 @@ public sealed class KrakenStreamingCandleSource : IStreamingCandleSource
         }
     }
 
-    private static Candle AsClosed(Candle candle) => new(
+    internal static Candle AsClosed(Candle candle) => new(
         candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
         candle.Open, candle.High, candle.Low, candle.Close, candle.Volume,
-        isClosed: true, candle.IsDerived, candle.QualityFlags);
+        isClosed: true, candle.IsDerived,
+        candle.QualityFlags.Where(issue => issue != DataQualityIssue.Incomplete).ToArray());
 
     internal static ClientWebSocket CreatePublicSocket() => new();
 

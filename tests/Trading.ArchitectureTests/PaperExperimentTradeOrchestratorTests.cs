@@ -34,6 +34,23 @@ public sealed class PaperExperimentTradeOrchestratorTests
         Assert.All(await harness.Commands.ListForUserAsync(proposal.Key.UserId), command => Assert.True(command.Payload.IsPaperOnly));
     }
 
+    [Fact]
+    public async Task AcceptedAddUsesExactApprovedQuantityOnPaperPipeline()
+    {
+        var harness = new Harness();
+        var (orchestrator, proposal, context, adapter) = harness.Create(ExperimentProposalAction.Add, position: 1m);
+
+        var result = await orchestrator.ProcessSizedAsync(proposal, context, 0.25m);
+
+        Assert.True(result.PipelineResult!.Executed);
+        var intent = (await harness.Intents.ListForUserAsync(proposal.Key.UserId)).Single().Payload;
+        Assert.Equal(TradeDirection.Buy, intent.Direction);
+        Assert.Equal(0.25m, intent.Quantity);
+        Assert.False(intent.ReduceOnly);
+        Assert.False(intent.CloseOnly);
+        Assert.Single(adapter.Ledger);
+    }
+
     [Theory]
     [InlineData(ExperimentProposalAction.Reduce, 3, 1, false)]
     [InlineData(ExperimentProposalAction.Close, 3, 3, true)]

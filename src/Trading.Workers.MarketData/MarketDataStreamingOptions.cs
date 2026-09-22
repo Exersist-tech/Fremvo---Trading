@@ -16,4 +16,6 @@ public sealed class MarketDataStreamingOptions
     public bool DeriveTenMinuteCandles { get; init; }
 
     public int MaximumReconnectDelaySeconds { get; init; } = 30;
+
+    public int SubscriptionRefreshSeconds { get; init; } = 60;
 }

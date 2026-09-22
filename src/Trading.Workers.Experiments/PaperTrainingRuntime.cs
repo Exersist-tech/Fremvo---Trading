@@ -57,6 +57,16 @@ public sealed class ScopedExperimentWorkerRepository : IExperimentWorkerReposito
             using var scope = _scopes.CreateScope();
             return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>().ListAsync(userId, cancellationToken).ConfigureAwait(false);
         }
+        public async Task<IReadOnlyCollection<ExperimentWorker>> ListByNamesAsync(
+            Guid userId,
+            IReadOnlyCollection<string> names,
+            CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentWorkerRepository>()
+                .ListByNamesAsync(userId, names, cancellationToken)
+                .ConfigureAwait(false);
+        }
         public async Task<int> CountAsync(Guid userId, CancellationToken cancellationToken = default)
         {
             using var scope = _scopes.CreateScope();
@@ -234,52 +244,87 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
 {
     private static readonly Guid s_instrument = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     private const string Fingerprint = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    private const int MinimumClosedHistoryCandles = 35;
     private readonly IExperimentWorkerRepository _workers;
     private readonly TimeProvider _time;
     private readonly ApprovedExperimentStrategyRegistry _registry;
+    private readonly IPaperTrainingActivationReader _activations;
 
-    public PaperTrainingConfigurationSource(IExperimentWorkerRepository workers, TimeProvider time, ApprovedExperimentStrategyRegistry registry)
+    public PaperTrainingConfigurationSource(
+        IExperimentWorkerRepository workers,
+        TimeProvider time,
+        ApprovedExperimentStrategyRegistry registry,
+        IPaperTrainingActivationReader activations)
     {
-        _workers = workers; _time = time; _registry = registry;
+        _workers = workers;
+        _time = time;
+        _registry = registry;
+        _activations = activations;
     }
 
     public async Task<ExperimentResearchGroupConfiguration?> GetAsync(Guid userId, CancellationToken cancellationToken)
     {
+        var activation = await _activations.GetAsync(userId, cancellationToken).ConfigureAwait(false);
+        if (activation is not { IsActive: true } || activation.Slots.Count == 0)
+            return null;
+
         var workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
-        if (workers.Count == 0)
+        var sessionSuffix = activation.ChangedAtUtc.ToString("yyyyMMddHHmmssfffffff", System.Globalization.CultureInfo.InvariantCulture);
+        foreach (var slot in activation.Slots)
         {
-            foreach (var slot in PaperTrainingActivationService.ApprovedSlots)
-            {
-                var createdWorker = new ExperimentWorker(Guid.NewGuid(), userId, $"Paper training {slot.Slot}", slot.StrategyId,
-                    slot.Symbol, slot.StartingCash, _time.GetUtcNow(), slot.Seed);
-                createdWorker.Start();
-                await _workers.SaveAsync(createdWorker, cancellationToken).ConfigureAwait(false);
-            }
-            workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+            var name = $"Paper training {slot.Slot} {sessionSuffix}";
+            if (workers.Any(worker => worker.Name.Equals(name, StringComparison.Ordinal)
+                && worker.StrategyId.Equals(slot.StrategyId, StringComparison.Ordinal)
+                && worker.MarketSymbol.Equals(slot.Symbol, StringComparison.Ordinal)))
+                continue;
+            var createdWorker = new ExperimentWorker(
+                Guid.NewGuid(), userId, name, slot.StrategyId, slot.Symbol,
+                slot.StartingCash, _time.GetUtcNow(), slot.Seed);
+            createdWorker.Start();
+            await _workers.SaveAsync(createdWorker, cancellationToken).ConfigureAwait(false);
         }
+        workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+        var selectedNames = activation.Slots
+            .Select(slot => $"Paper training {slot.Slot} {sessionSuffix}")
+            .ToHashSet(StringComparer.Ordinal);
+        workers = workers.Where(worker => selectedNames.Contains(worker.Name)).ToArray();
 
         var now = _time.GetUtcNow();
-        var provenances = workers.ToDictionary(worker => worker.Id, worker => CreateProvenance(worker, now));
+        var slotsByName = activation.Slots.ToDictionary(
+            slot => $"Paper training {slot.Slot} {sessionSuffix}",
+            StringComparer.Ordinal);
+        var provenances = workers.ToDictionary(
+            worker => worker.Id,
+            worker => CreateProvenance(worker, slotsByName[worker.Name].Interval, now));
         return ExperimentResearchGroupConfiguration.Create(userId, 1, workers, provenances);
     }
 
-    private ExperimentResearchProvenance CreateProvenance(ExperimentWorker worker, DateTimeOffset now)
+    private ExperimentResearchProvenance CreateProvenance(
+        ExperimentWorker worker,
+        CandleInterval interval,
+        DateTimeOffset now)
     {
         var definition = _registry.Definitions.Single(x => x.FamilyId == worker.StrategyId);
+        var intervalDuration = TimeSpan.FromMinutes((int)interval);
         var approval = StrategyApproval.CreateDraft(Guid.NewGuid(),
             new StrategyVersion(new StrategyTemplateVersionIdentity(definition.FamilyId, definition.Version),
                 new StrategyParameterSchemaReference(definition.ParameterSchemaId, definition.ParameterSchemaVersion, definition.ParameterSchemaFingerprint),
                 definition.ContentFingerprint, now), StrategyApprovalActor.Human(Guid.NewGuid()), now,
             new StrategyApprovalRequirements(new[] { new ApprovedInstrumentScope(AssetClass.Cryptocurrency, s_instrument) },
-                30, 1m, 1m, 1m, TimeSpan.FromHours(1), new[] { CandleInterval.OneHour },
+                MinimumClosedHistoryCandles, 1m, 1m, 1m, TimeSpan.FromHours(2), PaperTrainingAutoSelectionService.ApprovedIntervals,
                 new[] { TradingProductType.Spot }, new[] { StrategyApprovalMode.Paper },
-                new StrategyTimeframeConfiguration(CandleInterval.OneHour, CandleInterval.OneHour, CandleInterval.OneHour)));
+                new StrategyTimeframeConfiguration(CandleInterval.OneHour, interval, interval)));
         approval = approval.TransitionTo(StrategyApprovalState.UnderReview, approval.CreatedBy, now)
             .TransitionTo(StrategyApprovalState.Approved, approval.CreatedBy, now, approval.CreatedBy);
+        var utcTicks = now.ToUniversalTime().Ticks;
+        var completedIntervalUtc = new DateTimeOffset(
+            utcTicks - (utcTicks % intervalDuration.Ticks),
+            TimeSpan.Zero);
         var dataset = new HistoricalDataset($"paper-training-candles-{worker.Id:N}", "durable-candle-repository", worker.MarketSymbol,
-            "1H", now.AddDays(-2), now, 3, Fingerprint, "catalog-v1", now);
+            IntervalCode(interval), completedIntervalUtc.AddTicks(-intervalDuration.Ticks * MinimumClosedHistoryCandles),
+            completedIntervalUtc, MinimumClosedHistoryCandles, Fingerprint, "catalog-v1", now);
         var evidence = new StrategyResearchEvidence(new ResearchEvidenceProvenance("durable-candle-repository", Fingerprint, now),
-            new StrategyApprovalEvidence(s_instrument, AssetClass.Cryptocurrency, 3, 10m, .1m, .01m, now),
+            new StrategyApprovalEvidence(s_instrument, AssetClass.Cryptocurrency, MinimumClosedHistoryCandles, 10m, .1m, .01m, now),
             true, 1m, 1m, true, 1m, 1m, 1m, Fingerprint);
         var gates = StrategyRejectionGateEngine.CreatePlatformDefault().Evaluate(
             new StrategyRejectionGateEvaluationInput(approval, approval.Requirements?.TimeframeConfiguration, TradingProductType.Spot, StrategyApprovalMode.Paper, evidence, now));
@@ -287,6 +332,15 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(worker.StrategyParameters.Trim()))),
             dataset, new ExperimentClassifierReference("platform-regime", 1, Fingerprint), evidence.Provenance, gates);
     }
+
+    private static string IntervalCode(CandleInterval interval) => interval switch
+    {
+        CandleInterval.FiveMinutes => "5M",
+        CandleInterval.FifteenMinutes => "15M",
+        CandleInterval.ThirtyMinutes => "30M",
+        CandleInterval.OneHour => "1H",
+        _ => throw new ArgumentOutOfRangeException(nameof(interval), "Paper-training interval is not approved.")
+    };
 }
 
 /// <summary>Runs durable-candle analysis and records the attested neutral/blocked decision.</summary>
@@ -305,7 +359,9 @@ public sealed class PaperTrainingObservationRunner : IExperimentWorkerRunner
         var configuration = await _configurations.GetAsync(worker.UserId, cancellationToken).ConfigureAwait(false);
         var assignment = configuration?.Assignments.SingleOrDefault(x => x.WorkerId == worker.Id);
         if (configuration is null || assignment is null) return;
-        var observation = await _analysis.AnalyzeAsync(worker, configuration, assignment, now, cancellationToken).ConfigureAwait(false);
+        var observation = await _analysis
+            .AnalyzeAcrossPaperTimeframesAsync(worker, configuration, assignment, now, cancellationToken)
+            .ConfigureAwait(false);
         if (observation.Evidence is null) return;
         await _decisions.DecideAsync(worker, configuration, assignment, observation,
             new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, worker.PositionQuantity, now),

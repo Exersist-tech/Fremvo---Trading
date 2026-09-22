@@ -46,6 +46,14 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
     {
         ArgumentNullException.ThrowIfNull(primarySeries);
         ArgumentNullException.ThrowIfNull(provenance);
+        if (familyId is not ("platform.cross-sectional-momentum-rotation"
+            or "platform.relative-strength-pullback-rotation"
+            or "platform.session-conditioned-breakout"
+            or "platform.regime-switching-ensemble"))
+        {
+            return null;
+        }
+
         if (!HasExactSafeSeries(primarySeries))
         {
             return ExperimentAnalysisResult.Blocked(

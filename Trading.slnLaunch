@@ -18,5 +18,25 @@
         "DebugTarget": "https"
       }
     ]
+  },
+  {
+    "Name": "Paper training",
+    "Projects": [
+      {
+        "Path": "src\\Trading.Web\\Trading.Web.csproj",
+        "Action": "Start",
+        "DebugTarget": "https"
+      },
+      {
+        "Path": "src\\Trading.Workers.MarketData\\Trading.Workers.MarketData.csproj",
+        "Action": "Start",
+        "DebugTarget": "Trading.Workers.MarketData"
+      },
+      {
+        "Path": "src\\Trading.Workers.Experiments\\Trading.Workers.Experiments.csproj",
+        "Action": "Start",
+        "DebugTarget": "Trading.Workers.Experiments"
+      }
+    ]
   }
 ]

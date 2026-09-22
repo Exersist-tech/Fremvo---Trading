@@ -34,14 +34,41 @@ public sealed class PaperRiskPositionSizerTests
     }
 
     [Fact]
-    public void BlocksCashMinimumsTickAndInvalidProtectiveStop()
+    public void BlocksCashMinimumsAndInvalidProtectiveStop()
     {
         Assert.False(PaperRiskPositionSizer.Size(CreateInput(cash: 0.5m)).IsAccepted);
         Assert.False(PaperRiskPositionSizer.Size(CreateInput(filters: DefaultFilters with { MinimumQuantity = 2m })).IsAccepted);
         Assert.False(PaperRiskPositionSizer.Size(CreateInput(filters: DefaultFilters with { MinimumNotional = 200m })).IsAccepted);
-        Assert.False(PaperRiskPositionSizer.Size(CreateInput(entry: 100.001m)).IsAccepted);
         Assert.False(PaperRiskPositionSizer.Size(CreateInput(stop: 100m)).IsAccepted);
         Assert.False(PaperRiskPositionSizer.Size(CreateInput(stop: 100m, direction: PaperPositionDirection.Short)).IsAccepted);
+    }
+
+    [Fact]
+    public void AcceptsMarketReferenceAndProtectiveTriggerPricesBetweenVenueTicks()
+    {
+        var result = PaperRiskPositionSizer.Size(CreateInput(entry: 1.31522m, stop: 1.28m));
+
+        Assert.True(result.IsAccepted);
+        Assert.True(result.Notional >= DefaultFilters.MinimumNotional);
+        Assert.True(result.Risk <= result.EffectiveLimits!.EffectiveRiskFraction * 1000m);
+    }
+
+    [Fact]
+    public void PositionBudgetDoesNotPreventLowPricedAssetsFromMeetingMinimumNotional()
+    {
+        var budget = new PaperWorkerSizingBudget(0.0025m, 100m, 100m, 100m);
+        var policy = new PaperRiskSizingPolicy(0.0025m, 0.0025m, 100m, 100m, 100m, TimeSpan.FromMinutes(5));
+
+        var result = PaperRiskPositionSizer.Size(CreateInput(
+            entry: 1.31522m,
+            stop: 1.28m,
+            filters: DefaultFilters with { MinimumNotional = 10m },
+            budget: budget,
+            policy: policy));
+
+        Assert.True(result.IsAccepted);
+        Assert.True(result.Quantity > 1m);
+        Assert.True(result.Notional >= 10m);
     }
 
     [Fact]
@@ -84,8 +111,9 @@ public sealed class PaperRiskPositionSizerTests
     private static PaperRiskSizingInput CreateInput(
         decimal? equity = 1000m, decimal cash = 1000m, decimal entry = 100m, decimal stop = 98m,
         PaperPositionDirection direction = PaperPositionDirection.Long, decimal currentQuantity = 0m, decimal currentExposure = 0m,
-        bool favorableAddApproved = false, PaperExchangeFilters? filters = null, PaperRiskSizingPolicy? policy = null,
+        bool favorableAddApproved = false, PaperExchangeFilters? filters = null, PaperWorkerSizingBudget? budget = null,
+        PaperRiskSizingPolicy? policy = null,
         DateTimeOffset? marketAt = null, DateTimeOffset? accountAt = null) =>
         new(equity, cash, entry, stop, direction, currentQuantity, currentExposure, currentQuantity > 0m ? direction : null,
-            favorableAddApproved, filters ?? DefaultFilters, DefaultBudget, policy ?? DefaultPolicy, marketAt ?? Now, accountAt ?? Now, Now);
+            favorableAddApproved, filters ?? DefaultFilters, budget ?? DefaultBudget, policy ?? DefaultPolicy, marketAt ?? Now, accountAt ?? Now, Now);
 }

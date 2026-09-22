@@ -35,6 +35,12 @@ builder.Services.AddSingleton<IPaperTrainingActivationSource, DisabledPaperTrain
 var paperTrainingEnabled = builder.Configuration.GetValue<bool>("Experiments:PaperTraining:Enabled");
 if (paperTrainingEnabled)
 {
+    if (!builder.Configuration.GetValue<bool>("Experiments:ProtectiveExits:Enabled"))
+    {
+        throw new InvalidOperationException(
+            "Paper training requires Experiments:ProtectiveExits:Enabled so every active owner has protective-exit evaluation.");
+    }
+
     var connectionString = builder.Configuration.GetConnectionString("TradingDb");
     if (string.IsNullOrWhiteSpace(connectionString))
     {
@@ -49,6 +55,7 @@ if (paperTrainingEnabled)
     builder.Services.AddScoped<IPaperTrainingActivationSource>(provider =>
         provider.GetRequiredService<EfPaperTrainingActivationRepository>());
     builder.Services.AddSingleton<IPaperTrainingActivationSource, ScopedPaperTrainingActivationSource>();
+    builder.Services.AddSingleton<IPaperTrainingActivationReader, ScopedPaperTrainingActivationReader>();
     builder.Services.AddScoped<ICandleRepository, EfCandleRepository>();
     builder.Services.AddScoped<EfExperimentWorkerRepository>();
     builder.Services.AddSingleton<ScopedExperimentWorkerRepository>();

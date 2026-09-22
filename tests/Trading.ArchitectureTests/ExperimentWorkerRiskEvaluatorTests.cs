@@ -84,6 +84,7 @@ public sealed class ExperimentWorkerRiskEvaluatorTests
         {
             Budget = new ExperimentWorkerRiskBudget(10m, 10_000m, 0),
             Exposure = new(harness.Worker.UserId, harness.Worker.Id, 1m, 10m, 0),
+            ProposedAction = ExperimentProposalAction.Add,
         });
         Assert.False(additionsDenied.IsAllowed);
         var foreign = harness.Evaluator.Evaluate(harness.Request() with
@@ -91,6 +92,28 @@ public sealed class ExperimentWorkerRiskEvaluatorTests
             Approval = new(Guid.NewGuid(), harness.Worker.Id, ExperimentResearchGroup.A, 1, harness.Worker.StrategyId, true)
         });
         Assert.False(foreign.IsAllowed);
+    }
+
+    [Fact]
+    public void FavorableAddIsAllowedButAveragingDownAndMissingMarksAreDenied()
+    {
+        var harness = new Harness();
+        harness.Worker.ApplyPaperTrade(1m, 10m, 0m, "buy", Now);
+        var request = harness.Request() with
+        {
+            ProposedAction = ExperimentProposalAction.Add,
+            Exposure = new(harness.Worker.UserId, harness.Worker.Id, 1m, 11m, 0),
+            ProposedFill = harness.Request().ProposedFill with { ReferencePrice = 11m }
+        };
+
+        Assert.False(harness.Evaluator.Evaluate(request).IsAllowed);
+
+        harness.Worker.RecordFavorablePaperMark(11m);
+        Assert.True(harness.Evaluator.Evaluate(request).IsAllowed);
+        Assert.False(harness.Evaluator.Evaluate(request with
+        {
+            ProposedFill = request.ProposedFill with { ReferencePrice = 9m }
+        }).IsAllowed);
     }
 
     [Fact]
