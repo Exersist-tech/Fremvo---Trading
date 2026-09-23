@@ -40,7 +40,11 @@
   backfill cannot freeze an incomplete decision. Missing or blocked evidence
   fails closed. Later supporting candles cannot rewrite an already neutral
   decision for the same primary candle; the first complete decision is
-  preserved without faulting the worker. Decision fingerprints commit to all
+  preserved without faulting the worker. After a completed fill changes the
+  worker portfolio, re-evaluating that same primary candle returns its already
+  accepted decision unchanged instead of attempting to reinterpret `Open` as
+  `Neutral` or `Add`; changed evidence under the same identity still conflicts
+  and fails closed. Decision fingerprints commit to all
   four series. Paper sizing applies quantity steps and minimum notionals while
   treating the closed-candle entry and ATR stop as market references rather
   than limit prices; low-priced assets are no longer blocked by an unrelated

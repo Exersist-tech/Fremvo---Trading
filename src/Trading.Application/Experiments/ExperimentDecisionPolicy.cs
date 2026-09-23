@@ -124,6 +124,12 @@ public sealed class ExperimentDecisionPolicy
             ExperimentDecisionWriteResult.Inserted or ExperimentDecisionWriteResult.Duplicate when write.Record is not null => write.Record,
             ExperimentDecisionWriteResult.Conflict
                 when write.Record?.Proposal.Action == ExperimentProposalAction.Neutral => write.Record,
+            ExperimentDecisionWriteResult.Conflict
+                when write.Record is not null
+                    && string.Equals(
+                        write.Record.EvidenceFingerprint,
+                        candidate.EvidenceFingerprint,
+                        StringComparison.Ordinal) => write.Record,
             ExperimentDecisionWriteResult.Conflict => throw new InvalidOperationException("A conflicting decision or evidence record already exists for this worker candle."),
             _ => throw new InvalidOperationException("Decision ledger did not return a record.")
         };

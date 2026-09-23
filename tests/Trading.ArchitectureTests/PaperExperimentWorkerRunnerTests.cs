@@ -192,18 +192,53 @@ public sealed class PaperExperimentWorkerRunnerTests
         var preservedNeutral = await neutralLedgerPolicy.DecideAsync(
             worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
         worker.ApplyPaperTrade(1m, 100m, 0m, "buy", Now);
+        var postFillSameCandle = await policy.DecideAsync(
+            worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
         worker.RecordFavorablePaperMark(110m);
         var favorableAdd = await new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(Now)).DecideAsync(
             worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
         var conflictingLaterAdd = await neutralLedgerPolicy.DecideAsync(
             worker, configuration, configuration.Assignments.Single(), analysis, snapshot with { PositionQuantity = 1m }, identity);
+        var changedCandles = series.Candles
+            .Select((item, index) => index == series.Candles.Count - 1
+                ? new Candle(
+                    item.Symbol,
+                    item.Interval,
+                    item.OpenTimeUtc,
+                    item.CloseTimeUtc,
+                    item.Open,
+                    item.High,
+                    Math.Min(item.Low, item.Open - 2m),
+                    item.Open - 2m,
+                    item.Volume,
+                    item.IsClosed,
+                    item.IsDerived)
+                : item)
+            .ToArray();
+        var changedRunner = new PaperExperimentWorkerRunner(
+            new FixedCandleSource(ExperimentCandleSeriesResult.Available(
+                new ExperimentCandleSeries(series.Symbol, series.Interval, series.AsOfUtc, changedCandles))),
+            registry);
+        var changedEvidence = await changedRunner.AnalyzeAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            Now);
 
         Assert.Equal(ExperimentProposalAction.Open, first.Proposal.Action);
         Assert.Equal(first, repeated);
+        Assert.Equal(first, postFillSameCandle);
         Assert.Equal(ExperimentProposalAction.Neutral, noMark.Proposal.Action);
         Assert.Equal(ExperimentProposalAction.Neutral, preservedNeutral.Proposal.Action);
         Assert.Equal(preservedNeutral, conflictingLaterAdd);
         Assert.Equal(ExperimentProposalAction.Add, favorableAdd.Proposal.Action);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => policy.DecideAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            changedEvidence,
+            snapshot with { PositionQuantity = 1m },
+            identity));
         Assert.Single(worker.Ledger);
     }
 
