@@ -76,6 +76,93 @@ public sealed record ExperimentResultPage(
     int PageSize,
     bool HasMore);
 
+public sealed record ExperimentClosedTradeResult(
+    Guid WorkerId,
+    string StrategyId,
+    string Symbol,
+    DateTimeOffset OpenedAtUtc,
+    DateTimeOffset ClosedAtUtc,
+    decimal Quantity,
+    decimal AverageEntryPrice,
+    decimal AverageExitPrice,
+    decimal GrossProfitAndLoss,
+    decimal Fees,
+    decimal NetProfitAndLoss,
+    decimal ReturnPercent,
+    long HoldingSeconds,
+    int BuyFillCount,
+    int SellFillCount,
+    int Additions,
+    decimal StartingCash,
+    decimal EndingCash,
+    string? ExitReason);
+
+public static class ExperimentClosedTradeResultFactory
+{
+    public static ExperimentClosedTradeResult Create(ExperimentWorker worker, string? exitReason = null)
+    {
+        ArgumentNullException.ThrowIfNull(worker);
+        var ordered = worker.Ledger
+            .OrderBy(entry => entry.OccurredAtUtc)
+            .ThenBy(entry => entry.Id)
+            .ToArray();
+        var buys = ordered
+            .Where(entry => entry.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var sells = ordered
+            .Where(entry => entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (worker.Status != ExperimentWorkerStatus.Completed
+            || worker.PositionQuantity != 0m
+            || buys.Length == 0
+            || sells.Length == 0)
+        {
+            throw new InvalidOperationException("A closed-trade result requires a completed, flat worker with BUY and SELL fills.");
+        }
+
+        var boughtQuantity = buys.Sum(entry => entry.Quantity);
+        var soldQuantity = sells.Sum(entry => entry.Quantity);
+        if (boughtQuantity <= 0m || boughtQuantity != soldQuantity)
+            throw new InvalidOperationException("A closed-trade result requires exactly reconciled bought and sold quantities.");
+
+        var buyNotional = buys.Sum(entry => checked(entry.Quantity * entry.ExecutionPrice));
+        var sellNotional = sells.Sum(entry => checked(entry.Quantity * entry.ExecutionPrice));
+        var fees = ordered.Sum(entry => entry.Fee);
+        var entryCost = checked(buyNotional + buys.Sum(entry => entry.Fee));
+        var grossProfitAndLoss = checked(sellNotional - buyNotional);
+        var netProfitAndLoss = checked(sellNotional - sells.Sum(entry => entry.Fee) - entryCost);
+        var openedAtUtc = buys[0].OccurredAtUtc;
+        var closedAtUtc = sells[^1].OccurredAtUtc;
+        if (openedAtUtc.Offset != TimeSpan.Zero
+            || closedAtUtc.Offset != TimeSpan.Zero
+            || closedAtUtc < openedAtUtc)
+        {
+            throw new InvalidOperationException("Closed-trade timestamps must be ordered UTC instants.");
+        }
+
+        return new ExperimentClosedTradeResult(
+            worker.Id,
+            worker.StrategyId,
+            worker.MarketSymbol,
+            openedAtUtc,
+            closedAtUtc,
+            boughtQuantity,
+            entryCost / boughtQuantity,
+            sellNotional / soldQuantity,
+            grossProfitAndLoss,
+            fees,
+            netProfitAndLoss,
+            entryCost == 0m ? 0m : netProfitAndLoss / entryCost * 100m,
+            checked((long)(closedAtUtc - openedAtUtc).TotalSeconds),
+            buys.Length,
+            sells.Length,
+            Math.Max(0, buys.Length - 1),
+            worker.StartingCash,
+            worker.CashBalance,
+            string.IsNullOrWhiteSpace(exitReason) ? null : exitReason.Trim());
+    }
+}
+
 /// <summary>Creates accounting fields directly from isolated worker and fill evidence.</summary>
 public static class ExperimentResultSnapshotFactory
 {

@@ -7,7 +7,7 @@ namespace Trading.ArchitectureTests;
 public sealed class PaperTrainingHistoricalQualificationTests
 {
     [Fact]
-    public async Task UsesApprovedLiveEvaluatorAndAppliesAllHistoricalGates()
+    public async Task SingleTimeframeQualificationFailsClosedForExactMultiRoleStrategies()
     {
         var toUtc = DateTimeOffset.UtcNow.AddHours(-1);
         var fromUtc = toUtc.AddHours(-40);
@@ -42,10 +42,9 @@ public sealed class PaperTrainingHistoricalQualificationTests
             PaperTrainingQualificationGate.PlatformDefault));
 
         var result = Assert.Single(results);
-        Assert.True(result.Accepted, result.Reason);
-        Assert.True(result.CompletedTrades >= 3);
-        Assert.True(result.NetReturnPercent >= 0m);
-        Assert.True(result.MaximumDrawdownPercent <= 20m);
+        Assert.False(result.Accepted);
+        Assert.Equal(0, result.CompletedTrades);
+        Assert.Contains("failed", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(64, result.DatasetFingerprint.Length);
     }
 

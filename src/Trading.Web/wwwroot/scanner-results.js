@@ -22,6 +22,13 @@
     row.appendChild(cell);
   }
 
+  function formatNumber(value) {
+    var numeric = Number(value);
+    return isFinite(numeric)
+      ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : String(value);
+  }
+
   function criteriaText(criteria) {
     return (criteria || []).map(function (criterion) {
       return criterion.label + ': ' + criterion.status + ' — ' + criterion.rationale;
@@ -57,7 +64,7 @@
       var row = document.createElement('tr');
       textCell(row, result.rank, 'numeric');
       textCell(row, result.symbol);
-      textCell(row, result.score, 'numeric');
+      textCell(row, formatNumber(result.score), 'numeric');
       textCell(row, utc(result.evidenceAsOfUtc));
       textCell(row, criteriaText(result.criteria));
       textCell(row, result.dataRejectionReason || 'Not recorded.');

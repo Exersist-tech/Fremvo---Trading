@@ -48,6 +48,16 @@ public sealed record PaperTrainingQualificationGate(
     }
 }
 
+public enum PaperTrainingCandidateDisposition
+{
+    Hold = 0,
+    Bearish,
+    Vetoed,
+    Rejected,
+    Queued,
+    Admitted
+}
+
 public sealed record PaperTrainingQualificationResult(
     int Slot,
     string Symbol,
@@ -59,7 +69,11 @@ public sealed record PaperTrainingQualificationResult(
     string Reason,
     string? StrategyId = null,
     bool PaperOnlyExploration = false,
-    CandleInterval Interval = CandleInterval.OneHour);
+    CandleInterval Interval = CandleInterval.OneHour,
+    PaperTrainingCandidateDisposition? CandidateDisposition = null,
+    int? BullishChecks = null,
+    int? RequiredBullishChecks = null,
+    DateTimeOffset? SignalCloseUtc = null);
 
 public sealed record PaperTrainingPrerequisites(
     bool DurableClosedCandleSource,
@@ -176,7 +190,9 @@ public sealed class InMemoryPaperTrainingActivationRepository :
         Task.FromResult<IReadOnlyCollection<PaperTrainingMarketSubscription>>(_activations.Values
             .Where(value => value.IsActive)
             .SelectMany(value => value.Slots)
-            .SelectMany(slot => PaperTrainingAutoSelectionService.ApprovedIntervals.Select(
+            .SelectMany(slot => ApprovedConsensusStrategyProfiles
+                .RequiredIntervals(slot.StrategyId, slot.Interval)
+                .Select(
                 interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)))
             .Distinct()
             .ToArray());
@@ -199,15 +215,10 @@ public sealed class PaperTrainingActivationService
         new(4, ExperimentResearchGroup.A, "platform.rsi-pullback", "ADA/EUR", FixedStartingCash, 104773, "rsi-pullback-parameters@1", "phase5b-rsi-v1"),
         new(5, ExperimentResearchGroup.B, "platform.macd-volume", "XRP/EUR", FixedStartingCash, 104779, "macd-volume-parameters@1", "phase5b-macd-v1"),
         new(6, ExperimentResearchGroup.B, "platform.volatility-compression-breakout", "TRX/EUR", FixedStartingCash, 104789, "volatility-compression-breakout-parameters@1", "phase5b-volatility-v1"),
-        new(7, ExperimentResearchGroup.B, "platform.cross-sectional-momentum-rotation", "BTC/USD", FixedStartingCash, 104801, "cross-sectional-momentum-parameters@1", "phase5b-momentum-v1"),
-        new(8, ExperimentResearchGroup.C, "platform.relative-strength-pullback-rotation", "BTC/USD", FixedStartingCash, 104803, "relative-strength-pullback-parameters@1", "phase5b-relative-strength-v1"),
+        new(7, ExperimentResearchGroup.B, "platform.cross-sectional-momentum-rotation", "XBT/EUR", FixedStartingCash, 104801, "cross-sectional-momentum-parameters@1", "phase5b-momentum-v1"),
+        new(8, ExperimentResearchGroup.C, "platform.relative-strength-pullback-rotation", "XBT/EUR", FixedStartingCash, 104803, "relative-strength-pullback-parameters@1", "phase5b-relative-strength-v1"),
         new(9, ExperimentResearchGroup.C, "platform.session-conditioned-breakout", "DOGE/EUR", FixedStartingCash, 104827, "session-conditioned-breakout-parameters@1", "phase5b-session-v1"),
-        new(10, ExperimentResearchGroup.C, "platform.regime-switching-ensemble", "ADA/EUR", FixedStartingCash, 104831, "regime-switching-ensemble-parameters@1", "phase5b-regime-v1"),
-        new(11, ExperimentResearchGroup.A, "platform.rsi-macd-confluence", "XRP/EUR", FixedStartingCash, 104849, "rsi-macd-confluence-parameters@1", "phase5b-rsi-macd-v1"),
-        new(12, ExperimentResearchGroup.A, "platform.ema-rsi-trend", "TRX/EUR", FixedStartingCash, 104851, "ema-rsi-trend-parameters@1", "phase5b-ema-rsi-v1"),
-        new(13, ExperimentResearchGroup.B, "platform.bollinger-macd-recovery", "DOGE/EUR", FixedStartingCash, 104869, "bollinger-macd-recovery-parameters@1", "phase5b-bollinger-macd-v1"),
-        new(14, ExperimentResearchGroup.C, "platform.donchian-volume-breakout", "ADA/EUR", FixedStartingCash, 104879, "donchian-volume-breakout-parameters@1", "phase5b-donchian-volume-v1"),
-        new(15, ExperimentResearchGroup.C, "platform.ema-volume-pullback", "XRP/EUR", FixedStartingCash, 104891, "ema-volume-pullback-parameters@1", "phase5b-ema-volume-v1")
+        new(10, ExperimentResearchGroup.C, "platform.regime-switching-ensemble", "ADA/EUR", FixedStartingCash, 104831, "regime-switching-ensemble-parameters@1", "phase5b-regime-v1")
     ];
 
     private readonly IPaperTrainingActivationRepository _repository;
@@ -222,6 +233,36 @@ public sealed class PaperTrainingActivationService
     }
 
     public static IReadOnlyList<PaperTrainingWorkerSlot> ApprovedSlots => s_catalog;
+
+    public async Task<PaperTrainingActivation> StartScannerAsync(
+        Guid ownerId,
+        Guid actorId,
+        RoleType actorRole,
+        PaperTrainingPrerequisites prerequisites,
+        CancellationToken cancellationToken = default)
+    {
+        if (actorRole is not (RoleType.User or RoleType.Administrator or RoleType.RiskOfficer))
+            throw new UnauthorizedAccessException("Only an owner, Administrator, or RiskOfficer may start paper training.");
+        if (actorRole == RoleType.User)
+            RequireOwner(ownerId, actorId);
+        ValidatePrerequisites(prerequisites);
+        var current = await _repository.GetAsync(ownerId, cancellationToken).ConfigureAwait(false);
+        if (current?.IsActive == true)
+            throw new InvalidOperationException("Paper training is already active for this owner.");
+
+        var active = new PaperTrainingActivation(
+            ownerId,
+            PaperTrainingActivationState.Active,
+            [],
+            prerequisites,
+            UtcNow(),
+            actorId,
+            []);
+        if (!await _repository.TrySaveAsync(active, current?.State, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Paper-training start changed concurrently; the scanner was not enabled.");
+        await AuditAsync(active, actorId, "PaperTrainingStarted", cancellationToken).ConfigureAwait(false);
+        return active;
+    }
 
     public async Task<PaperTrainingActivation> StartAsync(
         Guid ownerId, Guid actorId, RoleType actorRole, int requestedSlots, PaperTrainingPrerequisites prerequisites,

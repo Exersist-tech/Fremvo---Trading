@@ -1,5 +1,6 @@
 using System.Globalization;
 using Trading.Application.Experiments;
+using Trading.Domain.Experiments;
 using Trading.Domain.Market;
 using Trading.MarketData;
 
@@ -134,8 +135,8 @@ public sealed class PaperTrainingUniverseDiscoveryTests
             result.Slots.Count,
             result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(result.Slots.Count, result.Qualifications.Count);
-        Assert.Contains(result.Qualifications, item => item.Accepted);
-        Assert.Contains(result.Qualifications, item => item.PaperOnlyExploration);
+        Assert.DoesNotContain(result.Qualifications, item => item.Accepted);
+        Assert.All(result.Qualifications, item => Assert.True(item.PaperOnlyExploration));
         Assert.All(result.Qualifications, item =>
             Assert.NotEqual(item.Accepted, item.PaperOnlyExploration));
         Assert.All(result.Qualifications, item =>
@@ -171,23 +172,22 @@ public sealed class PaperTrainingUniverseDiscoveryTests
         Assert.Equal(10, result.Qualifications.Count);
         Assert.All(result.Qualifications, qualification =>
             Assert.True(qualification.Accepted || qualification.PaperOnlyExploration));
-        Assert.Contains(result.Qualifications, qualification => qualification.PaperOnlyExploration);
         Assert.Equal(
             PaperTrainingAutoSelectionService.ApprovedIntervals.Order(),
             result.Slots.Select(slot => slot.Interval).Distinct().Order());
-        Assert.Equal(
-            10,
-            result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.InRange(
+            result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count(),
+            1,
+            10);
         Assert.Equal(2, result.Slots.Select(slot => slot.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.All(
             result.Slots.GroupBy(slot => slot.StrategyId, StringComparer.Ordinal),
             group => Assert.True(group.Count() <= PaperTrainingAutoSelectionService.MaximumWorkersPerStrategy));
-        Assert.Contains(result.Slots, slot => slot.StrategyId is
-            "platform.rsi-macd-confluence"
-            or "platform.ema-rsi-trend"
-            or "platform.bollinger-macd-recovery"
-            or "platform.donchian-volume-breakout"
-            or "platform.ema-volume-pullback");
+        var approvedFamilies = ApprovedExperimentStrategyRegistry.CreatePlatformDefault()
+            .Definitions
+            .Select(definition => definition.FamilyId)
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.All(result.Slots, slot => Assert.Contains(slot.StrategyId, approvedFamilies));
     }
 
     [Fact]
@@ -223,7 +223,8 @@ public sealed class PaperTrainingUniverseDiscoveryTests
 
         Assert.Equal(10, result.Slots.Count);
         Assert.Equal(10, result.Slots.Select(slot => slot.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        Assert.Equal(10, result.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(result.Slots.GroupBy(slot => slot.StrategyId), group =>
+            Assert.InRange(group.Count(), 1, ExperimentWorker.MaxWorkersPerUser));
         Assert.Equal(
             PaperTrainingAutoSelectionService.ApprovedIntervals.Order(),
             result.Slots.Select(slot => slot.Interval).Distinct().Order());

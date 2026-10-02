@@ -64,8 +64,16 @@
   function formatPrice(value) {
     var n = Number(value);
     if (!isFinite(n)) { return String(value); }
-    var decimals = Math.abs(n) >= 100 ? 2 : Math.abs(n) >= 1 ? 4 : 8;
-    return n.toFixed(decimals);
+    return n.toLocaleString(undefined, {
+      maximumFractionDigits: Math.abs(n) > 0 && Math.abs(n) < 0.01 ? 8 : 2
+    });
+  }
+
+  function formatQuantity(value) {
+    var n = Number(value);
+    return isFinite(n)
+      ? n.toLocaleString(undefined, { maximumFractionDigits: 8 })
+      : String(value);
   }
 
   function formatTime(iso) {
@@ -78,7 +86,7 @@
   function formatSigned(value) {
     var n = Number(value);
     if (!isFinite(n)) { return String(value); }
-    return (n > 0 ? '+' : '') + formatPrice(n);
+    return (n > 0 ? '+' : '') + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
 
   function draw() {
@@ -550,16 +558,15 @@
     rows.forEach(function (position) {
       var tr = document.createElement('tr');
 
-      // Every money figure below is computed on the server in decimal and
-      // shown as received. Nothing here recalculates a profit or loss, so the
-      // page cannot disagree with the platform's own books.
+      // Every money figure below is computed on the server and rounded here
+      // for display only.
       var unrealised = position.unrealisedPnl;
       var percent = position.unrealisedPercent;
 
       var cells = [
         position.symbol,
         isShort(position.direction) ? 'Short' : 'Long',
-        position.quantity,
+        formatQuantity(position.quantity),
         formatPrice(position.entryPrice),
         position.markPrice === null || position.markPrice === undefined
           ? 'unavailable'
@@ -661,8 +668,8 @@
       var values = [
         stateLabel,
         order.side,
-        order.quantity,
-        order.filledQuantity || 0,
+        formatQuantity(order.quantity),
+        formatQuantity(order.filledQuantity || 0),
         order.price === null || order.price === undefined ? 'unavailable' : formatPrice(order.price),
         order.createdAtUtc ? formatTime(order.createdAtUtc) : 'unknown',
         order.requiresReconciliation ? 'Required - do not resubmit' : 'Current'
@@ -1029,7 +1036,7 @@
           var label = document.createElement('span');
           label.textContent = item[0];
           var value = document.createElement('strong');
-          value.textContent = item[1] + ' ' + target;
+          value.textContent = formatQuantity(item[1]) + ' ' + target;
           row.appendChild(label);
           row.appendChild(value);
           accountRow.appendChild(row);

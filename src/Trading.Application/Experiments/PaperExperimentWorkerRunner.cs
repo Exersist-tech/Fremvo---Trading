@@ -17,22 +17,51 @@ public enum ExperimentAnalysisOutcome
     Blocked
 }
 
+public enum ExperimentSignalDirection
+{
+    Bearish = -1,
+    Neutral = 0,
+    Bullish = 1
+}
+
+public sealed record ExperimentSignalCheck(
+    string Id,
+    ExperimentSignalDirection Direction,
+    string Rationale);
+
+public sealed record ExperimentConsensusEvidence(
+    IReadOnlyList<ExperimentSignalCheck> Checks,
+    int RequiredAgreement,
+    bool MandatoryVeto,
+    string? VetoReason)
+{
+    public int BullishCount => Checks.Count(check => check.Direction == ExperimentSignalDirection.Bullish);
+    public int BearishCount => Checks.Count(check => check.Direction == ExperimentSignalDirection.Bearish);
+}
+
 /// <summary>
 /// A research observation only. It deliberately has no order, intent, position, or execution data.
 /// </summary>
 public sealed class ExperimentAnalysisResult
 {
-    private ExperimentAnalysisResult(ExperimentAnalysisOutcome outcome, string reason, decimal? value, ExperimentDecisionEvidence? evidence = null)
+    private ExperimentAnalysisResult(
+        ExperimentAnalysisOutcome outcome,
+        string reason,
+        decimal? value,
+        ExperimentConsensusEvidence? consensus = null,
+        ExperimentDecisionEvidence? evidence = null)
     {
         Outcome = outcome;
         Reason = reason;
         Value = value;
+        Consensus = consensus;
         Evidence = evidence;
     }
 
     public ExperimentAnalysisOutcome Outcome { get; }
     public string Reason { get; }
     public decimal? Value { get; }
+    public ExperimentConsensusEvidence? Consensus { get; }
     /// <summary>Present only when this result was returned by the approved runner.</summary>
     public ExperimentDecisionEvidence? Evidence { get; }
 
@@ -41,7 +70,56 @@ public sealed class ExperimentAnalysisResult
     public static ExperimentAnalysisResult Blocked(string reason) => new(ExperimentAnalysisOutcome.Blocked, reason, null);
 
     internal ExperimentAnalysisResult Attest(ExperimentDecisionEvidence evidence) =>
-        new(Outcome, Reason, Value, evidence);
+        new(Outcome, Reason, Value, Consensus, evidence);
+
+    internal ExperimentAnalysisResult WithOutcome(
+        ExperimentAnalysisOutcome outcome,
+        string reason,
+        decimal? value) =>
+        new(outcome, reason, value, Consensus, Evidence);
+
+    internal static ExperimentAnalysisResult FromConsensus(
+        string familyId,
+        IReadOnlyList<ExperimentSignalCheck> checks,
+        int requiredAgreement,
+        bool mandatoryVeto = false,
+        string? vetoReason = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(familyId);
+        ArgumentNullException.ThrowIfNull(checks);
+        if (checks.Count != 5)
+            throw new ArgumentException("An approved consensus strategy must emit exactly five signal checks.", nameof(checks));
+        if (requiredAgreement is < 4 or > 5)
+            throw new ArgumentOutOfRangeException(nameof(requiredAgreement), "Consensus requires four or five agreeing checks.");
+
+        var evidence = new ExperimentConsensusEvidence(checks, requiredAgreement, mandatoryVeto, vetoReason);
+        if (mandatoryVeto)
+            return new ExperimentAnalysisResult(
+                ExperimentAnalysisOutcome.Blocked,
+                $"{familyId}: mandatory safety veto: {vetoReason ?? "unspecified unsafe evidence"}.",
+                null,
+                evidence);
+
+        if (evidence.BullishCount >= requiredAgreement)
+            return new ExperimentAnalysisResult(
+                ExperimentAnalysisOutcome.Analyzed,
+                $"{familyId}: bullish consensus {evidence.BullishCount}/5 passed the {requiredAgreement}/5 threshold.",
+                evidence.BullishCount / 5m,
+                evidence);
+
+        if (evidence.BearishCount >= requiredAgreement)
+            return new ExperimentAnalysisResult(
+                ExperimentAnalysisOutcome.Analyzed,
+                $"{familyId}: bearish consensus {evidence.BearishCount}/5 passed the {requiredAgreement}/5 threshold.",
+                -evidence.BearishCount / 5m,
+                evidence);
+
+        return new ExperimentAnalysisResult(
+            ExperimentAnalysisOutcome.NoCondition,
+            $"{familyId}: consensus did not pass (bullish {evidence.BullishCount}/5, bearish {evidence.BearishCount}/5; requires {requiredAgreement}/5).",
+            null,
+            evidence);
+    }
 }
 
 /// <summary>Identifies one compiled, platform-owned research evaluator.</summary>
@@ -100,11 +178,6 @@ public sealed class ApprovedExperimentStrategyRegistry
             new RsiPullbackExperimentAdapter(),
             new MacdVolumeAccelerationExperimentAdapter(),
             new VolatilityCompressionBreakoutExperimentAdapter(),
-            new RsiMacdConfluenceExperimentAdapter(),
-            new EmaRsiTrendExperimentAdapter(),
-            new BollingerMacdRecoveryExperimentAdapter(),
-            new DonchianVolumeBreakoutExperimentAdapter(),
-            new EmaVolumePullbackExperimentAdapter(),
             new SurvivorshipAwareMomentumRotationExperimentAdapter(),
             new RelativeStrengthPullbackRotationExperimentAdapter(),
             new SessionConditionedBreakoutExperimentAdapter(),
@@ -122,9 +195,25 @@ public sealed class ApprovedExperimentStrategyRegistry
         if (string.IsNullOrWhiteSpace(familyId))
             throw new ArgumentException("A strategy family is required.", nameof(familyId));
         ArgumentNullException.ThrowIfNull(series);
-        if (!_evaluators.TryGetValue((familyId.Trim(), 1), out var evaluator))
+        var evaluator = _evaluators.Values.SingleOrDefault(candidate =>
+            candidate.Definition.FamilyId.Equals(familyId.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (evaluator is null)
             return ExperimentAnalysisResult.Blocked("The strategy is not in the approved experiment registry.");
-        return evaluator.Evaluate(series, parametersJson);
+        return evaluator.Evaluate(ExperimentStrategySeriesSet.Single(series), parametersJson);
+    }
+
+    public ExperimentAnalysisResult EvaluateProfile(
+        string familyId,
+        ExperimentCandleSeries regime,
+        ExperimentCandleSeries signal,
+        ExperimentCandleSeries execution,
+        string parametersJson)
+    {
+        var evaluator = _evaluators.Values.SingleOrDefault(candidate =>
+            candidate.Definition.FamilyId.Equals(familyId, StringComparison.OrdinalIgnoreCase));
+        return evaluator is null
+            ? ExperimentAnalysisResult.Blocked("The strategy is not in the approved experiment registry.")
+            : evaluator.Evaluate(new ExperimentStrategySeriesSet(regime, signal, execution), parametersJson);
     }
 
     private sealed class ExperimentStrategyKeyComparer : IEqualityComparer<(string FamilyId, int Version)>
@@ -142,6 +231,7 @@ public sealed class ApprovedExperimentStrategyRegistry
 internal interface IApprovedExperimentStrategyEvaluator
 {
     ApprovedExperimentStrategyDefinition Definition { get; }
+    ExperimentAnalysisResult Evaluate(ExperimentStrategySeriesSet series, string parametersJson);
     ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson);
 }
 
@@ -156,24 +246,44 @@ internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEv
     protected Phase5BExperimentAdapter(string familyId, string schemaId, string requiredEvidence)
     {
         Definition = new ApprovedExperimentStrategyDefinition(
-            familyId, 1, schemaId, 1, Fingerprint($"{familyId}|approved-parameters-v1"),
-            Fingerprint($"{familyId}|phase-5b-adapter-v1"));
+            familyId, 2, schemaId, 2, Fingerprint($"{familyId}|exact-approved-parameters-v2"),
+            Fingerprint($"{familyId}|exact-consensus-rules-v2"));
         RequiredEvidence = requiredEvidence;
     }
 
     public ApprovedExperimentStrategyDefinition Definition { get; }
     private string RequiredEvidence { get; }
 
-    public virtual ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    public virtual ExperimentAnalysisResult Evaluate(ExperimentStrategySeriesSet series, string parametersJson)
     {
         ArgumentNullException.ThrowIfNull(series);
-        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        return ExperimentAnalysisResult.Blocked(
-            $"Approved {Definition.FamilyId} input is unavailable: {RequiredEvidence}. No substitute input or family is used.");
+        return ApprovedConsensusStrategyRules.Evaluate(Definition.FamilyId, series, parametersJson);
     }
+
+    public virtual ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson) =>
+        Evaluate(ExperimentStrategySeriesSet.Single(series), parametersJson);
 
     protected static string Fingerprint(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+
+    protected ExperimentAnalysisResult Consensus(
+        IReadOnlyList<(string Id, bool Bullish, bool Bearish, string Rationale)> checks,
+        int requiredAgreement = 4)
+    {
+        var latestIsSafe = checks.Count == 5;
+        var signalChecks = checks.Select(check => new ExperimentSignalCheck(
+            check.Id,
+            check.Bullish ? ExperimentSignalDirection.Bullish
+                : check.Bearish ? ExperimentSignalDirection.Bearish
+                : ExperimentSignalDirection.Neutral,
+            check.Rationale)).ToArray();
+        return ExperimentAnalysisResult.FromConsensus(
+            Definition.FamilyId,
+            signalChecks,
+            requiredAgreement,
+            !latestIsSafe,
+            latestIsSafe ? null : "the evaluator did not produce exactly five independent checks");
+    }
 }
 
 internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentAdapter
@@ -185,16 +295,36 @@ internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentA
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
         if (series.Candles.Count < 3)
-            return ExperimentAnalysisResult.Blocked("EMA continuation requires three exact closed signal candles.");
-
-        // This intentionally uses only the final three persisted, chronological closed candles.
-        // No current/forming candle and no later observation is read.
-        var closes = series.Candles.TakeLast(3).Select(candle => candle.Close).ToArray();
-        var fast = (closes[1] * 2m + closes[0]) / 3m;
-        var latest = (closes[2] * 2m + closes[1]) / 3m;
-        return latest > fast && closes[2] > closes[1]
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle EMA continuation is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle EMA continuation is not bullish.");
+            return ExperimentAnalysisResult.Blocked("EMA continuation requires at least three exact closed signal candles.");
+        if (series.Candles.Count < 27)
+        {
+            var shortCurrent = series.Candles[^1];
+            var shortPrior = series.Candles[^2];
+            var oldest = series.Candles[^3];
+            return Consensus(
+            [
+                ("short-trend", shortCurrent.Close > oldest.Close, shortCurrent.Close < oldest.Close, "Three-candle close direction."),
+                ("latest-momentum", shortCurrent.Close > shortPrior.Close, shortCurrent.Close < shortPrior.Close, "Latest closed-candle momentum."),
+                ("higher-low", shortCurrent.Low > shortPrior.Low, shortCurrent.High < shortPrior.High, "Latest structure direction."),
+                ("candle-direction", shortCurrent.Close >= shortCurrent.Open, shortCurrent.Close < shortCurrent.Open, "Latest candle body direction."),
+                ("volume-valid", shortCurrent.Volume > 0m, false, "Latest candle has positive reported volume.")
+            ]);
+        }
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var priorFast = new ExponentialMovingAverageCalculator(12).Calculate(prior).Value!.Value;
+        var priorSlow = new ExponentialMovingAverageCalculator(26).Calculate(prior).Value!.Value;
+        var current = series.Candles[^1];
+        var baselineVolume = prior.TakeLast(20).Average(candle => candle.Volume);
+        return Consensus(
+        [
+            ("ema-order", fast > slow, fast < slow, "Fast EMA is directionally ordered against the slow EMA."),
+            ("slow-slope", slow > priorSlow, slow < priorSlow, "Slow EMA slope establishes the directional regime."),
+            ("price-structure", current.Close > slow, current.Close < slow, "Close remains on the directional side of slow EMA."),
+            ("pullback-resumption", prior[^1].Close <= priorFast && current.Close > fast, prior[^1].Close >= priorFast && current.Close < fast, "Closed candle resumes after a fast-EMA pullback."),
+            ("volume-participation", current.Volume >= baselineVolume, false, "Volume meets its rolling participation baseline.")
+        ]);
     }
 }
 internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperimentAdapter
@@ -205,12 +335,20 @@ internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperim
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        if (series.Candles.Count < 21)
-            return ExperimentAnalysisResult.Blocked("Donchian breakout requires 21 exact closed signal candles.");
-        var priorHigh = series.Candles.TakeLast(21).Take(20).Max(candle => candle.High);
-        return series.Candles[^1].Close > priorHigh
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Donchian breakout is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle Donchian breakout is not bullish.");
+        if (series.Candles.Count < 27)
+            return ExperimentAnalysisResult.Blocked("Donchian breakout requires 27 exact closed signal candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var current = series.Candles[^1];
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        return Consensus(
+        [
+            ("short-channel", current.Close > prior.TakeLast(10).Max(candle => candle.High), current.Close < prior.TakeLast(10).Min(candle => candle.Low), "Close breaks the short channel."),
+            ("medium-channel", current.Close > prior.TakeLast(15).Max(candle => candle.High), current.Close < prior.TakeLast(15).Min(candle => candle.Low), "Close breaks the medium channel."),
+            ("long-channel", current.Close > prior.TakeLast(20).Max(candle => candle.High), current.Close < prior.TakeLast(20).Min(candle => candle.Low), "Close breaks the long channel."),
+            ("volume", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Breakout volume exceeds its rolling baseline."),
+            ("trend", fast > slow, fast < slow, "EMA structure confirms breakout direction.")
+        ]);
     }
 }
 internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimentAdapter
@@ -221,13 +359,23 @@ internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimen
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        var bands = new BollingerBandsCalculator(20).Calculate(series.Candles);
-        if (!bands.IsReady || bands.Value is null)
-            return ExperimentAnalysisResult.Blocked("Bollinger mean reversion requires 20 exact closed signal candles.");
+        if (series.Candles.Count < 27)
+            return ExperimentAnalysisResult.Blocked("Bollinger mean reversion requires 27 exact closed signal candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var priorBands = new BollingerBandsCalculator(20).Calculate(prior).Value!.Value;
+        var bands = new BollingerBandsCalculator(20).Calculate(series.Candles).Value!.Value;
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles).Value!.Value;
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
         var current = series.Candles[^1];
-        return current.Close <= bands.Value.Value.Lower && current.Close > current.Open
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Bollinger reversal is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle Bollinger reversal is not bullish.");
+        return Consensus(
+        [
+            ("prior-band-extension", prior[^1].Close <= priorBands.Lower, prior[^1].Close >= priorBands.Upper, "Prior close extended beyond a volatility band."),
+            ("band-reentry", current.Close > bands.Lower && current.Close < bands.Middle, current.Close < bands.Upper && current.Close > bands.Middle, "Current close re-enters toward the band centre."),
+            ("rsi-extreme", rsi <= 40m, rsi >= 60m, "RSI confirms a directional range extreme."),
+            ("reversal-candle", current.Close > current.Open, current.Close < current.Open, "Closed candle reverses direction."),
+            ("ranging-regime", Math.Abs(fast - slow) / current.Close <= 0.01m, false, "EMA separation remains within the approved ranging threshold.")
+        ]);
     }
 }
 internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
@@ -238,12 +386,22 @@ internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles);
-        if (!rsi.IsReady || rsi.Value is null)
-            return ExperimentAnalysisResult.Blocked("RSI pullback requires 15 exact closed signal candles.");
-        return rsi.Value.Value <= 30m && series.Candles[^1].Close > series.Candles[^2].Close
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle RSI pullback is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle RSI pullback is not bullish.");
+        if (series.Candles.Count < 27)
+            return ExperimentAnalysisResult.Blocked("RSI pullback requires 27 exact closed signal candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles).Value!.Value;
+        var priorRsi = new RelativeStrengthIndexCalculator(14).Calculate(prior).Value!.Value;
+        var current = series.Candles[^1];
+        return Consensus(
+        [
+            ("trend-order", fast > slow, fast < slow, "EMA order establishes the higher-direction trend proxy."),
+            ("structural-side", current.Close > slow, current.Close < slow, "Price remains above structural invalidation."),
+            ("pullback-zone", rsi is >= 30m and <= 50m, rsi is >= 50m and <= 70m, "RSI is within the bounded pullback zone."),
+            ("rsi-turn", rsi > priorRsi, rsi < priorRsi, "RSI turns in the continuation direction."),
+            ("price-resumption", current.Close > prior[^1].Close, current.Close < prior[^1].Close, "Closed price resumes in the trend direction.")
+        ]);
     }
 }
 internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimentAdapter
@@ -254,16 +412,21 @@ internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimen
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        if (series.Candles.Count < 26)
-            return ExperimentAnalysisResult.Blocked("MACD volume acceleration requires 26 exact closed signal candles.");
-        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles);
-        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles);
-        if (!fast.IsReady || !slow.IsReady || fast.Value is null || slow.Value is null)
-            return ExperimentAnalysisResult.Blocked("MACD inputs are unavailable from the exact closed candle series.");
-        var lastTwentyVolumes = series.Candles.TakeLast(21).Take(20).Select(candle => candle.Volume).ToArray();
-        return fast.Value.Value > slow.Value.Value && series.Candles[^1].Volume > lastTwentyVolumes.Average()
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle MACD-volume acceleration is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle MACD-volume acceleration is not bullish.");
+        if (series.Candles.Count < 35)
+            return ExperimentAnalysisResult.Blocked("MACD volume acceleration requires 35 exact closed signal candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var macd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(series.Candles).Value!.Value;
+        var priorMacd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(prior).Value!.Value;
+        var trend = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var current = series.Candles[^1];
+        return Consensus(
+        [
+            ("macd-signal", macd.Line > macd.Signal, macd.Line < macd.Signal, "MACD line is directionally ordered against signal."),
+            ("histogram-sign", macd.Histogram > 0m, macd.Histogram < 0m, "MACD histogram confirms direction."),
+            ("histogram-acceleration", macd.Histogram > priorMacd.Histogram, macd.Histogram < priorMacd.Histogram, "MACD histogram accelerates directionally."),
+            ("trend-average", current.Close > trend, current.Close < trend, "Price remains on the directional side of trend EMA."),
+            ("volume", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Volume exceeds its rolling baseline.")
+        ]);
     }
 }
 internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BExperimentAdapter
@@ -274,138 +437,124 @@ internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BEx
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        if (series.Candles.Count < 21)
-            return ExperimentAnalysisResult.Blocked("Volatility compression breakout requires 21 exact closed signal candles.");
-        var recentRanges = series.Candles.TakeLast(5).Select(candle => candle.High - candle.Low).ToArray();
-        var priorRanges = series.Candles.TakeLast(21).Take(16).Select(candle => candle.High - candle.Low).ToArray();
-        var priorHigh = series.Candles.TakeLast(21).Take(20).Max(candle => candle.High);
-        return recentRanges.Average() < priorRanges.Average() && series.Candles[^1].Close > priorHigh
-            ? ExperimentAnalysisResult.Analyzed("Approved closed-candle volatility compression breakout is bullish.", 1m)
-            : ExperimentAnalysisResult.NoCondition("Approved closed-candle volatility compression breakout is not bullish.");
-    }
-}
-internal sealed class RsiMacdConfluenceExperimentAdapter : Phase5BExperimentAdapter
-{
-    public RsiMacdConfluenceExperimentAdapter() : base("platform.rsi-macd-confluence", "rsi-macd-confluence-parameters", "approved RSI and MACD closed signal series") { }
-
-    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
-    {
-        ArgumentNullException.ThrowIfNull(series);
-        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles);
-        var macd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(series.Candles);
-        if (!rsi.IsReady || rsi.Value is null || !macd.IsReady || macd.Value is null)
-            return ExperimentAnalysisResult.Blocked("RSI-MACD confluence requires 34 exact closed signal candles.");
+        if (series.Candles.Count < 27)
+            return ExperimentAnalysisResult.Blocked("Volatility compression breakout requires 27 exact closed signal candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var recentRanges = prior.TakeLast(5).Select(candle => candle.High - candle.Low).ToArray();
+        var baselineRanges = prior.TakeLast(20).Take(15).Select(candle => candle.High - candle.Low).ToArray();
         var current = series.Candles[^1];
-        return rsi.Value.Value is >= 40m and <= 65m
-            && macd.Value.Value.Line > macd.Value.Value.Signal
-            && macd.Value.Value.Histogram > 0m
-            && current.Close > series.Candles[^2].Close
-                ? ExperimentAnalysisResult.Analyzed("Approved closed-candle RSI and MACD confluence is bullish.", 1m)
-                : ExperimentAnalysisResult.NoCondition("Approved closed-candle RSI and MACD confluence is not bullish.");
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        return Consensus(
+        [
+            ("range-compression", recentRanges.Average() < baselineRanges.Average() * 0.75m, false, "Recent true ranges are compressed against baseline."),
+            ("channel-break", current.Close > prior.TakeLast(20).Max(candle => candle.High), current.Close < prior.TakeLast(20).Min(candle => candle.Low), "Close breaks the pre-compression range."),
+            ("volume-expansion", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Breakout volume expands above baseline."),
+            ("trend-order", fast > slow, fast < slow, "EMA structure confirms direction."),
+            ("candle-direction", current.Close > current.Open, current.Close < current.Open, "Breakout candle closes directionally.")
+        ]);
     }
 }
-internal sealed class EmaRsiTrendExperimentAdapter : Phase5BExperimentAdapter
+internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public EmaRsiTrendExperimentAdapter() : base("platform.ema-rsi-trend", "ema-rsi-trend-parameters", "approved EMA trend and RSI closed signal series") { }
+    public SurvivorshipAwareMomentumRotationExperimentAdapter() : base("platform.cross-sectional-momentum-rotation", "cross-sectional-momentum-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles);
-        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles);
-        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles);
-        if (!fast.IsReady || fast.Value is null || !slow.IsReady || slow.Value is null || !rsi.IsReady || rsi.Value is null)
-            return ExperimentAnalysisResult.Blocked("EMA-RSI trend requires 26 exact closed signal candles.");
-        return fast.Value.Value > slow.Value.Value
-            && rsi.Value.Value is >= 50m and <= 72m
-            && series.Candles[^1].Close > fast.Value.Value
-                ? ExperimentAnalysisResult.Analyzed("Approved closed-candle EMA trend and RSI regime are bullish.", 1m)
-                : ExperimentAnalysisResult.NoCondition("Approved closed-candle EMA trend and RSI regime are not bullish.");
-    }
-}
-internal sealed class BollingerMacdRecoveryExperimentAdapter : Phase5BExperimentAdapter
-{
-    public BollingerMacdRecoveryExperimentAdapter() : base("platform.bollinger-macd-recovery", "bollinger-macd-recovery-parameters", "approved Bollinger recovery and MACD closed signal series") { }
-
-    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
-    {
-        ArgumentNullException.ThrowIfNull(series);
-        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        if (series.Candles.Count < 35)
-            return ExperimentAnalysisResult.Blocked("Bollinger-MACD recovery requires 35 exact closed signal candles.");
-        var priorCandles = series.Candles.Take(series.Candles.Count - 1).ToArray();
-        var priorBands = new BollingerBandsCalculator(20).Calculate(priorCandles);
-        var currentBands = new BollingerBandsCalculator(20).Calculate(series.Candles);
-        var macd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(series.Candles);
-        if (priorBands.Value is null || currentBands.Value is null || macd.Value is null)
-            return ExperimentAnalysisResult.Blocked("Bollinger-MACD recovery inputs are unavailable.");
-        return priorCandles[^1].Close <= priorBands.Value.Value.Middle
-            && series.Candles[^1].Close > currentBands.Value.Value.Middle
-            && macd.Value.Value.Histogram > 0m
-                ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Bollinger recovery is confirmed by MACD.", 1m)
-                : ExperimentAnalysisResult.NoCondition("Approved closed-candle Bollinger-MACD recovery is not bullish.");
-    }
-}
-internal sealed class DonchianVolumeBreakoutExperimentAdapter : Phase5BExperimentAdapter
-{
-    public DonchianVolumeBreakoutExperimentAdapter() : base("platform.donchian-volume-breakout", "donchian-volume-breakout-parameters", "approved Donchian and volume closed signal series") { }
-
-    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
-    {
-        ArgumentNullException.ThrowIfNull(series);
-        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
-        if (series.Candles.Count < 21)
-            return ExperimentAnalysisResult.Blocked("Donchian-volume breakout requires 21 exact closed signal candles.");
-        var prior = series.Candles.TakeLast(21).Take(20).ToArray();
+        if (series.Candles.Count < 31)
+            return ExperimentAnalysisResult.Blocked("Cross-sectional momentum requires 31 exact closed candles and scanner universe ranking.");
         var current = series.Candles[^1];
-        return current.Close > prior.Max(candle => candle.High)
-            && current.Volume > prior.Average(candle => candle.Volume)
-                ? ExperimentAnalysisResult.Analyzed("Approved closed-candle Donchian breakout has volume confirmation.", 1m)
-                : ExperimentAnalysisResult.NoCondition("Approved closed-candle Donchian-volume breakout is not bullish.");
+        decimal Return(int periods) => current.Close / series.Candles[^(periods + 1)].Close - 1m;
+        return Consensus(
+        [
+            ("short-momentum", Return(5) > 0m, Return(5) < 0m, "Five-period momentum is positive."),
+            ("medium-momentum", Return(10) > 0m, Return(10) < 0m, "Ten-period momentum is positive."),
+            ("long-momentum", Return(30) > 0m, Return(30) < 0m, "Thirty-period momentum is positive."),
+            ("trend-persistence", series.Candles[^1].Close > series.Candles[^6].Close, series.Candles[^1].Close < series.Candles[^6].Close, "Momentum persists through the latest window."),
+            ("liquidity", current.Volume > series.Candles.TakeLast(20).Average(candle => candle.Volume) * 0.5m, false, "Volume remains above the minimum rolling participation threshold.")
+        ], 5);
     }
 }
-internal sealed class EmaVolumePullbackExperimentAdapter : Phase5BExperimentAdapter
+internal sealed class RelativeStrengthPullbackRotationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public EmaVolumePullbackExperimentAdapter() : base("platform.ema-volume-pullback", "ema-volume-pullback-parameters", "approved EMA pullback and volume closed signal series") { }
+    public RelativeStrengthPullbackRotationExperimentAdapter() : base("platform.relative-strength-pullback-rotation", "relative-strength-pullback-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 31)
+            return ExperimentAnalysisResult.Blocked("Relative-strength pullback requires 31 exact closed candles and scanner universe ranking.");
+        var current = series.Candles[^1];
+        var high = series.Candles.TakeLast(20).Max(candle => candle.High);
+        var pullback = high == 0m ? 0m : (high - current.Close) / high;
+        var ema = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles).Value!.Value;
+        return Consensus(
+        [
+            ("relative-momentum", current.Close > series.Candles[^31].Close, current.Close < series.Candles[^31].Close, "Long-window momentum remains positive."),
+            ("bounded-pullback", pullback is >= 0.03m and <= 0.10m, false, "Pullback is inside the approved three-to-ten-percent band."),
+            ("trend-support", current.Close > ema, current.Close < ema, "Price remains above trend support."),
+            ("rsi-recovery-zone", rsi is >= 35m and <= 55m, rsi >= 65m, "RSI remains in the approved pullback recovery zone."),
+            ("closed-recovery", current.Close > series.Candles[^2].Close, current.Close < series.Candles[^2].Close, "Latest closed candle turns upward.")
+        ], 5);
+    }
+}
+internal sealed class SessionConditionedBreakoutExperimentAdapter : Phase5BExperimentAdapter
+{
+    public SessionConditionedBreakoutExperimentAdapter() : base("platform.session-conditioned-breakout", "session-conditioned-breakout-parameters", "approved session profile and regime, signal, and execution timeframe series") { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
         ArgumentNullException.ThrowIfNull(series);
         _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
         if (series.Candles.Count < 27)
-            return ExperimentAnalysisResult.Blocked("EMA-volume pullback requires 27 exact closed signal candles.");
-        var priorCandles = series.Candles.Take(series.Candles.Count - 1).ToArray();
-        var priorFast = new ExponentialMovingAverageCalculator(12).Calculate(priorCandles);
-        var currentFast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles);
-        var currentSlow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles);
-        if (priorFast.Value is null || currentFast.Value is null || currentSlow.Value is null)
-            return ExperimentAnalysisResult.Blocked("EMA-volume pullback inputs are unavailable.");
+            return ExperimentAnalysisResult.Blocked("Session breakout requires 27 exact closed candles.");
         var current = series.Candles[^1];
-        return currentFast.Value.Value > currentSlow.Value.Value
-            && priorCandles[^1].Close <= priorFast.Value.Value
-            && current.Close > currentFast.Value.Value
-            && current.Volume > priorCandles.TakeLast(20).Average(candle => candle.Volume)
-                ? ExperimentAnalysisResult.Analyzed("Approved closed-candle EMA pullback resumed with volume confirmation.", 1m)
-                : ExperimentAnalysisResult.NoCondition("Approved closed-candle EMA-volume pullback is not bullish.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var local = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(current.CloseTimeUtc, "America/New_York");
+        var inSession = local.DayOfWeek is >= DayOfWeek.Monday and <= DayOfWeek.Friday
+            && local.TimeOfDay >= TimeSpan.FromHours(9.5)
+            && local.TimeOfDay <= TimeSpan.FromHours(16);
+        return Consensus(
+        [
+            ("versioned-session", inSession, false, "Close belongs to the approved America/New_York cash-session profile."),
+            ("range-break", current.Close > prior.TakeLast(20).Max(candle => candle.High), current.Close < prior.TakeLast(20).Min(candle => candle.Low), "Close breaks the prior session range."),
+            ("trend-order", fast > slow, fast < slow, "EMA regime confirms breakout direction."),
+            ("volume", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Breakout volume exceeds baseline."),
+            ("candle-direction", current.Close > current.Open, current.Close < current.Open, "Breakout candle closes directionally.")
+        ]);
     }
-}
-internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase5BExperimentAdapter
-{
-    public SurvivorshipAwareMomentumRotationExperimentAdapter() : base("platform.cross-sectional-momentum-rotation", "cross-sectional-momentum-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
-}
-internal sealed class RelativeStrengthPullbackRotationExperimentAdapter : Phase5BExperimentAdapter
-{
-    public RelativeStrengthPullbackRotationExperimentAdapter() : base("platform.relative-strength-pullback-rotation", "relative-strength-pullback-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
-}
-internal sealed class SessionConditionedBreakoutExperimentAdapter : Phase5BExperimentAdapter
-{
-    public SessionConditionedBreakoutExperimentAdapter() : base("platform.session-conditioned-breakout", "session-conditioned-breakout-parameters", "approved session profile and regime, signal, and execution timeframe series") { }
 }
 internal sealed class RegimeSwitchingEnsembleExperimentAdapter : Phase5BExperimentAdapter
 {
     public RegimeSwitchingEnsembleExperimentAdapter() : base("platform.regime-switching-ensemble", "regime-switching-ensemble-parameters", "approved classifier output and component observations") { }
+
+    public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
+    {
+        ArgumentNullException.ThrowIfNull(series);
+        _ = parametersJson ?? throw new ArgumentNullException(nameof(parametersJson));
+        if (series.Candles.Count < 35)
+            return ExperimentAnalysisResult.Blocked("Regime consensus requires 35 exact closed candles.");
+        var prior = series.Candles.Take(series.Candles.Count - 1).ToArray();
+        var current = series.Candles[^1];
+        var fast = new ExponentialMovingAverageCalculator(12).Calculate(series.Candles).Value!.Value;
+        var slow = new ExponentialMovingAverageCalculator(26).Calculate(series.Candles).Value!.Value;
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(series.Candles).Value!.Value;
+        var macd = new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(series.Candles).Value!.Value;
+        return Consensus(
+        [
+            ("trend-component", fast > slow, fast < slow, "Trend component direction."),
+            ("momentum-component", macd.Histogram > 0m, macd.Histogram < 0m, "Momentum component direction."),
+            ("strength-component", rsi > 50m, rsi < 50m, "Relative-strength component direction."),
+            ("price-component", current.Close > prior[^1].Close, current.Close < prior[^1].Close, "Closed-price component direction."),
+            ("participation-component", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Participation component confirms the regime.")
+        ], 5);
+    }
 }
 
 /// <summary>
@@ -477,24 +626,28 @@ public sealed class PaperExperimentWorkerRunner
         }
 
         var requirements = approval.Requirements;
-        var interval = requirements?.TimeframeConfiguration?.Signal;
-        if (interval is null)
+        var timeframes = requirements?.TimeframeConfiguration;
+        if (timeframes is null)
         {
             return ExperimentAnalysisResult.Blocked("Approved timeframe roles are required.");
         }
 
-        var seriesResult = await _candles.GetClosedSeriesAsync(
-            new ExperimentCandleSeriesRequest(worker.MarketSymbol, interval.Value, asOfUtc, requirements!.MinimumClosedHistoryCandles),
+        var seriesSet = await LoadSeriesSetAsync(
+            worker.MarketSymbol,
+            timeframes,
+            asOfUtc,
+            Math.Max(requirements!.MinimumClosedHistoryCandles, ApprovedConsensusStrategyProfiles.RequiredHistory),
             cancellationToken).ConfigureAwait(false);
-        if (!seriesResult.IsAvailable || seriesResult.Series is null)
+        if (seriesSet.Series is null)
         {
-            return ExperimentAnalysisResult.Blocked($"Closed candle evidence is unavailable: {seriesResult.BlockReason}.");
+            return ExperimentAnalysisResult.Blocked($"Closed candle evidence is unavailable: {seriesSet.BlockReason}.");
         }
 
         var result = await EvaluateSeriesAsync(
+            worker.UserId,
             definition,
             evaluator,
-            seriesResult.Series,
+            seriesSet.Series,
             assignment.Provenance,
             worker.StrategyParameters,
             cancellationToken).ConfigureAwait(false);
@@ -503,7 +656,7 @@ public sealed class PaperExperimentWorkerRunner
         {
             result = ExperimentAnalysisResult.Blocked($"{definition.FamilyId}: {result.Reason}");
         }
-        var candle = seriesResult.Series.Candles[^1];
+        var candle = seriesSet.Series.Signal.Candles[^1];
         return result.Attest(new ExperimentDecisionEvidence(
             worker.UserId,
             worker.Id,
@@ -518,7 +671,7 @@ public sealed class PaperExperimentWorkerRunner
             candle.Interval,
             candle.OpenTimeUtc,
             candle.CloseTimeUtc,
-            FingerprintSeries(seriesResult.Series)));
+            FingerprintAnalysis(seriesSet.Series, result)));
     }
 
     public async Task<ExperimentAnalysisResult> AnalyzeAcrossPaperTimeframesAsync(
@@ -528,105 +681,37 @@ public sealed class PaperExperimentWorkerRunner
         DateTimeOffset asOfUtc,
         CancellationToken cancellationToken = default)
     {
-        var primary = await AnalyzeAsync(
+        return await AnalyzeAsync(
             worker,
             configuration,
             assignment,
             asOfUtc,
             cancellationToken).ConfigureAwait(false);
-        if (primary.Evidence is null || primary.Outcome == ExperimentAnalysisOutcome.Blocked)
-            return primary;
-
-        var requirements = assignment.Provenance.Approval.Requirements;
-        if (requirements is null
-            || PaperTrainingAutoSelectionService.ApprovedIntervals.Any(interval =>
-                !requirements.AllowedIntervals.Contains(interval)))
-            return ExperimentAnalysisResult
-                .Blocked("All approved paper-training timeframes are required.")
-                .Attest(primary.Evidence);
-        if (!_registry.TryResolve(
-                assignment.Provenance.Approval.StrategyVersion.Identity,
-                out var evaluator)
-            || evaluator is null)
-            return ExperimentAnalysisResult
-                .Blocked("The approved family/version has no platform evaluator.")
-                .Attest(primary.Evidence);
-
-        var supportingOutcomes = new List<(CandleInterval Interval, ExperimentAnalysisOutcome Outcome)>();
-        var contextFingerprints = new List<string> { primary.Evidence.ContextFingerprint };
-        var primaryCloseUtc = primary.Evidence.AsOfUtc;
-        foreach (var interval in PaperTrainingAutoSelectionService.ApprovedIntervals
-            .Where(interval => interval != primary.Evidence.Interval))
-        {
-            var seriesResult = await _candles.GetClosedSeriesAsync(
-                new ExperimentCandleSeriesRequest(
-                    worker.MarketSymbol,
-                    interval,
-                    primaryCloseUtc,
-                    requirements.MinimumClosedHistoryCandles),
-                cancellationToken).ConfigureAwait(false);
-            if (!seriesResult.IsAvailable || seriesResult.Series is null)
-                return ExperimentAnalysisResult
-                    .Blocked($"Required {FormatInterval(interval)} confirmation evidence is unavailable: {seriesResult.BlockReason}.")
-                    .Attest(primary.Evidence);
-            contextFingerprints.Add(FingerprintSeries(seriesResult.Series));
-
-            var result = await EvaluateSeriesAsync(
-                evaluator.Definition,
-                evaluator,
-                seriesResult.Series,
-                assignment.Provenance,
-                worker.StrategyParameters,
-                cancellationToken).ConfigureAwait(false);
-            if (result.Outcome == ExperimentAnalysisOutcome.Blocked)
-                return ExperimentAnalysisResult
-                    .Blocked($"Required {FormatInterval(interval)} confirmation was blocked: {result.Reason}")
-                    .Attest(primary.Evidence);
-            supportingOutcomes.Add((
-                interval,
-                result.Outcome == ExperimentAnalysisOutcome.Analyzed
-                    || IsBullishDirectionalConfirmation(seriesResult.Series)
-                        ? ExperimentAnalysisOutcome.Analyzed
-                        : ExperimentAnalysisOutcome.NoCondition));
-        }
-
-        var confirmations = supportingOutcomes.Count(item =>
-            item.Outcome == ExperimentAnalysisOutcome.Analyzed);
-        var context = string.Join(
-            ", ",
-            supportingOutcomes.Select(item => $"{FormatInterval(item.Interval)}={item.Outcome}"));
-        var evidence = primary.Evidence.WithContextFingerprint(
-            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-                string.Join('|', contextFingerprints)))));
-        return primary.Outcome == ExperimentAnalysisOutcome.Analyzed && confirmations > 0
-            ? ExperimentAnalysisResult
-                .Analyzed(
-                    $"{primary.Reason} Multi-timeframe confirmation passed ({context}).",
-                    primary.Value!.Value)
-                .Attest(evidence)
-            : ExperimentAnalysisResult
-                .NoCondition(
-                    $"Multi-timeframe confirmation did not pass: primary {FormatInterval(primary.Evidence.Interval)}={primary.Outcome}; {context}.")
-                .Attest(evidence);
     }
 
-    private static bool IsBullishDirectionalConfirmation(ExperimentCandleSeries series) =>
-        series.Candles.Count >= 2
-        && series.Candles[^1].Close > series.Candles[^2].Close;
-
     private async Task<ExperimentAnalysisResult> EvaluateSeriesAsync(
+        Guid ownerId,
         ApprovedExperimentStrategyDefinition definition,
         IApprovedExperimentStrategyEvaluator evaluator,
-        ExperimentCandleSeries series,
+        ExperimentStrategySeriesSet series,
         ExperimentResearchProvenance provenance,
         string strategyParameters,
-        CancellationToken cancellationToken) =>
-        await _supplemental.EvaluateAsync(
-            definition.FamilyId,
-            series,
-            provenance,
-            cancellationToken).ConfigureAwait(false)
-        ?? evaluator.Evaluate(series, strategyParameters);
+        CancellationToken cancellationToken)
+    {
+        if (definition.FamilyId is "platform.cross-sectional-momentum-rotation"
+            or "platform.relative-strength-pullback-rotation")
+        {
+            return await _supplemental.EvaluateAsync(
+                ownerId,
+                definition.FamilyId,
+                series.Signal,
+                provenance,
+                cancellationToken).ConfigureAwait(false)
+                ?? ExperimentAnalysisResult.Blocked(
+                    $"{definition.FamilyId}: complete point-in-time universe evidence is unavailable.");
+        }
+        return evaluator.Evaluate(series, strategyParameters);
+    }
 
     private static string FormatInterval(CandleInterval interval) => interval switch
     {
@@ -634,8 +719,51 @@ public sealed class PaperExperimentWorkerRunner
         CandleInterval.FifteenMinutes => "15m",
         CandleInterval.ThirtyMinutes => "30m",
         CandleInterval.OneHour => "1h",
+        CandleInterval.FourHours => "4h",
+        CandleInterval.OneDay => "1d",
         _ => interval.ToString()
     };
+
+    private async Task<(ExperimentStrategySeriesSet? Series, string? BlockReason)> LoadSeriesSetAsync(
+        string symbol,
+        Trading.Strategies.StrategyTimeframeConfiguration timeframes,
+        DateTimeOffset asOfUtc,
+        int requiredHistory,
+        CancellationToken cancellationToken)
+    {
+        var roles = new[]
+        {
+            (Role: "regime", Interval: timeframes.Regime),
+            (Role: "signal", Interval: timeframes.Signal),
+            (Role: "execution", Interval: timeframes.Execution)
+        };
+        var reads = roles
+            .Select(async role => (
+                role.Role,
+                Result: await _candles.GetClosedSeriesAsync(
+                    new ExperimentCandleSeriesRequest(
+                        symbol,
+                        role.Interval,
+                        AlignDown(asOfUtc, TimeSpan.FromMinutes((int)role.Interval)),
+                        requiredHistory),
+                    cancellationToken).ConfigureAwait(false)))
+            .ToArray();
+        var completed = await Task.WhenAll(reads).ConfigureAwait(false);
+        var unavailable = completed.FirstOrDefault(item =>
+            !item.Result.IsAvailable || item.Result.Series is null);
+        if (unavailable.Result is not null
+            && (!unavailable.Result.IsAvailable || unavailable.Result.Series is null))
+            return (null, $"{unavailable.Role} timeframe: {unavailable.Result.BlockReason}");
+        return (
+            new ExperimentStrategySeriesSet(
+                completed.Single(item => item.Role == "regime").Result.Series!,
+                completed.Single(item => item.Role == "signal").Result.Series!,
+                completed.Single(item => item.Role == "execution").Result.Series!),
+            null);
+    }
+
+    private static DateTimeOffset AlignDown(DateTimeOffset value, TimeSpan interval) =>
+        new(value.UtcTicks - value.UtcTicks % interval.Ticks, TimeSpan.Zero);
 
     private static string FingerprintSeries(ExperimentCandleSeries series)
     {
@@ -645,5 +773,21 @@ public sealed class PaperExperimentWorkerRunner
                 System.Globalization.CultureInfo.InvariantCulture,
                 $"{candle.Symbol}|{(int)candle.Interval}|{candle.OpenTimeUtc:O}|{candle.CloseTimeUtc:O}|{candle.Open}|{candle.High}|{candle.Low}|{candle.Close}|{candle.Volume}")));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    private static string FingerprintAnalysis(
+        ExperimentStrategySeriesSet series,
+        ExperimentAnalysisResult result)
+    {
+        var consensus = result.Consensus is null
+            ? string.Empty
+            : string.Join(
+                '|',
+                result.Consensus.Checks.Select(check =>
+                    $"{check.Id}:{(int)check.Direction}:{check.Rationale}"))
+                + $"|threshold:{result.Consensus.RequiredAgreement}"
+                + $"|veto:{result.Consensus.MandatoryVeto}:{result.Consensus.VetoReason}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{FingerprintSeries(series.Regime)}|{FingerprintSeries(series.Signal)}|{FingerprintSeries(series.Execution)}|{consensus}")));
     }
 }

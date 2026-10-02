@@ -232,6 +232,12 @@ public sealed class PaperExperimentTradeOrchestrator
                 fill.Fees,
                 fill.Direction == TradeDirection.Buy ? "buy" : "sell",
                 fill.ExecutedAtUtc);
+            if (fill.Direction == TradeDirection.Sell
+                && context.Worker.PositionQuantity == 0m
+                && context.Worker.Name.StartsWith("Paper opportunity ", StringComparison.Ordinal))
+            {
+                context.Worker.Complete();
+            }
             await _workerLedger.AddAsync(
                 context.Worker.UserId,
                 context.Worker.Ledger.Last(),

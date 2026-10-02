@@ -1,0 +1,139 @@
+body {
+  margin: 0;
+  background: #0b1725;
+  color: #eaf4ff;
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+h1 {
+  margin-bottom: 8px;
+  font-size: 2rem;
+}
+
+p.muted {
+  color: #9bb6cd;
+  line-height: 1.6;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border: 1px solid rgba(98, 208, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(98, 208, 255, 0.12);
+  color: #62d0ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.notice {
+  margin: 18px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 209, 102, 0.35);
+  border-radius: 12px;
+  background: rgba(255, 209, 102, 0.08);
+  color: #ffd166;
+  line-height: 1.5;
+}
+
+.setup-panel {
+  max-width: 1000px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  margin-top: 18px;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #24415d;
+  text-align: left;
+  font-size: 14px;
+}
+
+th {
+  color: #9bb6cd;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.interval-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.refresh-status {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(98, 208, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(98, 208, 255, 0.08);
+  color: #bfeaff;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.interval-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid rgba(98, 208, 255, 0.45);
+  border-radius: 999px;
+  background: rgba(98, 208, 255, 0.12);
+  color: #9fe2ff;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.worker-row {
+  background: rgba(15, 28, 43, 0.45);
+}
+
+.trade-row td {
+  padding: 0 12px 10px 42px;
+  background: rgba(8, 20, 32, 0.7);
+}
+
+.trade-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 9px 12px;
+  border-left: 3px solid #62d0ff;
+  color: #cfe6fa;
+}
+
+.trade-detail strong {
+  color: #62d0ff;
+}
+
+.trade-detail .buy,
+.positive {
+  color: #7ee787;
+}
+
+.trade-detail .sell,
+.negative {
+  color: #ff9b9b;
+}
+
+pre {
+  padding: 14px;
+  border: 1px solid #24415d;
+  border-radius: 12px;
+  background: #0f1c2b;
+  color: #cfe6fa;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

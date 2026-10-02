@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
+using Trading.Domain.Experiments;
 using Trading.Domain.Market;
 using Trading.Domain.Universe;
 using Trading.MarketData;
@@ -165,14 +166,27 @@ public sealed class PaperTrainingAutoSelectionService
     private const int MaximumQualificationCandidates = 250;
     private const int QualificationCandleCount = 600;
     private const int ValidationCandleCount = 420;
-    public const int MaximumWorkersPerStrategy = 1;
+    public const int MaximumWorkersPerStrategy = ExperimentWorker.MaxWorkersPerUser;
     public static IReadOnlyList<CandleInterval> ApprovedIntervals { get; } =
         Array.AsReadOnly(new[]
         {
             CandleInterval.FiveMinutes,
             CandleInterval.FifteenMinutes,
             CandleInterval.ThirtyMinutes,
-            CandleInterval.OneHour
+            CandleInterval.OneHour,
+            CandleInterval.FourHours,
+            CandleInterval.OneDay
+        });
+    public static IReadOnlyList<CandleInterval> ManagedIntervals { get; } =
+        Array.AsReadOnly(new[]
+        {
+            CandleInterval.OneMinute,
+            CandleInterval.FiveMinutes,
+            CandleInterval.FifteenMinutes,
+            CandleInterval.ThirtyMinutes,
+            CandleInterval.OneHour,
+            CandleInterval.FourHours,
+            CandleInterval.OneDay
         });
     private readonly PaperTrainingUniverseDiscovery _universe;
     private readonly PaperTrainingHistoricalQualification _qualification;
@@ -197,7 +211,7 @@ public sealed class PaperTrainingAutoSelectionService
             || request.Intervals.Count == 0
             || request.Intervals.Distinct().Count() != request.Intervals.Count
             || request.Intervals.Any(interval => !ApprovedIntervals.Contains(interval)))
-            throw new ArgumentOutOfRangeException(nameof(request), "Automatic paper selection requires distinct approved 5, 15, 30, or 60 minute intervals.");
+            throw new ArgumentOutOfRangeException(nameof(request), "Automatic paper selection requires distinct approved 5m, 15m, 30m, 1h, 4h, or 1d intervals.");
         if (request.FromUtc.Offset != TimeSpan.Zero || request.ToUtc.Offset != TimeSpan.Zero
             || request.ToUtc <= request.FromUtc || request.ToUtc > DateTimeOffset.UtcNow)
             throw new ArgumentException("Automatic selection requires a completed UTC historical range.", nameof(request));

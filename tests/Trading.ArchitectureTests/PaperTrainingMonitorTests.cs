@@ -16,7 +16,7 @@ public sealed class PaperTrainingMonitorTests
         {
             Symbol = "XBT/EUR",
             StartingCash = 1_000m,
-            Interval = Trading.Domain.Market.CandleInterval.ThirtyMinutes
+            Interval = Trading.Domain.Market.CandleInterval.FiveMinutes
         };
         var qualification = new PaperTrainingQualificationResult(
             slot.Slot,
@@ -30,6 +30,15 @@ public sealed class PaperTrainingMonitorTests
             slot.StrategyId,
             PaperOnlyExploration: true,
             Interval: slot.Interval);
+        var scannerRecords = new[]
+        {
+            new PaperTrainingQualificationResult(
+                0, "KRAKEN/EUR", true, 0m, 0, 0m, new string('B', 64),
+                "Scanner run.", "platform.scanner", true, CandleInterval.FiveMinutes),
+            new PaperTrainingQualificationResult(
+                0, "XBT/EUR", false, 0m, 0, 0m, new string('C', 64),
+                "Universe member.", "platform.scanner-universe", false, CandleInterval.OneDay)
+        };
         var activations = new InMemoryPaperTrainingActivationRepository();
         await activations.TrySaveAsync(
             new(
@@ -39,7 +48,7 @@ public sealed class PaperTrainingMonitorTests
                 new(true, true, true, true, true, true),
                 changedAtUtc,
                 ownerId,
-                [qualification]),
+                [qualification, .. scannerRecords]),
             null);
         var workers = new InMemoryExperimentWorkerRepository();
         var worker = new ExperimentWorker(
@@ -83,7 +92,9 @@ public sealed class PaperTrainingMonitorTests
         var item = Assert.Single(monitor.Workers);
         Assert.Equal(PaperTrainingMonitorQualification.Exploration, item.Qualification);
         Assert.Equal(slot.Interval, item.Interval);
-        Assert.Equal(PaperTrainingAutoSelectionService.ApprovedIntervals, item.AnalysisIntervals);
+        Assert.Equal(
+            [CandleInterval.OneHour, CandleInterval.FiveMinutes, CandleInterval.OneMinute],
+            item.AnalysisIntervals);
         Assert.Equal(ExperimentWorkerStatus.Running.ToString(), item.RuntimeStatus);
         Assert.Equal(953m, item.CashBalance);
         Assert.Equal(0.5m, item.PositionQuantity);
@@ -131,6 +142,110 @@ public sealed class PaperTrainingMonitorTests
         Assert.Null(item.AdditionCount);
         Assert.Null(item.MaximumAdditions);
         Assert.Empty(item.RecentTrades);
+    }
+
+    [Fact]
+    public async Task HidesCompletedFlatScannerWorkersAndMatchesQualificationByObservation()
+    {
+        var ownerId = Guid.NewGuid();
+        var changedAtUtc = new DateTimeOffset(2026, 9, 23, 19, 0, 0, TimeSpan.Zero);
+        var observationId = new string('A', 64);
+        var slot = PaperTrainingActivationService.ApprovedSlots[0] with
+        {
+            Symbol = "XBT/EUR",
+            ProvenanceId = $"scan-{observationId[..24]}"
+        };
+        var activations = new InMemoryPaperTrainingActivationRepository();
+        await activations.TrySaveAsync(
+            new(
+                ownerId,
+                PaperTrainingActivationState.Active,
+                [slot],
+                new(true, true, true, true, true, true),
+                changedAtUtc,
+                ownerId,
+                [
+                    new PaperTrainingQualificationResult(
+                        9,
+                        slot.Symbol,
+                        true,
+                        80m,
+                        0,
+                        0m,
+                        observationId,
+                        "Actionable BUY admitted.",
+                        slot.StrategyId,
+                        PaperOnlyExploration: true,
+                        slot.Interval)
+                ]),
+            null);
+        var workers = new InMemoryExperimentWorkerRepository();
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(),
+            ownerId,
+            ContinuousPaperOpportunityScanner.WorkerName(slot),
+            slot.StrategyId,
+            slot.Symbol,
+            slot.StartingCash,
+            changedAtUtc,
+            slot.Seed);
+        worker.Start();
+        await workers.SaveAsync(worker);
+
+        var service = new PaperTrainingMonitorService(
+            activations,
+            workers,
+            new StubCandleRepository());
+        var activeMonitor = await service.GetAsync(ownerId);
+
+        Assert.Equal(PaperTrainingMonitorQualification.Qualified, Assert.Single(activeMonitor.Workers).Qualification);
+
+        worker.Complete();
+        await workers.SaveAsync(worker);
+
+        Assert.Empty((await service.GetAsync(ownerId)).Workers);
+    }
+
+    [Fact]
+    public async Task ScannerWorkerRemainsQualifiedAfterAdmissionEvidenceIsPruned()
+    {
+        var ownerId = Guid.NewGuid();
+        var changedAtUtc = new DateTimeOffset(2026, 9, 23, 19, 0, 0, TimeSpan.Zero);
+        var slot = PaperTrainingActivationService.ApprovedSlots[0] with
+        {
+            Symbol = "XBT/EUR",
+            ProvenanceId = $"scan-{new string('A', 24)}"
+        };
+        var activations = new InMemoryPaperTrainingActivationRepository();
+        await activations.TrySaveAsync(
+            new(
+                ownerId,
+                PaperTrainingActivationState.Active,
+                [slot],
+                new(true, true, true, true, true, true),
+                changedAtUtc,
+                ownerId,
+                []),
+            null);
+        var workers = new InMemoryExperimentWorkerRepository();
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(),
+            ownerId,
+            ContinuousPaperOpportunityScanner.WorkerName(slot),
+            slot.StrategyId,
+            slot.Symbol,
+            slot.StartingCash,
+            changedAtUtc,
+            slot.Seed);
+        worker.Start();
+        await workers.SaveAsync(worker);
+
+        var monitor = await new PaperTrainingMonitorService(
+            activations,
+            workers,
+            new StubCandleRepository()).GetAsync(ownerId);
+
+        Assert.Equal(PaperTrainingMonitorQualification.Qualified, Assert.Single(monitor.Workers).Qualification);
     }
 
     [Fact]

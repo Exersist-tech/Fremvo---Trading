@@ -532,6 +532,12 @@ public interface IExperimentWorkerRepository
         IReadOnlyCollection<string> names,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyCollection<ExperimentWorker>> ListClosedAsync(
+        Guid userId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default);
+
     Task<int> CountAsync(Guid userId, CancellationToken cancellationToken = default);
 
     Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default);

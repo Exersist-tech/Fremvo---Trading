@@ -1,6 +1,7 @@
 (() => {
   "use strict";
   const status = document.getElementById("status");
+  const closedOutput = document.getElementById("closed-trades");
   const output = document.getElementById("results");
   const columns = [
     ["Evaluated (UTC)", "evaluatedAtUtc"], ["Worker", "workerId"], ["Strategy", "strategyId"],
@@ -14,11 +15,100 @@
   const format = (value, key) => {
     if (value === null || value === undefined) return "Unknown";
     if (key === "evaluatedAtUtc") return new Date(value).toISOString();
+    if (key === "positionQuantity") return quantity(value);
+    if ([
+      "equity", "cash", "realizedProfitAndLoss", "unrealizedProfitAndLoss",
+      "maximumDrawdown", "fees", "slippage", "exposure"
+    ].includes(key)) return number(value);
     return String(value);
+  };
+
+  const number = value => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const quantity = value => Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
+  const price = value => {
+    const numeric = Number(value);
+    return numeric.toLocaleString(undefined, {
+      maximumFractionDigits: Math.abs(numeric) > 0 && Math.abs(numeric) < 0.01 ? 8 : 2
+    });
+  };
+  const signed = value => {
+    const numeric = Number(value);
+    return `${numeric > 0 ? "+" : ""}${number(numeric)}`;
+  };
+  const duration = seconds => {
+    const totalMinutes = Math.floor(Number(seconds) / 60);
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    return [days ? `${days}d` : "", hours ? `${hours}h` : "", `${minutes}m`]
+      .filter(Boolean)
+      .join(" ");
+  };
+  const cell = (row, value, className) => {
+    const element = document.createElement("td");
+    element.textContent = value;
+    if (className) element.className = className;
+    row.append(element);
+  };
+
+  const renderClosedTrades = trades => {
+    if (!trades || trades.length === 0) {
+      closedOutput.replaceChildren(Object.assign(document.createElement("p"), {
+        className: "empty",
+        textContent: "No fully closed paper trades are available for this owner."
+      }));
+      return;
+    }
+
+    const summary = document.createElement("p");
+    summary.className = "notice";
+    const net = trades.reduce((total, trade) => total + Number(trade.netProfitAndLoss), 0);
+    const fees = trades.reduce((total, trade) => total + Number(trade.fees), 0);
+    const wins = trades.filter(trade => Number(trade.netProfitAndLoss) > 0).length;
+    const losses = trades.filter(trade => Number(trade.netProfitAndLoss) < 0).length;
+    summary.textContent = `${trades.length} closed trades · ${wins} profitable · ${losses} losing · Net P&L ${signed(net)} · Fees ${number(fees)}`;
+
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    [
+      "Closed", "Strategy", "Pair", "Quantity", "Average entry", "Average exit",
+      "Gross P&L", "Fees", "Net P&L", "Return", "Held", "Fills", "Exit reason"
+    ].forEach(label => {
+      const element = document.createElement("th");
+      element.textContent = label;
+      headerRow.append(element);
+    });
+    head.append(headerRow);
+    table.append(head);
+    const body = document.createElement("tbody");
+    trades.forEach(trade => {
+      const row = document.createElement("tr");
+      const pnlClass = Number(trade.netProfitAndLoss) > 0
+        ? "positive"
+        : Number(trade.netProfitAndLoss) < 0 ? "negative" : "";
+      cell(row, new Date(trade.closedAtUtc).toLocaleString());
+      cell(row, trade.strategyId);
+      cell(row, trade.symbol);
+      cell(row, quantity(trade.quantity));
+      cell(row, price(trade.averageEntryPrice));
+      cell(row, price(trade.averageExitPrice));
+      cell(row, signed(trade.grossProfitAndLoss));
+      cell(row, number(trade.fees));
+      cell(row, signed(trade.netProfitAndLoss), pnlClass);
+      cell(row, `${signed(trade.returnPercent)}%`, pnlClass);
+      cell(row, duration(trade.holdingSeconds));
+      cell(row, `${trade.buyFillCount} buy / ${trade.sellFillCount} sell`);
+      cell(row, trade.exitReason || "Exit decision reason unavailable");
+      body.append(row);
+    });
+    table.append(body);
+    closedOutput.replaceChildren(summary, table);
   };
 
   const render = data => {
     status.textContent = data.disclaimer;
+    renderClosedTrades(data.closedTrades);
     if (!data.results || data.results.length === 0) {
       output.replaceChildren(Object.assign(document.createElement("p"), { className: "empty", textContent: "No immutable experiment result snapshots are available for this owner." }));
       return;

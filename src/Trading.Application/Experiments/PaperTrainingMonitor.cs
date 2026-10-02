@@ -84,7 +84,7 @@ public sealed class PaperTrainingMonitorService
             "yyyyMMddHHmmssfffffff",
             System.Globalization.CultureInfo.InvariantCulture);
         var workerNames = activation.Slots
-            .Select(slot => $"Paper training {slot.Slot} {sessionSuffix}")
+            .Select(slot => WorkerName(slot, sessionSuffix))
             .ToArray();
         var workers = await _workers
             .ListByNamesAsync(ownerId, workerNames, cancellationToken)
@@ -94,21 +94,30 @@ public sealed class PaperTrainingMonitorService
         {
             latestPrices[symbol] = await GetLatestClosedPriceAsync(symbol, cancellationToken).ConfigureAwait(false);
         }
-        var qualifications = activation.QualificationResults.ToDictionary(result => result.Slot);
         var items = activation.Slots
             .OrderBy(slot => slot.Slot)
             .Select(slot =>
             {
-                var expectedName = $"Paper training {slot.Slot} {sessionSuffix}";
+                var expectedName = WorkerName(slot, sessionSuffix);
                 var worker = workers.SingleOrDefault(candidate =>
                     candidate.Name.Equals(expectedName, StringComparison.Ordinal)
                     && candidate.StrategyId.Equals(slot.StrategyId, StringComparison.Ordinal)
                     && candidate.MarketSymbol.Equals(slot.Symbol, StringComparison.Ordinal));
-                qualifications.TryGetValue(slot.Slot, out var qualification);
+                var observationPrefix = slot.ProvenanceId.StartsWith("scan-", StringComparison.Ordinal)
+                    ? slot.ProvenanceId[5..]
+                    : null;
+                var qualification = activation.QualificationResults.LastOrDefault(result =>
+                    string.Equals(result.StrategyId, slot.StrategyId, StringComparison.Ordinal)
+                    && string.Equals(result.Symbol, slot.Symbol, StringComparison.OrdinalIgnoreCase)
+                    && (observationPrefix is not null
+                        ? result.DatasetFingerprint.StartsWith(observationPrefix, StringComparison.Ordinal)
+                        : result.Slot == slot.Slot));
                 var qualificationStatus = qualification?.Accepted == true
                     ? PaperTrainingMonitorQualification.Qualified
                     : qualification?.PaperOnlyExploration == true
                         ? PaperTrainingMonitorQualification.Exploration
+                        : slot.ProvenanceId.StartsWith("scan-", StringComparison.Ordinal)
+                            ? PaperTrainingMonitorQualification.Qualified
                         : PaperTrainingMonitorQualification.Unknown;
                 latestPrices.TryGetValue(slot.Symbol, out var latestCandle);
                 var currentPrice = latestCandle?.Close;
@@ -124,7 +133,7 @@ public sealed class PaperTrainingMonitorService
                     slot.StrategyId,
                     slot.Symbol,
                     slot.Interval,
-                    PaperTrainingAutoSelectionService.ApprovedIntervals,
+                    AnalysisIntervals(slot),
                     qualificationStatus,
                     worker?.Id,
                     worker?.Status.ToString() ?? "WaitingForWorker",
@@ -156,9 +165,27 @@ public sealed class PaperTrainingMonitorService
                         .ToArray()
                         ?? []);
             })
+            .Where(item => item.PositionQuantity is > 0m
+                || item.RuntimeStatus is not nameof(ExperimentWorkerStatus.Completed)
+                    and not nameof(ExperimentWorkerStatus.Failed))
             .ToArray();
 
         return new(activation.State, items);
+    }
+
+    private static string WorkerName(PaperTrainingWorkerSlot slot, string sessionSuffix) =>
+        slot.ProvenanceId.StartsWith("scan-", StringComparison.Ordinal)
+            ? ContinuousPaperOpportunityScanner.WorkerName(slot)
+            : $"Paper training {slot.Slot} {sessionSuffix}";
+
+    private static CandleInterval[] AnalysisIntervals(PaperTrainingWorkerSlot slot)
+    {
+        var profile = ApprovedConsensusStrategyProfiles.TryGet(slot.StrategyId, out var profiles)
+            ? profiles.FirstOrDefault(candidate => candidate.Signal == slot.Interval)
+            : null;
+        return profile is null
+            ? [slot.Interval]
+            : new[] { profile.Regime, profile.Signal, profile.Execution }.Distinct().ToArray();
     }
 
     private async Task<Candle?> GetLatestClosedPriceAsync(

@@ -1,19 +1,20 @@
 using Trading.Domain.Market;
-using Trading.Domain.Sessions;
 using Trading.Domain.Experiments;
 using Trading.MarketData.Experiments;
 using Trading.MarketData;
 using Trading.Strategies;
+using Trading.Indicators;
 
 namespace Trading.Application.Experiments;
 
 /// <summary>
-/// Supplies only the additional, platform-fixed evidence required by the four multi-input
+/// Supplies only the additional, platform-fixed evidence required by cross-sectional
 /// paper research families. Implementations must read persisted evidence only.
 /// </summary>
 public interface ISupplementalExperimentEvidenceProvider
 {
     Task<ExperimentAnalysisResult?> EvaluateAsync(
+        Guid ownerId,
         string familyId,
         ExperimentCandleSeries primarySeries,
         ExperimentResearchProvenance provenance,
@@ -23,7 +24,7 @@ public interface ISupplementalExperimentEvidenceProvider
 /// <summary>Fail-closed default: supplemental families remain unavailable unless explicitly wired.</summary>
 public sealed class UnconfiguredSupplementalExperimentEvidenceProvider : ISupplementalExperimentEvidenceProvider
 {
-    public Task<ExperimentAnalysisResult?> EvaluateAsync(string familyId, ExperimentCandleSeries primarySeries,
+    public Task<ExperimentAnalysisResult?> EvaluateAsync(Guid ownerId, string familyId, ExperimentCandleSeries primarySeries,
         ExperimentResearchProvenance provenance, CancellationToken cancellationToken = default) =>
         Task.FromResult<ExperimentAnalysisResult?>(null);
 }
@@ -34,22 +35,26 @@ public sealed class UnconfiguredSupplementalExperimentEvidenceProvider : ISupple
 /// </summary>
 public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplementalExperimentEvidenceProvider
 {
-    private static readonly string[] Universe = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR"];
+    private static readonly string[] Universe = ["XBT/EUR", "ETH/EUR", "SOL/EUR", "XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR"];
     private readonly IExperimentCandleSeriesSource _candles;
+    private readonly IPaperTrainingActivationReader? _activations;
 
-    public PlatformSupplementalExperimentEvidenceProvider(IExperimentCandleSeriesSource candles) =>
+    public PlatformSupplementalExperimentEvidenceProvider(
+        IExperimentCandleSeriesSource candles,
+        IPaperTrainingActivationReader? activations = null)
+    {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
+        _activations = activations;
+    }
 
     public async Task<ExperimentAnalysisResult?> EvaluateAsync(
-        string familyId, ExperimentCandleSeries primarySeries, ExperimentResearchProvenance provenance,
+        Guid ownerId, string familyId, ExperimentCandleSeries primarySeries, ExperimentResearchProvenance provenance,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(primarySeries);
         ArgumentNullException.ThrowIfNull(provenance);
         if (familyId is not ("platform.cross-sectional-momentum-rotation"
-            or "platform.relative-strength-pullback-rotation"
-            or "platform.session-conditioned-breakout"
-            or "platform.regime-switching-ensemble"))
+            or "platform.relative-strength-pullback-rotation"))
         {
             return null;
         }
@@ -61,115 +66,151 @@ public sealed class PlatformSupplementalExperimentEvidenceProvider : ISupplement
         }
         return familyId switch
         {
-            "platform.cross-sectional-momentum-rotation" => await CrossAsync(primarySeries, provenance, false, cancellationToken).ConfigureAwait(false),
-            "platform.relative-strength-pullback-rotation" => await CrossAsync(primarySeries, provenance, true, cancellationToken).ConfigureAwait(false),
-            "platform.session-conditioned-breakout" => Session(primarySeries, provenance),
-            "platform.regime-switching-ensemble" => Regime(primarySeries, provenance),
+            "platform.cross-sectional-momentum-rotation" => await CrossAsync(ownerId, primarySeries, provenance, false, cancellationToken).ConfigureAwait(false),
+            "platform.relative-strength-pullback-rotation" => await CrossAsync(ownerId, primarySeries, provenance, true, cancellationToken).ConfigureAwait(false),
             _ => null
         };
     }
 
-    private async Task<ExperimentAnalysisResult> CrossAsync(ExperimentCandleSeries primarySeries,
+    private async Task<ExperimentAnalysisResult> CrossAsync(Guid ownerId, ExperimentCandleSeries primarySeries,
         ExperimentResearchProvenance provenance, bool relativeStrength, CancellationToken cancellationToken)
     {
-        const int history = 91;
-        var members = new List<CrossSectionalMomentumUniverseMember>(Universe.Length);
-        foreach (var symbol in Universe)
+        const int history = ApprovedConsensusStrategyProfiles.RequiredHistory;
+        var symbols = (await UniverseSymbolsAsync(ownerId, cancellationToken).ConfigureAwait(false))
+            .Append(primarySeries.Symbol)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var universe = new Dictionary<string, IReadOnlyList<Candle>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var symbol in symbols)
         {
             var result = await _candles.GetClosedSeriesAsync(
-                new ExperimentCandleSeriesRequest(symbol, primarySeries.Interval, primarySeries.AsOfUtc, history), cancellationToken).ConfigureAwait(false);
+                new ExperimentCandleSeriesRequest(
+                    symbol,
+                    CandleInterval.OneDay,
+                    AlignDown(primarySeries.AsOfUtc, TimeSpan.FromDays(1)),
+                    history),
+                cancellationToken).ConfigureAwait(false);
             if (!result.IsAvailable || result.Series is null || result.Series.AsOfUtc != primarySeries.AsOfUtc
-                || result.Series.Candles.Count != history || result.Series.Candles[^1].CloseTimeUtc != primarySeries.AsOfUtc)
+                && result.Series?.AsOfUtc != AlignDown(primarySeries.AsOfUtc, TimeSpan.FromDays(1))
+                || result.Series?.Candles.Count != history)
             {
                 return ExperimentAnalysisResult.Blocked(
                     $"Required fixed universe member '{symbol}' is unavailable, incomplete, or not closed exactly at the UTC as-of.");
             }
-            members.Add(new CrossSectionalMomentumUniverseMember(
-                Instrument(symbol), symbol, true, Trading.Domain.Universe.InstrumentTradingStatus.Trading,
-                primarySeries.AsOfUtc, result.Series.Candles));
+            universe.Add(symbol, result.Series.Candles);
         }
 
-        var dataset = new CrossSectionalMomentumDataset("platform-fixed-paper-universe-v2", primarySeries.AsOfUtc, primarySeries.Interval, members);
+        var ranked = CrossSectionalConsensusRanking.Evaluate(universe)
+            .OrderByDescending(item => relativeStrength ? item.RelativeStrengthScore : item.MomentumScore)
+            .ThenBy(item => item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (ranked.Length != universe.Count)
+            return ExperimentAnalysisResult.Blocked("Complete point-in-time ranking evidence is unavailable.");
+        var selected = ranked.Single(item =>
+            item.Symbol.Equals(primarySeries.Symbol, StringComparison.OrdinalIgnoreCase));
+        var top = Array.IndexOf(ranked, selected) < Math.Max(1, (int)Math.Ceiling(ranked.Length * .20m));
+        var correlationSafe = selected.Symbol.Equals("XBT/EUR", StringComparison.OrdinalIgnoreCase)
+            || decimal.Abs(selected.CorrelationToBenchmark) <= .90m;
+
         if (!relativeStrength)
         {
-            var model = new CrossSectionalMomentumRotationResearchModel();
-            var result = model.Evaluate(new CrossSectionalMomentumRotationEvaluationInput(
-                dataset, new StrategyParameterSet(model.ParameterDefinitions,
-                    new Dictionary<string, StrategyParameterValue>
-                    {
-                        ["lookbackPeriods"] = StrategyParameterValue.WholeNumber(90),
-                        ["topCount"] = StrategyParameterValue.WholeNumber(1)
-                    }), provenance.GateEvaluation));
-            if (result.Status == CrossSectionalMomentumResearchStatus.Blocked) return ExperimentAnalysisResult.Blocked(result.Rationale);
-            return result.Rankings.Single().Symbol == primarySeries.Symbol
-                ? ExperimentAnalysisResult.Analyzed(result.Rationale, 1m)
-                : ExperimentAnalysisResult.NoCondition($"{result.Rationale} {primarySeries.Symbol} is not the fixed worker candidate.");
+            if (!top || selected.LongReturn <= 0m || !selected.AboveEma200
+                || selected.MedianQuoteVolume < 1_000_000m
+                || selected.Volatility > .10m || !correlationSafe)
+            {
+                return BearishExit(
+                    "platform.cross-sectional-momentum-rotation",
+                    "Buffered rank, absolute trend, liquidity, volatility, or correlation evidence requires a Spot exit.");
+            }
+            return ExperimentAnalysisResult.FromConsensus(
+                "platform.cross-sectional-momentum-rotation",
+                [
+                    Check("top-momentum-percentile", top, "Instrument ranks in the top 20% of the complete point-in-time universe."),
+                    Check("positive-absolute-return", selected.LongReturn > 0m, "Ninety-day absolute return is positive."),
+                    Check("daily-long-term-trend", selected.AboveEma200, "Daily close is above EMA 200."),
+                    Check("liquidity-and-history", selected.MedianQuoteVolume >= 1_000_000m, "Daily history and quote-volume evidence pass."),
+                    Check("volatility-and-correlation", selected.Volatility <= .10m && correlationSafe, "Volatility and XBT-correlation limits pass.")
+                ],
+                5);
         }
 
-        var relative = new RelativeStrengthPullbackRotationResearchModel();
-        var evaluation = relative.Evaluate(new RelativeStrengthPullbackRotationEvaluationInput(
-            dataset, new StrategyParameterSet(relative.ParameterDefinitions,
-                new Dictionary<string, StrategyParameterValue>
-                {
-                    ["momentumLookbackPeriods"] = StrategyParameterValue.WholeNumber(90),
-                    ["pullbackLookbackPeriods"] = StrategyParameterValue.WholeNumber(20),
-                    ["minimumPullbackFraction"] = StrategyParameterValue.FromNumeric(.03m),
-                    ["maximumPullbackFraction"] = StrategyParameterValue.FromNumeric(.10m)
-                }), provenance.GateEvaluation));
-        if (evaluation.Status == RelativeStrengthPullbackResearchStatus.Blocked) return ExperimentAnalysisResult.Blocked(evaluation.Rationale);
-        return evaluation.Candidate?.Symbol == primarySeries.Symbol
-            ? ExperimentAnalysisResult.Analyzed(evaluation.Rationale, 1m)
-            : ExperimentAnalysisResult.NoCondition($"{evaluation.Rationale} {primarySeries.Symbol} is not the fixed worker candidate.");
+        if (primarySeries.Interval != CandleInterval.FourHours || primarySeries.Candles.Count < 51)
+            return ExperimentAnalysisResult.Blocked(
+                "Relative-strength pullback requires complete four-hour setup evidence.");
+        var executionResult = await _candles.GetClosedSeriesAsync(
+            new ExperimentCandleSeriesRequest(
+                primarySeries.Symbol,
+                CandleInterval.OneHour,
+                primarySeries.AsOfUtc,
+                history),
+            cancellationToken).ConfigureAwait(false);
+        if (!executionResult.IsAvailable || executionResult.Series is null
+            || executionResult.Series.Candles.Count < 2)
+            return ExperimentAnalysisResult.Blocked(
+                "Relative-strength pullback requires complete one-hour execution evidence.");
+        var setup = primarySeries.Candles;
+        var execution = executionResult.Series.Candles;
+        var ema20 = new ExponentialMovingAverageCalculator(20).Calculate(setup).Value!.Value;
+        var ema50 = new ExponentialMovingAverageCalculator(50).Calculate(setup).Value!.Value;
+        var atr = new AverageTrueRangeCalculator(14).Calculate(setup).Value!.Value;
+        var rsi = new RelativeStrengthIndexCalculator(14).Calculate(setup).Value!.Value;
+        var priorRsi = new RelativeStrengthIndexCalculator(14)
+            .Calculate(setup.Take(setup.Count - 1).ToArray()).Value!.Value;
+        var distance = Math.Min(decimal.Abs(setup[^1].Close - ema20), decimal.Abs(setup[^1].Close - ema50));
+        if (!top || selected.LongReturn <= 0m || !selected.AboveEma200 || setup[^1].Close < ema50)
+        {
+            return BearishExit(
+                "platform.relative-strength-pullback-rotation",
+                "Relative-strength rank, daily trend, or four-hour structure invalidation requires a Spot exit.");
+        }
+        return ExperimentAnalysisResult.FromConsensus(
+            "platform.relative-strength-pullback-rotation",
+            [
+                Check("top-relative-strength", top, "Asset remains in the top 20% relative-strength group."),
+                Check("positive-daily-trend", selected.LongReturn > 0m && selected.AboveEma200, "Daily absolute trend is positive."),
+                Check("bounded-four-hour-pullback", distance <= atr && setup[^1].Close >= ema50, "Four-hour pullback is within 1 ATR of EMA 20 or 50 without structural failure."),
+                Check("four-hour-rsi-cooled", rsi is >= 35m and <= 55m && rsi >= priorRsi, "Four-hour RSI has cooled and stopped deteriorating."),
+                Check("one-hour-confirmation", execution[^1].Close > execution[^2].High, "A closed one-hour candle confirms renewed upside.")
+            ],
+            5);
     }
 
-    private static ExperimentAnalysisResult Session(ExperimentCandleSeries series, ExperimentResearchProvenance provenance)
+    private async Task<IReadOnlyList<string>> UniverseSymbolsAsync(
+        Guid ownerId,
+        CancellationToken cancellationToken)
     {
-        var model = new SessionConditionedBreakoutResearchModel();
-        var input = new StrategyEvaluationInput(model.TemplateId,
-            new StrategyParameterSet(model.ParameterDefinitions),
-            new StrategyState(model.TemplateId, 0, series.Candles[0].CloseTimeUtc),
-            series.Candles);
-        var profile = new SessionProfile(new SessionProfileVersionIdentity("platform.new-york-cash-session", 1),
-            "Platform New York cash session", "America/New_York", new TimeOnly(9, 30), new TimeOnly(16, 0),
-            [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday],
-            SessionCrossMidnightBehavior.SameLocalDay, SessionDstPolicy.FailClosed);
-        var output = model.Evaluate(new SessionConditionedBreakoutEvaluationInput(input, provenance.GateEvaluation, profile)).SessionConditioned.Proposal;
-        return output.Direction == StrategyAnalysisDirection.Bullish
-            ? ExperimentAnalysisResult.Analyzed(output.Rationale, 1m)
-            : ExperimentAnalysisResult.NoCondition(output.Rationale);
+        if (_activations is null || ownerId == Guid.Empty)
+            return Universe;
+        var activation = await _activations.GetAsync(ownerId, cancellationToken).ConfigureAwait(false);
+        var scan = activation?.QualificationResults
+            .LastOrDefault(result => result.StrategyId == "platform.scanner");
+        if (scan is null)
+            return Universe;
+        var symbols = activation!.QualificationResults
+            .Where(result => result.StrategyId == "platform.scanner-universe"
+                && result.Reason.StartsWith(scan.DatasetFingerprint, StringComparison.Ordinal))
+            .Select(result => result.Symbol)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return symbols.Length == 0 ? Universe : symbols;
     }
 
-    private static ExperimentAnalysisResult Regime(ExperimentCandleSeries series, ExperimentResearchProvenance provenance)
-    {
-        var classification = new DeterministicRegimeClassifier().Evaluate(
-            new RegimeClassificationInput(series.Candles, series.AsOfUtc, provenance.GateEvaluation));
-        if (classification.Regime == MarketRegime.Unknown)
-            return ExperimentAnalysisResult.Blocked(classification.Rationale);
-        var model = new RegimeSwitchingEnsembleResearchModel();
-        var timeframe = new StrategyTimeframeConfiguration(series.Interval, series.Interval, series.Interval);
-        var component = new RegimeSwitchingComponentObservation(
-            new StrategyAnalysisProposal(new StrategyTemplateId("ema-trend-continuation-v1"), series.AsOfUtc,
-                StrategyAnalysisDirection.Bullish, .5m, "Fixed closed-candle platform component observation."),
-            new RegimeSwitchingObservationProvenance("platform-fixed-paper-universe-v2", series.Symbol, timeframe, series.AsOfUtc, true));
-        var result = model.Evaluate(new RegimeSwitchingEnsembleEvaluationInput(classification, [component], provenance.GateEvaluation));
-        return result.Status == RegimeSwitchingEnsembleStatus.Observed && result.Direction == StrategyAnalysisDirection.Bullish
-            ? ExperimentAnalysisResult.Analyzed(result.Rationale, 1m)
-            : result.Status == RegimeSwitchingEnsembleStatus.Blocked
-                ? ExperimentAnalysisResult.Blocked(result.Rationale)
-                : ExperimentAnalysisResult.NoCondition(result.Rationale);
-    }
+    private static ExperimentSignalCheck Check(string id, bool bullish, string rationale) =>
+        new(id, bullish ? ExperimentSignalDirection.Bullish : ExperimentSignalDirection.Neutral, rationale);
 
-    private static Guid Instrument(string symbol) => symbol switch
-    {
-        "BTC/USD" => Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
-        "ETH/USD" => Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
-        "SOL/USD" => Guid.Parse("55555555-5555-5555-5555-555555555555"),
-        "XRP/EUR" => Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-        "TRX/EUR" => Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
-        "DOGE/EUR" => Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
-        "ADA/EUR" => Guid.Parse("f0f0f0f0-f0f0-f0f0-f0f0-f0f0f0f0f0f0"),
-        _ => throw new InvalidOperationException($"'{symbol}' is not an approved paper-universe symbol.")
-    };
+    private static ExperimentAnalysisResult BearishExit(string familyId, string rationale) =>
+        ExperimentAnalysisResult.FromConsensus(
+            familyId,
+            Enumerable.Range(1, 5)
+                .Select(index => new ExperimentSignalCheck(
+                    $"mandatory-exit-{index}",
+                    ExperimentSignalDirection.Bearish,
+                    rationale))
+                .ToArray(),
+            5);
+
+    private static DateTimeOffset AlignDown(DateTimeOffset value, TimeSpan interval) =>
+        new(value.UtcTicks - value.UtcTicks % interval.Ticks, TimeSpan.Zero);
 
     private static bool HasExactSafeSeries(ExperimentCandleSeries series)
     {

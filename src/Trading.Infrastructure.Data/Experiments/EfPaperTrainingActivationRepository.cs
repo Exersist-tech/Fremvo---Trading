@@ -77,7 +77,9 @@ public sealed class EfPaperTrainingActivationRepository :
         return serialized
             .SelectMany(Deserialize<PaperTrainingWorkerSlot>)
             .Where(slot => !string.IsNullOrWhiteSpace(slot.Symbol))
-            .SelectMany(slot => PaperTrainingAutoSelectionService.ApprovedIntervals.Select(
+            .SelectMany(slot => ApprovedConsensusStrategyProfiles
+                .RequiredIntervals(slot.StrategyId, slot.Interval)
+                .Select(
                 interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)))
             .Distinct()
             .OrderBy(subscription => subscription.Symbol, StringComparer.OrdinalIgnoreCase)
