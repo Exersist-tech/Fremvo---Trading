@@ -70,22 +70,20 @@ automatically live-tradable list.** It is stored as configuration (seed
 data), is versioned, and may be changed by an administrator without a code
 change.
 
-The paper-training Start flow does not use this fixed seed. It loads the
-current Kraken Spot catalogue, filters active EUR-quoted cryptocurrency pairs,
-requires thirty complete daily candles preceding validation and at least EUR 1M
-median daily EUR quote volume, then ranks at most 40 pairs. This grants no
-general or live eligibility: candidates still have to pass strategy validation,
-selection, and untouched holdout to be labeled qualified. Automatic selection
-evaluates the largest bounded top-liquidity subset across eleven approved strategy evaluators and
-5-minute, 15-minute, 30-minute, and 1-hour candles. Each interval receives an
-equal 600-candle sample split into 420 validation and 180 untouched holdout
-candles. Candidate construction is pair-balanced: every shortlisted liquid pair
-receives every approved strategy once before any pair receives additional
-timeframe variants. The ten-worker selection enforces one worker per strategy,
-uses a different pair for every slot when enough eligible pairs exist, and only
-then reuses pairs while favoring unseen intervals and performance rank. The strongest
-unqualified finalists may use otherwise empty worker capacity only for explicitly
-labeled fake-funds forward exploration; this never grants live eligibility.
+**Current implementation.** Starting paper training enables a five-minute
+scanner with no preallocated workers. It loads the current Kraken Spot
+catalogue, filters active EUR-quoted cryptocurrency pairs, requires thirty
+complete daily candles and at least EUR 1M median daily EUR quote volume, then
+ranks at most 40 pairs. Exactly ten compiled strategy families evaluate their
+approved multi-timeframe profiles using closed 1m, 5m, 15m, 1h, 4h, and 1d
+evidence; derived 10m remains available for separately approved profiles. HOLD outcomes,
+vetoes, rejected evidence, and queued opportunities allocate no workers. A
+fresh actionable opportunity receives a durable admission only after
+deterministic ranking and concentration/capacity checks. At most ten admissions
+may be active, pair diversity is preferred before pair reuse, and the former
+one-worker-per-strategy limit is removed. Active pairs additionally subscribe
+to closed 1-minute candles for position management; 1-minute entry remains
+prohibited. No scan or paper result grants live eligibility.
 
 ### 2.1 Known caveats in the seed list
 

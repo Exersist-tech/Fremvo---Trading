@@ -50,6 +50,7 @@ public interface IExperimentPaperPlanEvidenceRepository
 /// </summary>
 public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
 {
+    private static readonly TimeSpan AdmissionEvidencePreparationWindow = TimeSpan.FromMinutes(5);
     private static readonly Action<ILogger, Guid, string, Exception?> s_logSkipped =
         LoggerMessage.Define<Guid, string>(
             LogLevel.Information,
@@ -103,13 +104,24 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         var configuration = await _configurations.GetAsync(worker.UserId, cancellationToken).ConfigureAwait(false);
         var assignment = configuration?.Assignments.SingleOrDefault(x => x.WorkerId == worker.Id);
         if (configuration is null || assignment is null || !configuration.IsRunnableFor(worker, assignment))
+        {
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
+        }
 
         var observation = await _analysis.AnalyzeAcrossPaperTimeframesAsync(
             worker, configuration, assignment, now, cancellationToken).ConfigureAwait(false);
         if (observation.Evidence is null || observation.Outcome == ExperimentAnalysisOutcome.Blocked)
         {
             ReportSkip(worker, $"analysis: {observation.Reason}");
+            if (observation.Reason.Contains(
+                    "Closed candle evidence is unavailable",
+                    StringComparison.Ordinal)
+                && now - worker.CreatedAtUtc < AdmissionEvidencePreparationWindow)
+            {
+                return;
+            }
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -129,12 +141,16 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
             identity,
             cancellationToken).ConfigureAwait(false);
         if (decision.Proposal.Action is not (ExperimentProposalAction.Open or ExperimentProposalAction.Add))
+        {
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
+        }
 
         var snapshot = await _snapshots.GetAsync(worker, configuration, assignment, observation, cancellationToken).ConfigureAwait(false);
         if (snapshot is null || !IsExactPlan(snapshot.Plan, worker, observation.Evidence, snapshot.Context.Candle))
         {
             ReportSkip(worker, "sizing: no exact approved paper sizing snapshot was available");
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -149,11 +165,15 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         var sizing = snapshot.SizingInput;
         if (sizing.EntryPrice != snapshot.Plan.EntryReferencePrice || sizing.ProtectiveStopPrice != snapshot.Plan.ProtectiveStopPrice
             || sizing.Direction != PaperPositionDirection.Long || snapshot.Context.Portfolio.PositionQuantity != worker.PositionQuantity)
+        {
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
+        }
         var sized = PaperRiskPositionSizer.Size(sizing);
         if (!sized.IsAccepted)
         {
             ReportSkip(worker, $"sizing: {sized.Explanation}");
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -162,10 +182,14 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
 
         var fill = snapshot.WorkerRiskRequest.ProposedFill;
         if (fill is null || fill.RequestedQuantity != sized.Quantity || fill.ReferencePrice != snapshot.Plan.EntryReferencePrice)
+        {
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
+        }
         if (!_workerRisk.Evaluate(snapshot.WorkerRiskRequest).IsAllowed)
         {
             ReportSkip(worker, "risk: the worker risk evaluator denied the proposed paper fill");
+            await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -173,7 +197,11 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
         // The pipeline receives the sizer output verbatim; it is never clamped or rounded here.
         var result = await _paper.ProcessSizedAsync(decision, snapshot.Context, sized.Quantity, cancellationToken).ConfigureAwait(false);
         if (result.PipelineResult?.Executed != true || result.PaperFill is null)
+        {
+            if (result.PipelineResult?.RequiresReconciliation != true)
+                await CompleteUnfilledScannerAdmissionAsync(worker, cancellationToken).ConfigureAwait(false);
             return;
+        }
 
         if (!result.WorkerStatePersisted)
         {
@@ -183,6 +211,21 @@ public sealed class PaperTrainingSizedExecutionRunner : IExperimentWorkerRunner
             await _ledger.AddAsync(worker.UserId, worker.Ledger.Last(), cancellationToken).ConfigureAwait(false);
             await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task CompleteUnfilledScannerAdmissionAsync(
+        ExperimentWorker worker,
+        CancellationToken cancellationToken)
+    {
+        if (worker.PositionQuantity != 0m
+            || !worker.Name.StartsWith("Paper opportunity ", StringComparison.Ordinal)
+            || worker.Status != ExperimentWorkerStatus.Running)
+        {
+            return;
+        }
+
+        worker.Complete();
+        await _workers.SaveAsync(worker, cancellationToken).ConfigureAwait(false);
     }
 
     private void ReportSkip(ExperimentWorker worker, string reason)

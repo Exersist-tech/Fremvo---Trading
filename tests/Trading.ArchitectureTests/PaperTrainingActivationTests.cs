@@ -12,7 +12,7 @@ public sealed class PaperTrainingActivationTests
     private static readonly string[] ExpectedAuditActions = ["PaperTrainingStarted"];
     private static readonly int[] ExpectedGroupSizes = [4, 3, 3];
     private static readonly string[] ExpectedCatalogSymbols =
-        ["XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR", "XRP/EUR", "TRX/EUR", "BTC/USD", "BTC/USD", "DOGE/EUR", "ADA/EUR"];
+        ["XRP/EUR", "TRX/EUR", "DOGE/EUR", "ADA/EUR", "XRP/EUR", "TRX/EUR", "XBT/EUR", "XBT/EUR", "DOGE/EUR", "ADA/EUR"];
 
     [Fact]
     public async Task DefaultActivationSourceStartsNoWorkers()
@@ -34,6 +34,26 @@ public sealed class PaperTrainingActivationTests
 
         Assert.True(active.IsActive);
         Assert.Equal(new[] { owner }, await repository.GetActiveOwnerIdsAsync());
+        Assert.Equal(ExpectedAuditActions, audit.Events.Select(e => e.Action));
+    }
+
+    [Fact]
+    public async Task ScannerStartAllocatesNoWaitingWorkers()
+    {
+        var repository = new InMemoryPaperTrainingActivationRepository();
+        var audit = new InMemoryAuditEventWriter();
+        var service = new PaperTrainingActivationService(repository, audit, new FixedTimeProvider());
+        var owner = Guid.NewGuid();
+
+        var active = await service.StartScannerAsync(
+            owner,
+            owner,
+            RoleType.User,
+            CompletePrerequisites());
+
+        Assert.True(active.IsActive);
+        Assert.Empty(active.Slots);
+        Assert.Empty(active.QualificationResults);
         Assert.Equal(ExpectedAuditActions, audit.Events.Select(e => e.Action));
     }
 
@@ -64,7 +84,7 @@ public sealed class PaperTrainingActivationTests
         Assert.Equal(10, request.Slots.Count);
         Assert.All(request.Slots, slot => Assert.Equal(PaperTrainingActivationService.FixedStartingCash, slot.StartingCash));
         Assert.Equal(PaperTrainingActivationService.ApprovedSlots.Take(10), request.Slots);
-        Assert.Equal(15, PaperTrainingActivationService.ApprovedSlots.Count);
+        Assert.Equal(10, PaperTrainingActivationService.ApprovedSlots.Count);
         Assert.Equal(10, request.Slots.Select(slot => slot.StrategyId).Distinct(StringComparer.Ordinal).Count());
         Assert.Equal(ExpectedGroupSizes, request.Slots.GroupBy(slot => slot.Group).OrderBy(group => group.Key).Select(group => group.Count()));
         Assert.All(request.Slots, slot => Assert.StartsWith("phase5b-", slot.ProvenanceId, StringComparison.Ordinal));
@@ -192,11 +212,15 @@ public sealed class PaperTrainingActivationTests
             owner, owner, RoleType.User, [discovered], [result], CompletePrerequisites());
 
         Assert.Equal("ETH/USD", Assert.Single(activation.Slots).Symbol);
+        var profile = ApprovedConsensusStrategyProfiles.Resolve(
+            discovered.StrategyId,
+            discovered.Interval);
         Assert.Equal(
-            PaperTrainingAutoSelectionService.ApprovedIntervals,
+            new[] { profile.Signal, profile.Execution, profile.Regime }.Distinct().Order(),
             (await repository.GetActiveSubscriptionsAsync())
                 .Where(subscription => subscription.Symbol == "ETH/USD")
-                .Select(subscription => subscription.Interval));
+                .Select(subscription => subscription.Interval)
+                .Order());
     }
 
     [Fact]

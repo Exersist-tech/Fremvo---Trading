@@ -9,7 +9,14 @@ using Trading.MarketData.Experiments;
 
 namespace Trading.Application.Experiments;
 
-public enum ExperimentProtectiveExitKind { StopLoss = 0, TakeProfit, MomentumReversal }
+public enum ExperimentProtectiveExitKind
+{
+    StopLoss = 0,
+    TakeProfit,
+    MomentumReversal,
+    StrategyInvalidation,
+    MaximumHolding
+}
 
 /// <summary>
 /// Owner- and worker-scoped paper-position evidence. Implementations must obtain this from the
@@ -25,7 +32,103 @@ public sealed record ExperimentProtectiveExitPosition(
     DateTimeOffset OpenedAtUtc,
     decimal? StopLossPrice,
     decimal? TakeProfitPrice,
-    ExperimentWorker? Worker = null);
+    ExperimentWorker? Worker = null,
+    CandleInterval SignalInterval = CandleInterval.None);
+
+public static class ApprovedStrategyHoldingPolicy
+{
+    public static int MaximumSignalCandles(string strategyId) => strategyId switch
+    {
+        "platform.ema-trend-continuation" => 40,
+        "platform.donchian-breakout-ensemble" => 60,
+        "platform.bollinger-mean-reversion" => 40,
+        "platform.rsi-pullback" => 40,
+        "platform.macd-volume" => 50,
+        "platform.volatility-compression-breakout" => 50,
+        "platform.cross-sectional-momentum-rotation" => 30,
+        "platform.relative-strength-pullback-rotation" => 180,
+        "platform.session-conditioned-breakout" => 60,
+        "platform.regime-switching-ensemble" => 50,
+        _ => 0
+    };
+
+    public static bool IsExpired(ExperimentProtectiveExitPosition position, DateTimeOffset asOfUtc)
+    {
+        ArgumentNullException.ThrowIfNull(position);
+        var candles = MaximumSignalCandles(position.Worker?.StrategyId ?? string.Empty);
+        if (candles == 0 || position.SignalInterval is CandleInterval.None or CandleInterval.FourDays)
+            return false;
+        var duration = TimeSpan.FromMinutes(checked((int)position.SignalInterval * candles));
+        return asOfUtc >= position.OpenedAtUtc.Add(duration);
+    }
+}
+
+public sealed record ApprovedStrategyInvalidation(bool ShouldExit, string Reason);
+
+public static class ApprovedStrategyInvalidationPolicy
+{
+    public static ApprovedStrategyInvalidation Evaluate(
+        string strategyId,
+        IReadOnlyList<Candle> signalCandles)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
+        ArgumentNullException.ThrowIfNull(signalCandles);
+        if (signalCandles.Count < 51)
+            return new(false, "Strategy invalidation requires at least 51 closed signal candles.");
+
+        var current = signalCandles[^1];
+        var prior = signalCandles.Take(signalCandles.Count - 1).ToArray();
+        bool invalidated;
+        string reason;
+        switch (strategyId)
+        {
+                case "platform.ema-trend-continuation":
+                    invalidated = current.Close < Ema(signalCandles, 50);
+                    reason = "Signal close crossed below EMA 50.";
+                    break;
+                case "platform.donchian-breakout-ensemble":
+                case "platform.session-conditioned-breakout":
+                    invalidated = current.Close < prior.TakeLast(20).Min(candle => candle.Low);
+                    reason = "Signal close broke the prior Donchian 20 exit channel.";
+                    break;
+                case "platform.bollinger-mean-reversion":
+                    invalidated = current.Close >= Bands(signalCandles).Middle;
+                    reason = "Range-reversion price reached the Bollinger middle-band target.";
+                    break;
+                case "platform.rsi-pullback":
+                    invalidated = Rsi(signalCandles) >= 70m || current.Close < Ema(signalCandles, 20);
+                    reason = "RSI upper target or signal EMA 20 invalidation was reached.";
+                    break;
+                case "platform.macd-volume":
+                    var macd = Macd(signalCandles);
+                    var priorMacd = Macd(prior);
+                    invalidated = macd.Line < macd.Signal
+                        || macd.Histogram < priorMacd.Histogram
+                        || current.Close < Ema(signalCandles, 50);
+                    reason = "MACD reverse cross, histogram deterioration, or EMA 50 failure occurred.";
+                    break;
+                case "platform.volatility-compression-breakout":
+                    invalidated = current.Close <= prior.TakeLast(20).Max(candle => candle.High);
+                    reason = "Price closed back inside the prior compression boundary.";
+                    break;
+                default:
+                    return new(false, "This family uses consensus, rank, or portfolio invalidation.");
+        }
+        return new(invalidated, invalidated ? reason : "No family-specific invalidation was observed.");
+    }
+
+    private static decimal Ema(IReadOnlyList<Candle> candles, int period) =>
+        new ExponentialMovingAverageCalculator(period).Calculate(candles).Value!.Value;
+
+    private static decimal Rsi(IReadOnlyList<Candle> candles) =>
+        new RelativeStrengthIndexCalculator(14).Calculate(candles).Value!.Value;
+
+    private static BollingerBandsValue Bands(IReadOnlyList<Candle> candles) =>
+        new BollingerBandsCalculator(20, 2m).Calculate(candles).Value!.Value;
+
+    private static MacdValue Macd(IReadOnlyList<Candle> candles) =>
+        new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(candles).Value!.Value;
+}
 
 public interface IExperimentProtectiveExitPositionSource
 {
@@ -109,6 +212,13 @@ public static class ExperimentProfitProtectionPolicy
 {
     public const decimal MinimumRewardRiskMultiple = 0.5m;
     private const int RequiredCandles = 35;
+    internal static CandleInterval[] ConfirmationIntervals { get; } =
+    [
+        CandleInterval.FiveMinutes,
+        CandleInterval.FifteenMinutes,
+        CandleInterval.ThirtyMinutes,
+        CandleInterval.OneHour
+    ];
 
     public static ExperimentProfitProtectionDecision Evaluate(
         ExperimentProtectiveExitPosition position,
@@ -119,7 +229,7 @@ public static class ExperimentProfitProtectionPolicy
 
         if (position.StopLossPrice is not decimal stop || stop >= position.EntryPrice)
             return NoExit("A valid opening risk distance is required for profit protection.");
-        if (PaperTrainingAutoSelectionService.ApprovedIntervals.Any(interval =>
+        if (ConfirmationIntervals.Any(interval =>
                 !evidence.TryGetValue(interval, out var series)
                 || !IsValidSeries(series, position, interval)))
             return NoExit("Complete safe 5m, 15m, 30m, and 1h evidence is required for profit protection.");
@@ -156,7 +266,7 @@ public static class ExperimentProfitProtectionPolicy
         if (!confirmedPeak || !rsiRolledOver || !macdWeakening)
             return NoExit("The profitable 5-minute position has no confirmed RSI/MACD peak rollover.");
 
-        var higherTimeframeConfirmation = PaperTrainingAutoSelectionService.ApprovedIntervals
+        var higherTimeframeConfirmation = ConfirmationIntervals
             .Where(interval => interval != CandleInterval.FiveMinutes)
             .Any(interval => IsWeakening(evidence[interval].Candles));
         if (!higherTimeframeConfirmation)
@@ -313,19 +423,83 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
             return results;
         }
 
-        var momentum = await EvaluateProfitProtectionAsync(position, asOfUtc, cancellationToken).ConfigureAwait(false);
-        if (!momentum.ShouldExit || momentum.ExitPrice is null || momentum.TriggerCandle is null)
-            return results;
-        var momentumIdentity = $"{ExperimentProtectiveExitKind.MomentumReversal}|v1|{momentum.Reason}";
-        results.Add(await SubmitAsync(
+        var invalidation = await EvaluateStrategyInvalidationAsync(
             position,
-            momentum.TriggerCandle,
-            ExperimentProtectiveExitKind.MomentumReversal,
-            momentum.ExitPrice.Value,
-            momentumIdentity,
             asOfUtc,
-            cancellationToken).ConfigureAwait(false));
+            cancellationToken).ConfigureAwait(false);
+        if (invalidation.Decision.ShouldExit && invalidation.Candle is not null)
+        {
+            var identity = $"{ExperimentProtectiveExitKind.StrategyInvalidation}|v2|{invalidation.Decision.Reason}";
+            results.Add(await SubmitAsync(
+                position,
+                invalidation.Candle,
+                ExperimentProtectiveExitKind.StrategyInvalidation,
+                invalidation.Candle.Close,
+                identity,
+                asOfUtc,
+                cancellationToken).ConfigureAwait(false));
+            return results;
+        }
+
+        var momentum = await EvaluateProfitProtectionAsync(position, asOfUtc, cancellationToken).ConfigureAwait(false);
+        if (momentum.ShouldExit && momentum.ExitPrice is not null && momentum.TriggerCandle is not null)
+        {
+            var momentumIdentity = $"{ExperimentProtectiveExitKind.MomentumReversal}|v1|{momentum.Reason}";
+            results.Add(await SubmitAsync(
+                position,
+                momentum.TriggerCandle,
+                ExperimentProtectiveExitKind.MomentumReversal,
+                momentum.ExitPrice.Value,
+                momentumIdentity,
+                asOfUtc,
+                cancellationToken).ConfigureAwait(false));
+            return results;
+        }
+
+        var latest = seriesResult.Series.Candles[^1];
+        if (ApprovedStrategyHoldingPolicy.IsExpired(position, latest.CloseTimeUtc))
+        {
+            var identity = $"{ExperimentProtectiveExitKind.MaximumHolding}|v2|{position.SignalInterval}";
+            results.Add(await SubmitAsync(
+                position,
+                latest,
+                ExperimentProtectiveExitKind.MaximumHolding,
+                latest.Close,
+                identity,
+                asOfUtc,
+                cancellationToken).ConfigureAwait(false));
+        }
         return results;
+    }
+
+    private async Task<(ApprovedStrategyInvalidation Decision, Candle? Candle)> EvaluateStrategyInvalidationAsync(
+        ExperimentProtectiveExitPosition position,
+        DateTimeOffset asOfUtc,
+        CancellationToken cancellationToken)
+    {
+        if (position.Worker is null
+            || position.SignalInterval is CandleInterval.None or CandleInterval.FourDays)
+        {
+            return (new(false, "Strategy identity and signal interval are required."), null);
+        }
+        var duration = TimeSpan.FromMinutes((int)position.SignalInterval);
+        var aligned = new DateTimeOffset(
+            asOfUtc.UtcTicks - asOfUtc.UtcTicks % duration.Ticks,
+            TimeSpan.Zero);
+        var result = await _candles.GetClosedSeriesAsync(
+            new ExperimentCandleSeriesRequest(
+                position.Symbol,
+                position.SignalInterval,
+                aligned,
+                ApprovedConsensusStrategyProfiles.RequiredHistory),
+            cancellationToken).ConfigureAwait(false);
+        if (!result.IsAvailable || result.Series is null)
+            return (new(false, "Complete strategy invalidation evidence is unavailable."), null);
+        return (
+            ApprovedStrategyInvalidationPolicy.Evaluate(
+                position.Worker.StrategyId,
+                result.Series.Candles),
+            result.Series.Candles[^1]);
     }
 
     private async Task<ExperimentProfitProtectionDecision> EvaluateProfitProtectionAsync(
@@ -333,7 +507,7 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
         DateTimeOffset asOfUtc,
         CancellationToken cancellationToken)
     {
-        var reads = PaperTrainingAutoSelectionService.ApprovedIntervals
+        var reads = ExperimentProfitProtectionPolicy.ConfirmationIntervals
             .Select(async interval => (
                 Interval: interval,
                 Result: await _candles.GetClosedSeriesAsync(

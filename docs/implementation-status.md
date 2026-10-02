@@ -4,37 +4,23 @@
 
 - Approved strategy templates retain individual approval and parameter
   provenance while their Kraken Spot symbols are selected dynamically.
-- The EMA continuation catalog family can evaluate exact chronological closed
-  candles. Evidence-dependent strategy families remain fail-closed.
-- The authenticated `/experiments` Start flow discovers Kraken's active
-  EUR-quoted Spot pairs from the venue catalogue, requires thirty complete
-  pre-test daily candles and at least EUR 1M median daily quote volume, and ranks a
-  maximum of 40 pairs. The ten most liquid eligible pairs form a bounded
-  250-candidate search across approved historical evaluators and 5-minute,
-  15-minute, 30-minute, and 1-hour candles. Candidate construction gives every
-  shortlisted pair every strategy once before assigning additional timeframe
-  variants. Each interval uses 600 closed candles split
-  into 420 validation and 180 untouched holdout candles, remaining below the
-  venue response limit. Finalist ranking requires a new strategy and prefers a
-  new symbol before interval diversity and performance, producing ten distinct
-  pairs when enough pass discovery and falling back to reuse otherwise. At most ten finalists are measured on
-  untouched holdout; passers remain qualified and failures may run only as
-  explicitly labeled fake-funds exploration with no live eligibility. Replays apply taker fees, adverse slippage, and next-candle
-  execution. Qualification evidence, exact selected slots, and Stop state
-  survive restarts. The market-data host checks exact durable activation
-  symbol/interval subscriptions every minute without tearing down an unchanged
-  stream, so longer 15-minute, 30-minute, and 1-hour candles can finalize.
-  During forward observation, each
-  worker requires safe closed 5-minute, 15-minute, 30-minute, and 1-hour
-  evidence; its complete primary strategy signal needs at least one other
-  timeframe to confirm either the same condition or an upward closed-candle
-  direction. The market-data host seeds 47 authoritative closed bars per active
-  pair and interval, enough to retain a 35-bar supporting window behind the
-  latest hourly primary close, and repairs only exact OHLCV matches affected by the former
-  forming-candle `Incomplete` flag. Decision identity is bound to the primary
-  candle close rather than the host tick, preventing repeated orders from one
-  candle. Supporting timeframes are cut off at that same primary close, so later
-  faster candles cannot introduce look-ahead or mutate the decision. Complete
+- The continuous scanner and admitted workers use compiled strategy version 2
+  with exact regime/signal/execution roles, five named checks, immutable default
+  parameters, and at least 220 chronological closed candles per requested role.
+- The authenticated `/experiments` Start flow enables a continuous scanner with
+  no preallocated workers. Every five minutes it discovers Kraken's active,
+  sufficiently liquid EUR Spot pairs, loads each family's approved closed
+  regime/signal/execution evidence, and evaluates only profiles whose signal
+  candle has newly closed. HOLD, vetoed, rejected, and queued observations
+  consume no worker. At most ten ranked opportunities are admitted; each
+  receives an isolated fake-EUR worker and pair diversity is preferred before
+  reuse. Exact selected slots, scan observations, and Stop state survive
+  restarts. The market-data host derives subscriptions from the active profiles,
+  including 1m, 4h, and 1d where required, and backfills 220 authoritative
+  closed bars. Each role is cut off at its own most recent completed UTC
+  boundary, preventing future or forming candles from entering a decision.
+  Decision identity remains bound to the closed signal candle rather than the
+  host tick, preventing repeated orders from one candle. Complete
   neutral outcomes are retained in the decision ledger for
   diagnosis, while temporarily unavailable startup evidence remains a no-op so
   backfill cannot freeze an incomplete decision. Missing or blocked evidence
@@ -44,8 +30,8 @@
   worker portfolio, re-evaluating that same primary candle returns its already
   accepted decision unchanged instead of attempting to reinterpret `Open` as
   `Neutral` or `Add`; changed evidence under the same identity still conflicts
-  and fails closed. Decision fingerprints commit to all
-  four series. Paper sizing applies quantity steps and minimum notionals while
+  and fails closed. Decision fingerprints commit to all three role series.
+  Paper sizing applies quantity steps and minimum notionals while
   treating the closed-candle entry and ATR stop as market references rather
   than limit prices; low-priced assets are no longer blocked by an unrelated
   one-unit cap. Only the simulated paper adapter is registered; no venue order
@@ -62,9 +48,9 @@ Status legend: `Not started` | `In progress` | `Blocked` | `Done`
 ## Platform changes
 
 | Change | Date | Notes |
+| Continuous Kraken paper scanner | 2026-09-23 | **Implemented, paper only:** starting paper training now enables an empty scanner rather than ten waiting workers. The market-data host performs one idempotent scan per five-minute boundary across the current liquid Kraken Spot EUR universe, evaluates exactly ten compiled five-check consensus families, ranks opportunities deterministically, prefers unused pairs before reuse, and reserves at most ten durable activation slots. HOLD, vetoed, rejected, and queued observations allocate no worker. The experiment host creates one isolated worker only from a durable admission; completed flat workers release capacity while immutable worker/fill history remains. Active pairs subscribe to closed 1-minute candles for protective management, never entry. Scan observations and queue/admission state reuse the existing optimistic-concurrency activation record, avoiding a destructive local schema rebuild; normalized scan tables remain a future scale-out migration. No live route was added. |
 | Bounded paper-position pyramiding | 2026-09-21 | **Paper only:** the automatic worker path may emit an `Add` only after a fresh bullish primary signal is confirmed by another required timeframe and the closed primary mark is strictly above average entry. The add uses the existing reduced-risk sizer and exact quantity, consumes its favorable mark once, and remains bounded by fake cash, worker/platform exposure, purchased quantity/notional, current-position quantity/notional, and maximum additions. Risk rejects mismatched Open/Add state and any below-entry add; durable execution claims prevent duplicate fills; immutable ledger replay reconstructs accepted adds without treating transient authorization marks as trades. The worker overview exposes additions used versus the fixed cap. No live or futures adapter is reachable. |
-| Expanded paper strategy candidate catalog | 2026-09-21 | Added five versioned, platform-owned hybrid evaluators: RSI-MACD confluence, EMA-RSI trend, Bollinger-MACD recovery, Donchian-volume breakout, and EMA-volume pullback. Each uses only chronological closed decimal candle data, has an equivalent historical evaluator and approved inert execution-plan profile, and is analyzed through the existing 5m/15m/30m/1h confirmation path. Historical validation and untouched holdout still decide qualification, and diversity-first selection chooses at most ten concurrent workers from the larger 15-template catalog. The ten-worker safety ceiling remains unchanged. |
-| Experiment strategy concentration limit | 2026-09-21 | Automatic selection now enforces at most one active worker per strategy. The ten-worker pool therefore runs ten distinct strategy families selected from the larger approved catalog; interval and symbol diversity break ties after the hard strategy-concentration rule. The concurrent-worker safety ceiling remains ten. |
+| Exact five-channel consensus strategy catalog | 2026-09-23 | Replaced the temporary 15-evaluator runtime catalog with exactly the ten approved families and advanced the compiled definitions/schema to version 2. Scanner admission and worker reevaluation now use explicit regime/signal/execution profiles and 220 closed candles: EMA 50/200 plus signal 20/50, Donchian 20/55/100, Bollinger/RSI/ADX re-entry, RSI trend pullback, MACD 12/26/9 acceleration, percentile-based compression breakout, point-in-time daily cross-sectional ranking, daily/4h/1h relative-strength pullback, versioned IANA session breakout, and deterministic regime consensus. Every family emits five immutable checks; ordinary families require four while stricter all-condition families require five. Non-empty or malformed runtime parameter documents, inadequate warm-up, unsafe data, opposing regimes, and strategy-specific vetoes fail closed. Spot bearish evidence cannot open a short; no live route was added. |
 | Multi-timeframe paper profit protection | 2026-09-21 | Added a deterministic full-position momentum-reversal exit behind the independently enabled protective scheduler. Fixed ATR stop/target checks retain priority. Before target, exit is possible only after at least 0.5R unrealized progress, a confirmed closed 5-minute peak/lower-high formation, RSI rolling down from strength, weakening MACD histogram, and falling price plus RSI confirmation on at least one of 15m/30m/1h. Every 5m/15m/30m/1h series must be safe, contiguous, fresh, UTC, and newer than the position. Missing evidence fails closed. The exit uses the durable claim, decision ledger, mandatory pipeline, and paper adapter, so duplicate and live execution remain unreachable. |
 | Approved paper execution plans | 2026-09-20 | **Paper-analysis capability:** every one of the ten fixed, approved research-family identities now has a versioned platform plan adapter. A plan is emitted only from a non-neutral completed research observation with matching registered identity and strictly chronological, safe, closed UTC candle evidence ending exactly at the observation as-of instant. Its entry is exactly the latest closed price; a fixed per-profile ATR(14) geometry provides a required protective stop and an optional conservative target. Insufficient ATR warmup, neutral/missing conditions, unsafe, stale, or future evidence fail closed. The immutable artifact preserves every ATR source candle identity and plan/research profile provenance, and deliberately exposes no quantity, risk adjustment, intent, command, order, worker, exchange, or pipeline surface. It is not wired to activation or any execution path. |
 | Paper-training risk-based sizing | 2026-09-20 | **Paper-training capability:** `PaperRiskPositionSizer` is a pure, exchange-neutral decimal policy/value model only; it is not wired to a worker, order adapter, account stage, live path, futures path, or connector. A complete fresh market/account snapshot, worker equity/cash/budget, platform-approved strategy profile, protective stop, direction, current position/exposure, and exchange tick/step/minimum filters are mandatory. It fails closed for missing, stale, invalid, future-dated, or non-UTC input. Sizing uses the smallest approved strategy, worker, and mandatory platform fraction (the platform opening ceiling is hard-limited to 0.25% of equity), then conservatively floors to the quantity step and recomputes risk/notional. It rejects non-protective stops, insufficient cash, minimum/filter failures, and all cap violations. Existing-position adds require the established favorable-add approval and a same-or-lower platform multiplier; there is no confidence, P&L, martingale, or averaging-down input. No automatic paper trade is activated by this capability. |
@@ -170,6 +156,8 @@ See `docs/strategy-research-plan.md`. These are falsifiable research templates, 
 | 5B.16 Family 10 — regime-switching ensemble | Done | 2026-09-20 — Added a platform-authored, versioned deterministic research-only ensemble with a SHA-256 identity for its immutable, bounded regime-to-approved-family map. It selects only recorded approved-family observations matching the deterministic classifier result; unknown regimes block, and Spot-ineligible down/high-volatility mappings remain neutral rather than choosing a default. Accepted, as-of-aligned rejection gates and identical safe UTC as-of, dataset, symbol, and timeframe provenance are required for every selected component; mismatched, stale, unsafe, or future evidence blocks. Component evidence and classifier version/hash are retained. Agreement changes only research confidence and explanation; the result has no allocation, quantity, sizing, leverage, intent, order, execution, persistence, UI, worker, futures, or profit-claim surface and explicitly cannot increase exposure. |
 | 5B.17 Derived 4-day candle interval (documented UTC boundary), optional | Done | 2026-09-20 — immutable four-day candles are derived only from exactly four contiguous, closed one-day candles for one symbol. Windows use a UTC Unix-epoch grid: starts are 00:00:00 UTC where the whole-day offset from 1970-01-01 is divisible by four; this is not locale, calendar-week, or exchange-time-zone dependent. The builder refuses partial, missing, overlapping, unaligned, wrong-interval, wrong-symbol, and out-of-window constituents; aggregates decimal first-open, extrema, final-close, and volume sum; retains all constituent quality evidence and derived provenance. Kraken explicitly refuses native `FourDays`, so it cannot silently substitute another interval. |
 | 5B.18 Experiment groups A/B/C wiring for the ten workers | Done | 2026-09-20 — Added immutable, versioned, user-scoped deterministic A/B/C assignment (four/three/three maximum) with group-and-worker derived reproducible random seeds. Every scheduled worker is bound to an already-approved strategy version, parameter fingerprint, closed dataset/provenance, classifier identity, restrictive approval requirements, and accepted recorded gates. Missing, mismatched, unapproved, or invalid evidence is a fail-closed no-op; results/profit never select or promote a group. Group runs preserve each worker's existing isolated paper balance, positions, orders, state, and fault containment. The experiment host now requests a configuration source and its only host registration is an unavailable source, so it runs no group until immutable approved evidence is supplied; it remains paper-adapter-only. No persistence, migration, UI, real/demo/futures exchange path, strategy change, or automatic approval behavior was added. |
+| 5B.19 Derived 10-minute candle interval | Done | Existing market-data capability derives 10-minute candles only from ten contiguous safe closed 1-minute candles on a UTC ten-minute boundary and marks them derived; Kraken native historical fetch explicitly refuses the unsupported native interval. The new strategy catalogue treats this as interval groundwork only: no family gains a 10-minute profile without a new version and complete approval evidence. |
+| 5B.20 Immutable paper-only approval workflow | Not started | The design, state model, evidence bundle, twelve gates, authorization rules and acceptance criteria are complete in `docs/strategy-approval-workflow.md` and `docs/strategy-validation-matrix.md`. Runtime state/persistence changes and migration of the legacy approval enum have not been implemented. |
 
 ## Phase 6 — Optimization (train/validation/holdout/walk-forward)
 | Task | Status | Notes |

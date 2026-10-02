@@ -134,7 +134,8 @@ public sealed class Worker : BackgroundService
         var activated = activePaperSubscriptions
             .Where(subscription =>
                 !string.IsNullOrWhiteSpace(subscription.Symbol)
-                && PaperTrainingAutoSelectionService.ApprovedIntervals.Contains(subscription.Interval))
+                && PaperTrainingAutoSelectionService.ManagedIntervals.Contains(subscription.Interval)
+                && subscription.Interval != Trading.Domain.Market.CandleInterval.TenMinutes)
             .Select(subscription => new CandleSubscription(subscription.Symbol, subscription.Interval));
 
         return configured

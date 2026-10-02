@@ -172,17 +172,25 @@ Full detail: `docs/strategy-research-plan.md`.
 
 - Ten approved research families are defined. They are **falsifiable
   research templates, not strategies expected to be profitable.**
-- `StrategyApprovalState` (enum: `Draft`, `BacktestApproved`,
-  `PaperApproved`, `SpotTestApproved`, `SpotLiveApproved`,
-  `FuturesTestApproved`, `FuturesLiveApproved`, `Suspended`,
-  `Deprecated`). **All strategies begin as `Draft`**; no transition is
-  automatic and each requires an audited human approver.
+- **Current implementation:** `StrategyApprovalState` still contains the
+  legacy `Draft`, `BacktestApproved`, `PaperApproved`, `SpotTestApproved`,
+  `SpotLiveApproved`, `FuturesTestApproved`, `FuturesLiveApproved`,
+  `Suspended`, and `Deprecated` values. This does not make a live route
+  reachable.
+- **Approved future paper-only model:** replace that lifecycle through a
+  migration with `Draft`, `ResearchApproved`, `BacktestApproved`,
+  `ForwardPaperAuthorized`, `PaperApproved`, `Suspended`, `Rejected`, and
+  `Retired`, as defined in `docs/strategy-approval-workflow.md`. Live and
+  Futures approval are `NotAvailable`. No transition is automatic and each
+  promotion requires an audited human approver.
 - `StrategyApproval` — immutable, versioned; must specify supported pair
   or instrument class, minimum history, minimum liquidity, maximum
   spread, maximum estimated slippage, supported timeframes, product type,
   and approved trading modes.
 - Timeframes are separated into **regime**, **signal**, and **execution**
-  intervals; decisions are produced only from closed candles.
+  intervals; decisions are produced only from closed candles. In the initial
+  continuous-scanner design execution equals signal. Closed 1-minute candles
+  manage admitted positions only and cannot open or add exposure.
 - `SessionProfile` — versioned, IANA time-zone based, storing the
   time-zone database version. No hard-coded UTC hour for a named session.
   A session filter modifies an existing strategy and never creates a

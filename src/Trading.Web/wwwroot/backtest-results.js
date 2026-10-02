@@ -1,5 +1,5 @@
-// Backtest values are preformatted by the server. This presentation script
-// performs no financial calculations and writes every dynamic value as text.
+// Backtest values are calculated by the server. This presentation script
+// rounds them for display and writes every dynamic value as text.
 (function () {
   'use strict';
 
@@ -18,6 +18,20 @@
     return item;
   }
 
+  function formatNumber(value, header) {
+    var numeric = Number(value);
+    if (!isFinite(numeric)) { return String(value); }
+    if (header.quantity) {
+      return numeric.toLocaleString(undefined, { maximumFractionDigits: 8 });
+    }
+
+    if (header.price && Math.abs(numeric) > 0 && Math.abs(numeric) < 0.01) {
+      return numeric.toLocaleString(undefined, { maximumFractionDigits: 8 });
+    }
+
+    return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
   function table(headers, rows) {
     var result = document.createElement('table');
     var head = document.createElement('thead');
@@ -32,7 +46,9 @@
     rows.forEach(function (values) {
       var row = document.createElement('tr');
       values.forEach(function (value, index) {
-        row.appendChild(element('td', value == null ? 'Not recorded.' : String(value),
+        row.appendChild(element('td', value == null
+          ? 'Not recorded.'
+          : headers[index].numeric ? formatNumber(value, headers[index]) : String(value),
           headers[index].numeric ? 'numeric' : ''));
       });
       body.appendChild(row);
@@ -84,10 +100,10 @@
       card.appendChild(table(
         [
           { label: 'Observed UTC' }, { label: 'Outcome' }, { label: 'Rationale' },
-          { label: 'Quantity', numeric: true }, { label: 'Price', numeric: true },
+          { label: 'Quantity', numeric: true, quantity: true }, { label: 'Price', numeric: true, price: true },
           { label: 'Fee', numeric: true }, { label: 'Slippage', numeric: true },
-          { label: 'Cash balance', numeric: true }, { label: 'Base quantity', numeric: true },
-          { label: 'Reference price', numeric: true }
+          { label: 'Cash balance', numeric: true }, { label: 'Base quantity', numeric: true, quantity: true },
+          { label: 'Reference price', numeric: true, price: true }
         ],
         events.map(function (eventItem) {
           return [
@@ -109,8 +125,8 @@
       card.appendChild(table(
         [
           { label: 'Observed UTC' }, { label: 'Equity', numeric: true },
-          { label: 'Cash balance', numeric: true }, { label: 'Base quantity', numeric: true },
-          { label: 'Mark price', numeric: true }
+          { label: 'Cash balance', numeric: true }, { label: 'Base quantity', numeric: true, quantity: true },
+          { label: 'Mark price', numeric: true, price: true }
         ],
         snapshots.map(function (snapshot) {
           return [

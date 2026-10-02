@@ -4,6 +4,7 @@ using Trading.Exchanges.Kraken.MarketData;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.MarketData;
 using Trading.Infrastructure.Data.Experiments;
+using Trading.Domain.Experiments;
 using Trading.MarketData;
 using Trading.Application.Experiments;
 
@@ -41,8 +42,21 @@ if (!string.IsNullOrWhiteSpace(connectionString))
 {
     builder.Services.AddDbContext<TradingDbContext>(options => options.UseSqlServer(connectionString));
     builder.Services.AddScoped<EfPaperTrainingActivationRepository>();
+    builder.Services.AddScoped<IPaperTrainingActivationRepository>(
+        serviceProvider => serviceProvider.GetRequiredService<EfPaperTrainingActivationRepository>());
+    builder.Services.AddScoped<IPaperTrainingActivationSource>(
+        serviceProvider => serviceProvider.GetRequiredService<EfPaperTrainingActivationRepository>());
     builder.Services.AddScoped<IPaperTrainingSubscriptionSource>(
         serviceProvider => serviceProvider.GetRequiredService<EfPaperTrainingActivationRepository>());
+    builder.Services.AddScoped<EfExperimentWorkerRepository>();
+    builder.Services.AddScoped<IExperimentWorkerRepository>(
+        serviceProvider => serviceProvider.GetRequiredService<EfExperimentWorkerRepository>());
+    builder.Services.AddSingleton(PaperTrainingUniversePolicy.PlatformDefault);
+    builder.Services.AddScoped<PaperTrainingUniverseDiscovery>();
+    builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(
+        _ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+    builder.Services.AddScoped<ContinuousPaperOpportunityScanner>();
+    builder.Services.AddHostedService<ContinuousPaperScannerWorker>();
 }
 else
 {

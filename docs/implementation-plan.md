@@ -326,11 +326,12 @@ Full detail: `docs/strategy-research-plan.md`.
 1. **Purpose**: Define and implement the ten falsifiable research
    templates, their approval lifecycle, and the rejection gates that stop
    an overfit configuration from progressing.
-2. **Features**: Regime/signal/execution timeframe separation; versioned
+2. **Features**: Exactly ten stable strategy families; five explainable
+   channels per family; four-of-five consensus unless stricter; mandatory
+   veto precedence; regime/signal/execution timeframe separation; versioned
    `SessionProfile` using IANA identifiers; deterministic regime
    classifier; strategy approval state machine; rejection gates;
-   instrument-and-timeframe approval requirements; ten-worker experiment
-   groups A/B/C.
+   instrument-and-timeframe approval requirements.
 3. **Projects affected**: `Trading.Strategies`, `Trading.Indicators`,
    `Trading.Backtesting`, `Trading.Application`, `Trading.Web`.
 4. **Main entities and interfaces**: `StrategyApproval`,
@@ -348,9 +349,8 @@ Full detail: `docs/strategy-research-plan.md`.
    Selection by total profit must be impossible by design. Mean reversion
    must not permit unrestricted averaging down. Ensemble agreement must
    not raise exposure above the platform maximum. No profit claims.
-8. **Required tests**: The 16 tests listed in
-   `docs/strategy-research-plan.md` §9.
-9. **Acceptance criteria**: `docs/strategy-research-plan.md` §10.
+8. **Required tests**: `docs/strategy-validation-matrix.md`.
+9. **Acceptance criteria**: `docs/strategy-approval-workflow.md` §10.
 10. **Dependencies on earlier phases**: Phase 3 (candles, indicators),
     Phase 3B (instrument eligibility), Phase 5 (strategy contract,
     backtest engine, cost models).
@@ -376,8 +376,13 @@ Tasks:
 - 5B.14 Family 9 — session-conditioned breakout vs no-session baseline.
 - 5B.15 Deterministic, versioned regime classifier.
 - 5B.16 Family 10 — regime-switching ensemble.
-- 5B.17 Derived 4-day candle interval (documented UTC boundary), optional.
-- 5B.18 Experiment groups A/B/C wiring for the ten workers.
+- 5B.17 Derived 4-day candle interval (implemented capability; not approved by
+  the new ten-family catalogue).
+- 5B.18 Legacy A/B/C experiment grouping (implemented; superseded for future
+  runtime admission by Phase 7 continuous scanning).
+- 5B.19 Derived 10-minute candle interval from ten safe closed 1-minute
+  candles on a documented UTC boundary.
+- 5B.20 Complete the immutable approval evidence and acceptance workflow.
 
 ---
 
@@ -420,12 +425,14 @@ Tasks:
 
 ## Phase 7 — Paper trading + isolated experiment workers
 
-1. **Purpose**: Run approved strategies against live market data with fake
-   funds through the exact same pipeline that will later place real
-   orders, across up to 10 isolated experiment workers.
-2. **Features**: `PaperExecutionAdapter`, experiment worker lifecycle
-   (create/start/stop), isolated ledger/state/random-seed per worker,
-   fault isolation.
+1. **Purpose**: Continuously scan the eligible Kraken Spot EUR universe with
+   approved strategies and create isolated fake-funds workers only for concrete
+   admitted opportunities.
+2. **Features**: Five-minute stateless universe scan; deterministic fresh
+   opportunity queue; atomic just-in-time worker admission; maximum ten
+   admitted/open positions; closed 1-minute active-position management;
+   `PaperExecutionAdapter`; isolated ledger/state/random-seed per admitted
+   worker; fault isolation.
 3. **Projects affected**: `Trading.Application` (pipeline orchestration),
    `Trading.Risk` (initial minimal checks reused from Phase 8 groundwork),
    `Trading.Workers.Experiments`, `Trading.Web` (experiment dashboard).
@@ -443,16 +450,18 @@ Tasks:
    to prevent later confusion.
 7. **Trading and financial risks**: Establishes the full pipeline shape
    (MarketEvent → … → AuditEvent) so live trading later reuses proven code;
-   a fault in one worker must not affect the other nine (tested
-   explicitly); paper results must not be presented as predictive of live
-   performance.
-8. **Required tests**: End-to-end paper pipeline test per event; worker
-   isolation test (fault in one doesn't affect others); idempotent
-   client-order-id behavior even in paper mode (groundwork for Phase 8);
-   at-most-10-workers constraint test.
-9. **Acceptance criteria**: Up to 10 concurrently running paper experiment
-   workers, each with independent state, execute approved strategies
-   against live market data, producing auditable paper orders/positions.
+   scanning and queued opportunities must consume no worker slots; admission
+   must never exceed ten; one-minute management must never become an entry
+   path; a fault in one worker must not affect scanning or other workers; paper
+   results must not be presented as predictive of live performance.
+8. **Required tests**: The scanner, admission, position-management, pipeline,
+   isolation, concurrency, idempotency, restart and reconciliation rows in
+   `docs/strategy-validation-matrix.md`.
+9. **Acceptance criteria**: The eligible universe continues to be scanned when
+   capacity is full; HOLD/rejected/queued candidates allocate zero workers;
+   each admitted opportunity receives one isolated worker atomically; at most
+   ten admitted/open positions exist; closed positions release capacity after
+   reconciliation; every paper decision/order/position remains auditable.
 10. **Dependencies on earlier phases**: Phases 3, 5 (and 6 optionally for
     parameter selection).
 11. **Explicitly excluded work**: Real exchange order placement, risk
@@ -462,8 +471,10 @@ Tasks:
 - 7.1 Pipeline entities (`MarketEvent`…`ExecutionCommand`) + repositories.
 - 7.2 `PaperExecutionAdapter` implementing `IExecutionAdapter`.
 - 7.3 `ExperimentWorker` lifecycle + isolation boundary (fault handling).
-- 7.4 `Trading.Workers.Experiments` hosting up to 10 workers.
-- 7.5 Experiment dashboard (Blazor): create/start/stop, view ledger/state.
+- 7.4 Stateless continuous scanner and immutable candidate observations.
+- 7.5 Deterministic queue, atomic capacity admission and just-in-time workers.
+- 7.6 Closed 1-minute active-position manager with no entry capability.
+- 7.7 Experiment dashboard: scanner health, queue, capacity and position state.
 
 ---
 

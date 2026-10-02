@@ -8,7 +8,7 @@ namespace Trading.Workers.MarketData;
 
 public sealed class PaperTrainingCandleBackfillService
 {
-    internal const int RequiredCandleCount = 47;
+    internal const int RequiredCandleCount = ApprovedConsensusStrategyProfiles.RequiredHistory;
 
     private static readonly Action<ILogger, string, CandleInterval, int, Exception?> s_logCompleted =
         LoggerMessage.Define<string, CandleInterval, int>(
@@ -46,7 +46,7 @@ public sealed class PaperTrainingCandleBackfillService
     {
         ArgumentNullException.ThrowIfNull(subscriptions);
         foreach (var subscription in subscriptions.Where(item =>
-                     PaperTrainingAutoSelectionService.ApprovedIntervals.Contains(item.Interval)))
+                     PaperTrainingAutoSelectionService.ManagedIntervals.Contains(item.Interval)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var interval = TimeSpan.FromMinutes((int)subscription.Interval);

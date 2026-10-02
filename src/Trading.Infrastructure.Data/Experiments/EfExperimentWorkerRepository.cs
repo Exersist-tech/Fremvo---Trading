@@ -38,6 +38,29 @@ public sealed class EfExperimentWorkerRepository : IExperimentWorkerRepository, 
             .ToArray();
     }
 
+    public async Task<IReadOnlyCollection<ExperimentWorker>> ListClosedAsync(
+        Guid userId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (page < 0 || page > 10_000 || pageSize is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(page));
+        return (await Query(userId)
+                .Where(worker => worker.Status == (int)ExperimentWorkerStatus.Completed
+                    && worker.LedgerEntries.Any(entry => entry.Direction == "buy")
+                    && worker.LedgerEntries.Any(entry => entry.Direction == "sell"))
+                .OrderByDescending(worker => worker.LedgerEntries.Max(entry => entry.OccurredAtUtc))
+                .ThenBy(worker => worker.Id)
+                .Skip(page * pageSize)
+                .Take(pageSize)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .Select(ToDomain)
+            .Where(worker => worker.PositionQuantity == 0m)
+            .ToArray();
+    }
+
     public async Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(worker);

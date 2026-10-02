@@ -33,11 +33,10 @@ public sealed class PaperTrainingHistoricalQualification
         "platform.rsi-pullback",
         "platform.macd-volume",
         "platform.volatility-compression-breakout",
-        "platform.rsi-macd-confluence",
-        "platform.ema-rsi-trend",
-        "platform.bollinger-macd-recovery",
-        "platform.donchian-volume-breakout",
-        "platform.ema-volume-pullback"
+        "platform.cross-sectional-momentum-rotation",
+        "platform.relative-strength-pullback-rotation",
+        "platform.session-conditioned-breakout",
+        "platform.regime-switching-ensemble"
     };
 
     public static bool Supports(string strategyId) =>

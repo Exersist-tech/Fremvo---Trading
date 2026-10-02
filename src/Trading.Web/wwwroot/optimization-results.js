@@ -1,9 +1,15 @@
-// Values are formatted by the server. This read-only renderer performs no
-// financial calculations and writes every supplied string as text.
+// Values are calculated by the server. This read-only renderer rounds decimal
+// results for display and writes every supplied value as text.
 (function () {
   'use strict';
 
   function $(id) { return document.getElementById(id); }
+  function formatNumber(value) {
+    var numeric = Number(value);
+    return isFinite(numeric)
+      ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : String(value);
+  }
   function element(name, text, className) {
     var node = document.createElement(name);
     node.textContent = text == null ? 'Not recorded.' : String(text);
@@ -25,14 +31,21 @@
     var body = document.createElement('tbody');
     rows.forEach(function (values) {
       var row = document.createElement('tr');
-      values.forEach(function (value, index) { row.appendChild(element('td', value, headers[index].numeric ? 'numeric' : '')); });
+      values.forEach(function (value, index) {
+        row.appendChild(element(
+          'td',
+          headers[index].numeric && value != null ? formatNumber(value) : value,
+          headers[index].numeric ? 'numeric' : ''));
+      });
       body.appendChild(row);
     });
     result.appendChild(body);
     return result;
   }
   function parameterText(parameters) {
-    return (parameters || []).map(function (parameter) { return parameter.name + '=' + parameter.value; }).join(', ');
+    return (parameters || []).map(function (parameter) {
+      return parameter.name + '=' + formatNumber(parameter.value);
+    }).join(', ');
   }
   function splitRows(report) {
     return [report.training, report.validation, report.holdout].map(function (split) {

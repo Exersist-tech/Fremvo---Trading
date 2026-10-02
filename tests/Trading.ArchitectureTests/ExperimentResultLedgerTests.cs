@@ -66,12 +66,79 @@ public sealed class ExperimentResultLedgerTests
     }
 
     [Fact]
+    public void ClosedTradeFactoryCalculatesFeeInclusiveRoundTripWithAddsAndPartialExits()
+    {
+        var owner = Guid.NewGuid();
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(),
+            owner,
+            "closed-round-trip",
+            "platform.ema-trend-continuation",
+            "ETH/EUR",
+            1_000m,
+            Now,
+            73);
+        worker.Start();
+        worker.ApplyPaperTrade(2m, 100m, 1m, "buy", Now);
+        worker.RecordFavorablePaperMark(110m);
+        worker.ApplyPaperTrade(1m, 105m, 0.5m, "buy", Now.AddMinutes(1));
+        worker.ApplyPaperTrade(1m, 110m, 0.2m, "sell", Now.AddMinutes(2));
+        worker.ApplyPaperTrade(2m, 90m, 0.4m, "sell", Now.AddMinutes(3));
+        worker.Complete();
+
+        var result = ExperimentClosedTradeResultFactory.Create(worker, "Maximum holding limit reached.");
+
+        Assert.Equal(3m, result.Quantity);
+        Assert.Equal(306.5m / 3m, result.AverageEntryPrice);
+        Assert.Equal(290m / 3m, result.AverageExitPrice);
+        Assert.Equal(-15m, result.GrossProfitAndLoss);
+        Assert.Equal(2.1m, result.Fees);
+        Assert.Equal(-17.1m, result.NetProfitAndLoss);
+        Assert.Equal(-17.1m / 306.5m * 100m, result.ReturnPercent);
+        Assert.Equal(180, result.HoldingSeconds);
+        Assert.Equal(2, result.BuyFillCount);
+        Assert.Equal(2, result.SellFillCount);
+        Assert.Equal(1, result.Additions);
+        Assert.Equal(982.9m, result.EndingCash);
+        Assert.Equal("Maximum holding limit reached.", result.ExitReason);
+    }
+
+    [Fact]
+    public async Task ClosedWorkerQueryIsOwnerScopedAndExcludesUnfilledAttempts()
+    {
+        var database = Guid.NewGuid().ToString("N");
+        var owner = Guid.NewGuid();
+        await using var context = Context(database);
+        var repository = new EfExperimentWorkerRepository(context);
+        var closed = ClosedWorker(owner, "closed");
+        var unfilled = new ExperimentWorker(
+            Guid.NewGuid(), owner, "unfilled", "strategy", "BTC/EUR", 1_000m, Now, 2);
+        unfilled.Start();
+        unfilled.Complete();
+        var foreign = ClosedWorker(Guid.NewGuid(), "foreign");
+        await repository.SaveAsync(closed);
+        foreach (var entry in closed.Ledger)
+            await repository.AddAsync(owner, entry);
+        await repository.SaveAsync(unfilled);
+        await repository.SaveAsync(foreign);
+        foreach (var entry in foreign.Ledger)
+            await repository.AddAsync(foreign.UserId, entry);
+
+        var results = await repository.ListClosedAsync(owner, 0, 25);
+
+        Assert.Equal(closed.Id, Assert.Single(results).Id);
+    }
+
+    [Fact]
     public void ResultUiUsesSafeTextRenderingAndHasNoControlsOrPromotionLanguage()
     {
         var root = FindRepositoryRoot();
         var script = File.ReadAllText(Path.Combine(root, "src", "Trading.Web", "wwwroot", "experiment-results.js"));
         var web = File.ReadAllText(Path.Combine(root, "src", "Trading.Web", "Program.cs"));
         Assert.Contains("textContent", script, StringComparison.Ordinal);
+        Assert.Contains("closed-trades", script, StringComparison.Ordinal);
+        Assert.Contains("Net P&L", script, StringComparison.Ordinal);
+        Assert.Contains("/experiments.css", web, StringComparison.Ordinal);
         Assert.DoesNotContain("innerHTML", script, StringComparison.Ordinal);
         Assert.DoesNotContain("button", script, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("research-only", web, StringComparison.OrdinalIgnoreCase);
@@ -88,6 +155,17 @@ public sealed class ExperimentResultLedgerTests
 
     private static ExperimentResultProvenance Provenance(ExperimentWorker worker) =>
         new(worker.Id, 1, "A", "sma", 1, "parameters", "dataset", "classifier-v1", "gate-evidence", worker.RandomSeed, "reproducible-identity");
+
+    private static ExperimentWorker ClosedWorker(Guid owner, string name)
+    {
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(), owner, name, "strategy", "BTC/EUR", 1_000m, Now, 2);
+        worker.Start();
+        worker.ApplyPaperTrade(1m, 100m, 1m, "buy", Now);
+        worker.ApplyPaperTrade(1m, 110m, 1m, "sell", Now.AddMinutes(1));
+        worker.Complete();
+        return worker;
+    }
 
     private static string FindRepositoryRoot()
     {

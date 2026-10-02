@@ -83,6 +83,8 @@ public interface IExperimentDecisionLedger
         Guid userId, ExperimentDecisionRecord record, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ExperimentDecisionRecord>> ListAsync(
         Guid userId, Guid workerId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ExperimentDecisionRecord>> ListAsync(
+        Guid userId, IReadOnlyCollection<Guid> workerIds, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -198,6 +200,21 @@ public sealed class InMemoryExperimentDecisionLedger : IExperimentDecisionLedger
         cancellationToken.ThrowIfCancellationRequested();
         if (userId == Guid.Empty || workerId == Guid.Empty) throw new ArgumentException("Owner and worker are required.");
         return Task.FromResult<IReadOnlyList<ExperimentDecisionRecord>>(_records.Values.Where(x => x.Key.UserId == userId && x.Key.WorkerId == workerId).OrderBy(x => x.Key.AsOfUtc).ToArray());
+    }
+    public Task<IReadOnlyList<ExperimentDecisionRecord>> ListAsync(
+        Guid userId,
+        IReadOnlyCollection<Guid> workerIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workerIds);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (userId == Guid.Empty)
+            throw new ArgumentException("Owner is required.", nameof(userId));
+        var requested = workerIds.ToHashSet();
+        return Task.FromResult<IReadOnlyList<ExperimentDecisionRecord>>(_records.Values
+            .Where(record => record.Key.UserId == userId && requested.Contains(record.Key.WorkerId))
+            .OrderBy(record => record.Key.AsOfUtc)
+            .ToArray());
     }
     internal static bool Equivalent(ExperimentDecisionRecord left, ExperimentDecisionRecord right) =>
         left.Proposal == right.Proposal && string.Equals(left.EvidenceFingerprint, right.EvidenceFingerprint, StringComparison.Ordinal);

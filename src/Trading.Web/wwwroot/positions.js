@@ -1,8 +1,6 @@
 // Open positions across every pair.
 //
-// Money figures are rendered exactly as the server computed them in decimal.
-// Nothing here recalculates a profit or loss, so this page cannot disagree
-// with the platform's own books.
+// Money figures are calculated by the server and rounded here for display only.
 
 (function () {
   'use strict';
@@ -18,14 +16,22 @@
   function formatPrice(value) {
     var n = Number(value);
     if (!isFinite(n)) { return String(value); }
-    var decimals = Math.abs(n) >= 100 ? 2 : Math.abs(n) >= 1 ? 4 : 8;
-    return n.toFixed(decimals);
+    return n.toLocaleString(undefined, {
+      maximumFractionDigits: Math.abs(n) > 0 && Math.abs(n) < 0.01 ? 8 : 2
+    });
+  }
+
+  function formatQuantity(value) {
+    var n = Number(value);
+    return isFinite(n)
+      ? n.toLocaleString(undefined, { maximumFractionDigits: 8 })
+      : String(value);
   }
 
   function formatSigned(value) {
     var n = Number(value);
     if (!isFinite(n)) { return String(value); }
-    return (n > 0 ? '+' : '') + formatPrice(n);
+    return (n > 0 ? '+' : '') + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
 
   function formatTime(iso) {
@@ -113,7 +119,7 @@
       var cells = [
         p.symbol,
         isShort(p.direction) ? 'Short' : 'Long',
-        p.quantity,
+        formatQuantity(p.quantity),
         formatPrice(p.entryPrice),
         p.markPrice === null || p.markPrice === undefined ? 'unavailable' : formatPrice(p.markPrice),
         unrealised === null || unrealised === undefined ? 'unknown' : formatSigned(unrealised),

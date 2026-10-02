@@ -252,6 +252,29 @@ public sealed class InMemoryExperimentWorkerRepository : IExperimentWorkerReposi
         return Task.FromResult(result);
     }
 
+    public Task<IReadOnlyCollection<ExperimentWorker>> ListClosedAsync(
+        Guid userId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (page < 0 || pageSize is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(page));
+        IReadOnlyCollection<ExperimentWorker> result = _byUser.TryGetValue(userId, out var workers)
+            ? workers.Values
+                .Where(worker => worker.Status == ExperimentWorkerStatus.Completed
+                    && worker.PositionQuantity == 0m
+                    && worker.Ledger.Any(entry => entry.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
+                    && worker.Ledger.Any(entry => entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase)))
+                .OrderByDescending(worker => worker.Ledger.Max(entry => entry.OccurredAtUtc))
+                .Skip(page * pageSize)
+                .Take(pageSize)
+                .ToArray()
+            : [];
+        return Task.FromResult(result);
+    }
+
     public Task SaveAsync(ExperimentWorker worker, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(worker);

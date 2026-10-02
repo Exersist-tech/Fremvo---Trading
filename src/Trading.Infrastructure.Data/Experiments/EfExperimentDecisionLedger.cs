@@ -41,6 +41,27 @@ public sealed class EfExperimentDecisionLedger : IExperimentDecisionLedger
             .OrderBy(x => x.AsOfUtc).ThenBy(x => x.OpenTimeUtc).ToListAsync(cancellationToken).ConfigureAwait(false)).Select(ToDomain).ToArray();
     }
 
+    public async Task<IReadOnlyList<ExperimentDecisionRecord>> ListAsync(
+        Guid userId,
+        IReadOnlyCollection<Guid> workerIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workerIds);
+        if (userId == Guid.Empty)
+            throw new ArgumentException("Owner is required.", nameof(userId));
+        var requested = workerIds.Distinct().ToArray();
+        if (requested.Length == 0)
+            return [];
+        return (await _context.ExperimentDecisionRecords.AsNoTracking()
+                .Where(record => record.UserId == userId && requested.Contains(record.WorkerId))
+                .OrderBy(record => record.AsOfUtc)
+                .ThenBy(record => record.OpenTimeUtc)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .Select(ToDomain)
+            .ToArray();
+    }
+
     private Task<PersistedExperimentDecisionRecord?> FindAsync(ExperimentDecisionKey key, CancellationToken token) =>
         _context.ExperimentDecisionRecords.SingleOrDefaultAsync(x => x.UserId == key.UserId && x.WorkerId == key.WorkerId
             && x.GroupConfigurationVersion == key.GroupConfigurationVersion && x.Group == (int)key.Group

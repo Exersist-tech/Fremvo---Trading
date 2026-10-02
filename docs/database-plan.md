@@ -96,18 +96,38 @@ eligibility grant rows.
 
 ## 5A. Strategy research approvals (Phase 5B)
 
-See `docs/strategy-research-plan.md`.
+See `docs/strategy-research-plan.md`,
+`docs/strategy-validation-matrix.md`, and
+`docs/strategy-approval-workflow.md`. These are future schema requirements;
+the design task adds no migration.
 
-- `StrategyVersions` (Id, StrategyTemplateId FK, VersionNumber,
+- `StrategyVersions` (Id, StrategyTemplateId FK, SemanticVersion,
+  ContentFingerprint, ParameterSchemaFingerprint,
   ParameterDefinitionsJson, RegimeInterval int, SignalInterval int,
-  ExecutionInterval int null, WarmUpCandles int, CreatedAtUtc) — immutable.
+  ExecutionInterval int null, WarmUpCandles int, CreatedAtUtc) — immutable;
+  unique on (StrategyTemplateId, SemanticVersion) and on the content
+  fingerprint within a template.
 - `StrategyApprovals` (Id, StrategyVersionId FK, ApprovalState int,
   SupportedInstrumentClassJson, MinimumHistoryCandles int,
   MinimumLiquidity decimal(28,10), MaximumSpread decimal(28,10),
   MaximumEstimatedSlippage decimal(28,10), SupportedIntervalsJson,
   ProductType int, ApprovedTradingModesJson, ApprovedByUserId null,
   ApprovedAtUtc null) — immutable; a change creates a new row. All
-  strategies start in `Draft` with no approver.
+  strategies start in `Draft` with no approver. The future migration uses the
+  explicit stable mapping `Draft=0`, `ResearchApproved=1`,
+  `BacktestApproved=2`, `ForwardPaperAuthorized=3`, `PaperApproved=4`,
+  `Suspended=5`, `Rejected=6`, `Retired=7`; live/Futures approval values do
+  not exist in this workflow. Existing legacy rows require an explicit
+  reviewed migration and must not be reinterpreted by ordinal.
+- `StrategyApprovalEvidence` (Id, StrategyVersionId FK, EvidenceFingerprint,
+  SourceCommit, BuildIdentity, DatasetFingerprint, UniverseFingerprint,
+  CostModelFingerprint, TimeZoneProfileFingerprint null, RandomSeed,
+  PartitionBoundariesJson, AttemptedParametersJson, ResultsJson,
+  CreatedAtUtc) — immutable; contains no secrets.
+- `StrategyApprovalTransitions` (Id, StrategyVersionId FK, FromState,
+  ToState, StrategyApprovalEvidenceId FK null, ActorUserId, Reason,
+  CorrelationId, OccurredAtUtc) — append-only. Automated service identities
+  may attach evidence but cannot approve.
 - `SessionProfiles` (Id, Name, IanaTimeZone, LocalStartTime, LocalEndTime,
   AllowedWeekdays int [bitmask], DaylightSavingPolicy int,
   MinimumLiquidity decimal(28,10), MaximumSpread decimal(28,10),
@@ -121,6 +141,9 @@ See `docs/strategy-research-plan.md`.
 - `HoldoutEvaluations` (Id, StrategyVersionId FK, DatasetId FK,
   EvaluatedAtUtc, ResultJson) — unique on (StrategyVersionId, DatasetId)
   so untouched holdout data can be evaluated exactly once.
+- `StrategyGateResults` (Id, StrategyApprovalEvidenceId FK, GateCode,
+  Passed, MeasuredValuesJson, FrozenThresholdsJson, Detail) — immutable;
+  unique on (StrategyApprovalEvidenceId, GateCode).
 
 ## 6. Backtesting & optimization (Phases 5–6)
 
@@ -141,6 +164,43 @@ See `docs/strategy-research-plan.md`.
   timestamp column (set-once).
 
 ## 7. Experiment workers (Phase 7)
+
+### 7.1 Planned continuous scanner records
+
+These tables replace activation-time preassignment only after a separately
+approved implementation and migration. Existing worker, decision, claim, fill,
+position and ledger rows remain authoritative and are never rewritten.
+
+The initial single-host implementation stores bounded scan observations,
+queue disposition, and admitted slots in the existing optimistic-concurrency
+`PaperTrainingActivations` row. This preserves existing development data and
+provides restart-safe idempotency without a destructive schema rebuild. The
+following normalized tables remain the required scale-out migration before
+multiple scanner instances are deployed:
+
+- `StrategyScanRuns` (Id, OwnerUserId, StartedAtUtc, CompletedAtUtc null,
+  UniverseFingerprint, RankingPolicyVersion, Status, EligiblePairCount,
+  ObservationCount, Detail) — one bounded five-minute scan.
+- `StrategyCandidateObservations` (Id, ScanRunId FK, OwnerUserId,
+  StrategyVersionId FK, InstrumentId FK, TimeframeProfileVersion,
+  SignalOpenTimeUtc, SignalCloseTimeUtc, UniverseFingerprint,
+  EvidenceFingerprint, BullishVotes, BearishVotes, Decision, VetoesJson,
+  ExpiresAtUtc, CreatedAtUtc) — immutable; unique on owner, strategy version,
+  instrument, profile, signal candle and universe fingerprint.
+- `RankedPaperOpportunities` (Id, CandidateObservationId FK, OwnerUserId,
+  RankingPolicyVersion, Score decimal(28,10), FactorsJson, Rank,
+  State, ExpiresAtUtc, SupersededById null, RejectionReason null,
+  RowVersion) — scanner/queue state only; it allocates no worker.
+- `PaperOpportunityAdmissions` (Id, RankedOpportunityId FK unique,
+  OwnerUserId, ExperimentWorkerId FK unique, CapacitySequence,
+  AdmittedAtUtc, ReleasedAtUtc null, State, RowVersion) — admission and worker
+  creation are atomic. Application transaction/concurrency checks enforce at
+  most ten unreleased admissions per owner.
+
+Queue rows are not workers. A worker row is inserted only with an admitted
+opportunity. Unknown execution status keeps admission capacity reserved until
+reconciliation; a fully closed/reconciled worker terminates and releases the
+admission instead of being reassigned.
 
 - `PaperTrainingActivations` (OwnerUserId PK, State, SlotCount,
   SlotsJson, QualificationsJson, prerequisite flags, ChangedAtUtc, ChangedBy,

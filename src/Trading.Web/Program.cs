@@ -1019,7 +1019,6 @@ app.MapPost("/api/paper-training", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
-    PaperTrainingAutoSelectionService selectionService,
     IExchangeAccountRepository accounts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
     TimeProvider timeProvider,
@@ -1034,13 +1033,14 @@ app.MapPost("/api/paper-training", async (
         if (!connected)
             return Results.BadRequest(new { error = "Connect and validate an exchange account before starting paper training." });
 
-        var selection = await selectionService.SelectAsync(
-            request.ToAutoSelectionRequest(timeProvider.GetUtcNow()),
+        _ = request;
+        _ = timeProvider;
+        var activation = await service.StartScannerAsync(
+            ownerId.Value,
+            ownerId.Value,
+            PaperTrainingRole.From(principal),
+            prerequisites.Value.ToPrerequisites(),
             cancellationToken).ConfigureAwait(false);
-        var activation = await service.StartQualifiedAsync(
-            ownerId.Value, ownerId.Value, PaperTrainingRole.From(principal),
-            selection.Slots, selection.Qualifications,
-            prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
         return Results.Accepted("/api/paper-training", PaperTrainingResponse.From(activation));
     }
     catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
@@ -1053,7 +1053,6 @@ app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
-    PaperTrainingAutoSelectionService selectionService,
     IExchangeAccountRepository accounts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
     TimeProvider timeProvider,
@@ -1070,12 +1069,14 @@ app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
             .Any(account => account.CanTrade);
         if (!connected)
             return Results.BadRequest(new { error = "The owner must have a connected and validated exchange account." });
-        var selection = await selectionService.SelectAsync(
-            request.ToAutoSelectionRequest(timeProvider.GetUtcNow()),
+        _ = request;
+        _ = timeProvider;
+        var activation = await service.StartScannerAsync(
+            ownerId,
+            actorId.Value,
+            actorRole,
+            prerequisites.Value.ToPrerequisites(),
             cancellationToken).ConfigureAwait(false);
-        var activation = await service.StartQualifiedAsync(
-            ownerId, actorId.Value, actorRole, selection.Slots, selection.Qualifications,
-            prerequisites.Value.ToPrerequisites(), cancellationToken).ConfigureAwait(false);
         return Results.Ok(PaperTrainingResponse.From(activation));
     }
     catch (UnauthorizedAccessException) { return Results.Forbid(); }
@@ -1194,6 +1195,8 @@ app.MapPost("/api/experiments", () => Results.StatusCode(StatusCodes.Status410Go
 app.MapGet("/api/experiment-results", async (
     ClaimsPrincipal principal,
     IExperimentResultLedger ledger,
+    IExperimentWorkerRepository workers,
+    IExperimentDecisionLedger decisions,
     int? page,
     int? pageSize,
     CancellationToken cancellationToken) =>
@@ -1202,7 +1205,33 @@ app.MapGet("/api/experiment-results", async (
     if (owner is null) return Results.Unauthorized();
     try
     {
-        var resultPage = await ledger.ListAsync(owner.Value, page ?? 0, pageSize ?? 25, cancellationToken).ConfigureAwait(false);
+        var requestedPage = page ?? 0;
+        var requestedPageSize = pageSize ?? 25;
+        var resultPage = await ledger.ListAsync(
+            owner.Value,
+            requestedPage,
+            requestedPageSize,
+            cancellationToken).ConfigureAwait(false);
+        var closedWorkers = await workers.ListClosedAsync(
+            owner.Value,
+            requestedPage,
+            requestedPageSize,
+            cancellationToken).ConfigureAwait(false);
+        var closeDecisions = await decisions.ListAsync(
+            owner.Value,
+            closedWorkers.Select(worker => worker.Id).ToArray(),
+            cancellationToken).ConfigureAwait(false);
+        var exitReasons = closeDecisions
+            .Where(decision => decision.Proposal.Action is ExperimentProposalAction.Reduce
+                or ExperimentProposalAction.Close)
+            .GroupBy(decision => decision.Key.WorkerId)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .OrderByDescending(decision => decision.RecordedAtUtc)
+                    .First()
+                    .Proposal
+                    .Reason);
         return Results.Ok(new
         {
             researchOnly = true,
@@ -1210,6 +1239,12 @@ app.MapGet("/api/experiment-results", async (
             resultPage.Page,
             resultPage.PageSize,
             resultPage.HasMore,
+            closedTrades = closedWorkers
+                .Select(worker => ExperimentClosedTradeResultFactory.Create(
+                    worker,
+                    exitReasons.GetValueOrDefault(worker.Id)))
+                .OrderByDescending(result => result.ClosedAtUtc)
+                .ToArray(),
             results = resultPage.Items.Select(result => new
             {
                 result.SnapshotKey,
@@ -1253,22 +1288,27 @@ app.MapGet("/experiment-results", () => Results.Content(
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <link rel="stylesheet" href="/app.css" />
+      <link rel="stylesheet" href="/experiments.css" />
       <script defer src="/nav.js"></script>
       <script defer src="/experiment-results.js"></script>
       <title>Experiment research results — Exersist Trading</title>
     </head>
     <body>
-      <main class="page-wide">
-        <h1>Experiment research results</h1>
+      <main class="page-wide chart-page">
+        <h1>Experiment research results <span class="badge">Paper only</span></h1>
         <nav class="workspace-tabs" aria-label="Experiment sections">
-          <a href="/experiments#setup">Setup workers</a>
-          <a href="/experiments#workers">Workers</a>
+          <a href="/experiments#setup">Setup scanner</a>
+          <a href="/experiments#candidates">Scanner candidates</a>
+          <a href="/experiments#workers">Buy opportunities</a>
           <a class="active" href="/experiment-results" aria-current="page">Results</a>
         </nav>
-        <p class="lede">Immutable snapshots from isolated paper workers. This page is read-only.</p>
+        <p class="lede">Completed paper round trips and immutable accounting snapshots from isolated workers. This page is read-only.</p>
         <div class="notice"><strong>Research-only comparison.</strong> Sorting is for inspection only; it does not identify a winner, recommend a strategy, select or promote anything, or initiate execution.</div>
         <div id="status" class="notice">Loading immutable experiment snapshots.</div>
-        <div id="results"><p class="empty">Loading.</p></div>
+        <h2>Closed paper trades</h2>
+        <div class="table-wrap"><div id="closed-trades"><p class="empty">Loading.</p></div></div>
+        <h2>Technical accounting snapshots</h2>
+        <div class="table-wrap"><div id="results"><p class="empty">Loading.</p></div></div>
       </main>
     </body>
     </html>
@@ -1282,85 +1322,68 @@ app.MapGet("/experiments", () => Results.Content(
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <link rel="stylesheet" href="/app.css" />
+      <link rel="stylesheet" href="/experiments.css" />
       <script defer src="/nav.js"></script>
       <title>Experiment workers — Exersist Trading</title>
-      <style>
-        body { margin:0; font-family: Segoe UI, Arial, sans-serif; background:#0b1725; color:#eaf4ff; }
-        h1 { font-size: 2rem; margin-bottom: 8px; }
-        p.muted { color:#9bb6cd; line-height:1.6; }
-        .badge { display:inline-block; border-radius:999px; padding:4px 12px; font-size:12px; font-weight:700;
-                 border:1px solid rgba(98,208,255,0.4); background:rgba(98,208,255,0.12); color:#62d0ff; }
-        .notice { border:1px solid rgba(255,209,102,0.35); background:rgba(255,209,102,0.08); color:#ffd166;
-                  border-radius:12px; padding:14px 16px; margin:18px 0; line-height:1.5; }
-        .setup-panel { max-width:1000px; }
-        table { width:100%; border-collapse:collapse; margin-top:18px; }
-        th, td { text-align:left; padding:10px 12px; border-bottom:1px solid #24415d; font-size:14px; }
-        .table-wrap { overflow-x:auto; }
-        th { color:#9bb6cd; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.05em; }
-        .interval-summary { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 4px; }
-        .interval-badge { display:inline-block; white-space:nowrap; border:1px solid rgba(98,208,255,0.45);
-                         border-radius:999px; padding:4px 10px; background:rgba(98,208,255,0.12);
-                         color:#9fe2ff; font-size:12px; font-weight:700; }
-        .worker-row { background:rgba(15,28,43,0.45); }
-        .trade-row td { padding:0 12px 10px 42px; background:rgba(8,20,32,0.7); }
-        .trade-detail { display:flex; flex-wrap:wrap; gap:8px 18px; padding:9px 12px;
-                        border-left:3px solid #62d0ff; color:#cfe6fa; }
-        .trade-detail strong { color:#62d0ff; }
-        .trade-detail .buy { color:#7ee787; }
-        .trade-detail .sell { color:#ff9b9b; }
-        .positive { color:#7ee787; }
-        .negative { color:#ff9b9b; }
-        pre { background:#0f1c2b; border:1px solid #24415d; border-radius:12px; padding:14px; white-space:pre-wrap;
-              word-break:break-word; color:#cfe6fa; }
-      </style>
     </head>
     <body>
       <main class="page-wide chart-page">
         <h1>Experiment workers <span class="badge">Paper only</span></h1>
         <nav class="workspace-tabs" aria-label="Experiment sections">
-          <a id="setup-tab" href="/experiments#setup">Setup workers</a>
-          <a id="workers-tab" href="/experiments#workers">Workers</a>
+          <a id="setup-tab" href="/experiments#setup">Setup scanner</a>
+          <a id="candidates-tab" href="/experiments#candidates">Scanner candidates</a>
+          <a id="workers-tab" href="/experiments#workers">Buy opportunities</a>
           <a href="/experiment-results">Results</a>
         </nav>
 
         <div id="state"></div>
         <section id="setup-panel" class="setup-panel" hidden>
-          <p class="muted">The backend discovers active liquid Kraken EUR Spot pairs, ranks at most
-            40 pairs using 30 closed daily candles that predate the test, then evaluates the largest
-            top-liquidity subset that fits the bounded candidate search with approved strategy
-            templates across 5, 15, 30, and 60 minute closed candles. Candidate evaluation is
-            balanced across pairs before adding timeframe variants. It permits at most one worker
-            per strategy and uses a different eligible pair for every slot when possible, reusing
-            pairs only when the discovered universe is smaller, then confirms finalists on untouched holdout data.
-            Qualified finalists and clearly labeled unqualified exploration slots continue into
-            fake-funds live-data paper observation.</p>
+          <p class="muted">The backend refreshes the liquid Kraken EUR Spot universe every five
+            minutes and evaluates every eligible pair with all ten administrator-approved consensus
+            strategy families. HOLD, vetoed, rejected, and queued observations allocate no worker.
+            A fresh opportunity reserves an isolated worker only after ranking, concentration, and
+            capacity checks pass.</p>
           <div class="notice">
             Paper only: workers use fake funds and cannot place an order on a real exchange.
             Live account stages are untouched. Disable or emergency stop ends paper training.
           </div>
           <form id="request-form">
-            <label for="starting-cash">Fake starting balance per worker</label>
-            <input id="starting-cash" type="number" min="100" step="0.01" value="1000" required />
-            <p class="muted">Intervals are selected automatically from the approved 5, 15, 30,
-              and 60 minute set. Every candidate uses 600 closed candles: the first 420 for
-              validation and the final 180 for untouched holdout.</p>
-            <label for="minimum-return">Minimum net return (%)</label>
-            <input id="minimum-return" type="number" min="0" step="0.01" value="0" required />
-            <label for="minimum-trades">Minimum completed trades</label>
-            <input id="minimum-trades" type="number" min="3" value="3" required />
-            <label for="maximum-drawdown">Maximum drawdown (%)</label>
-            <input id="maximum-drawdown" type="number" min="0.01" max="20" step="0.01" value="20" required />
-            <button id="start" type="submit">Discover, qualify, and start up to ten paper experiments</button>
+            <p class="muted">Each admitted worker receives the platform-fixed fake starting
+              balance of EUR 1,000. Users cannot increase this paper risk budget.</p>
+            <p class="muted">Entries use the strategy's approved regime/signal/execution profile
+              across closed 1-minute, 5-minute, 15-minute, 1-hour, 4-hour, and daily evidence.
+              One-minute candles can confirm execution for a closed 5-minute signal, but never
+              create a directional signal by themselves.</p>
+            <button id="start" type="submit">Enable continuous paper scanner</button>
             <button id="stop" type="button">Stop paper training</button>
           </form>
-          <div id="qualifications"></div>
+        </section>
+        <section id="candidates-panel" hidden>
+          <p class="muted">Read-only scanner observations. These rows consume no worker capacity
+            unless their state is Admitted. “Checks to BUY” shows how many additional bullish
+            checks the strategy needs to reach its approved threshold.</p>
+          <div class="table-wrap">
+            <table id="candidate-grid" hidden>
+              <thead>
+                <tr>
+                  <th>Signal closed</th><th>Strategy</th><th>Pair</th><th>Timeframe</th>
+                  <th>Bullish checks</th><th>Checks to BUY</th><th>State</th><th>Reason</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <p id="candidate-empty" class="empty">No scanner observations yet.</p>
+          </div>
         </section>
         <section id="workers-panel">
-          <p class="muted">Every worker analyzes closed 5-minute, 15-minute, 30-minute, and 1-hour
-            candles together. Its primary timeframe supplies the trade signal and candle identity;
-            at least one other timeframe must confirm it. Profitable positions may close before
-            their fixed target only after a 5-minute peak rollover, weakening RSI and MACD, and
-            confirmation from a higher timeframe. This view refreshes every ten seconds.</p>
+          <p class="muted">Only actionable BUY opportunities appear here. Each worker is isolated to
+            one pair and strategy, uses fake funds, and is released if entry validation rejects the
+            opportunity or after its position closes and reconciles. Closed 1-minute candles manage
+            filled positions; entry signals remain on their approved higher timeframe. This view
+            refreshes every ten seconds.</p>
+          <div id="refresh-status" class="refresh-status" aria-live="polite">
+            Waiting for the first update.
+          </div>
           <div id="interval-summary" class="interval-summary" aria-label="Primary worker timeframes"></div>
           <div class="table-wrap">
             <table id="grid" hidden>
@@ -1380,16 +1403,32 @@ app.MapGet("/experiments", () => Results.Content(
       </main>
 
       <script>
-        const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
+        const n = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+        const q = v => Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 });
+        const p = v => {
+          const number = Number(v);
+          return number.toLocaleString(undefined, {
+            maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 0.01 ? 8 : 2
+          });
+        };
         const state = document.getElementById('state');
-        const qualifications = document.getElementById('qualifications');
+        const candidateGrid = document.getElementById('candidate-grid');
+        const candidateBody = candidateGrid.querySelector('tbody');
+        const candidateEmpty = document.getElementById('candidate-empty');
         const grid = document.getElementById('grid');
         const setupPanel = document.getElementById('setup-panel');
+        const candidatesPanel = document.getElementById('candidates-panel');
         const workersPanel = document.getElementById('workers-panel');
+        const refreshStatus = document.getElementById('refresh-status');
         const intervalSummary = document.getElementById('interval-summary');
         const setupTab = document.getElementById('setup-tab');
+        const candidatesTab = document.getElementById('candidates-tab');
         const workersTab = document.getElementById('workers-tab');
         let loading = false;
+        let lastRefreshAt = null;
+        let nextRefreshAt = null;
+        let lastScannerRunAt = null;
+        let latestPriceAt = null;
         const text = (tag, value, className) => {
           const element = document.createElement(tag);
           element.textContent = value;
@@ -1397,25 +1436,76 @@ app.MapGet("/experiments", () => Results.Content(
           return element;
         };
         const value = number => number === null || number === undefined ? 'Waiting' : n(number);
+        const quantityValue = number => number === null || number === undefined ? 'Waiting' : q(number);
+        const displayTime = value => value ? new Date(value).toLocaleTimeString() : 'waiting';
+        const renderRefreshStatus = () => {
+          const seconds = nextRefreshAt
+            ? Math.max(0, Math.ceil((nextRefreshAt.getTime() - Date.now()) / 1000))
+            : null;
+          refreshStatus.textContent =
+            'Page updated: ' + displayTime(lastRefreshAt) +
+            ' · Next page refresh: ' + (seconds == null ? 'waiting' : seconds + 's') +
+            ' · Last scanner run: ' + displayTime(lastScannerRunAt) +
+            ' · Latest closed 5-minute price: ' + displayTime(latestPriceAt);
+        };
         const intervalLabel = interval => ({
+          1: '1 min',
           5: '5 min',
+          10: '10 min',
           15: '15 min',
           30: '30 min',
-          60: '1 hour'
+          60: '1 hour',
+          240: '4 hours',
+          1440: '1 day'
         })[interval] || String(interval);
         const selectTab = () => {
-          const setupSelected = location.hash === '#setup';
-          setupPanel.hidden = !setupSelected;
-          workersPanel.hidden = setupSelected;
-          setupTab.classList.toggle('active', setupSelected);
-          workersTab.classList.toggle('active', !setupSelected);
-          if (setupSelected) {
-            setupTab.setAttribute('aria-current', 'page');
-            workersTab.removeAttribute('aria-current');
-          } else {
-            setupTab.removeAttribute('aria-current');
-            workersTab.setAttribute('aria-current', 'page');
-          }
+          const selected = location.hash === '#setup' ? 'setup' :
+            location.hash === '#candidates' ? 'candidates' : 'workers';
+          setupPanel.hidden = selected !== 'setup';
+          candidatesPanel.hidden = selected !== 'candidates';
+          workersPanel.hidden = selected !== 'workers';
+          [[setupTab, 'setup'], [candidatesTab, 'candidates'], [workersTab, 'workers']]
+            .forEach(([tab, name]) => {
+              const active = selected === name;
+              tab.classList.toggle('active', active);
+              if (active) tab.setAttribute('aria-current', 'page');
+              else tab.removeAttribute('aria-current');
+            });
+        };
+        const renderCandidates = (items, activeWorkers) => {
+          candidateBody.replaceChildren();
+          const activeKeys = new Set((activeWorkers || []).map(worker =>
+            worker.strategyId + '|' + worker.symbol.toUpperCase() + '|' + worker.interval));
+          (items || []).forEach(item => {
+            const row = document.createElement('tr');
+            const bullish = item.bullishChecks;
+            const required = item.requiredBullishChecks;
+            const remaining = bullish == null || required == null
+              ? 'Unavailable'
+              : bullish >= required
+                ? 'Ready'
+                : String(required - bullish);
+            const key = item.strategyId + '|' + item.symbol.toUpperCase() + '|' + item.interval;
+            const released = item.disposition === 'Admitted' && !activeKeys.has(key);
+            const disposition = released ? 'Released before fill' : item.disposition;
+            const reason = released
+              ? 'Entry revalidation did not produce a paper fill. ' + item.reason
+              : item.reason;
+            [
+              item.signalCloseUtc ? new Date(item.signalCloseUtc).toLocaleString() : 'Unavailable',
+              item.strategyId,
+              item.symbol,
+              intervalLabel(item.interval),
+              bullish == null || required == null ? 'Unavailable' : bullish + ' / ' + required,
+              remaining,
+              disposition,
+              reason
+            ].forEach(value => row.appendChild(text('td', String(value))));
+            candidateBody.appendChild(row);
+          });
+          const hasItems = items && items.length > 0;
+          candidateGrid.hidden = !hasItems;
+          candidateEmpty.hidden = hasItems;
         };
         const renderWorkers = data => {
           const body = grid.querySelector('tbody');
@@ -1451,9 +1541,9 @@ app.MapGet("/experiments", () => Results.Content(
               worker.qualification,
               worker.runtimeStatus,
               value(worker.cashBalance),
-              value(worker.positionQuantity),
-              value(worker.averageEntryPrice),
-              value(worker.currentPrice),
+              quantityValue(worker.positionQuantity),
+              worker.averageEntryPrice == null ? 'Waiting' : p(worker.averageEntryPrice),
+              worker.currentPrice == null ? 'Waiting' : p(worker.currentPrice),
               value(worker.positionMarketValue),
               value(worker.unrealizedProfitAndLoss),
               value(worker.realizedProfitAndLoss),
@@ -1492,11 +1582,15 @@ app.MapGet("/experiments", () => Results.Content(
                   'span',
                   trade.direction.toUpperCase(),
                   trade.direction.toLowerCase() === 'buy' ? 'buy' : 'sell'));
-                detail.appendChild(text('span', 'Quantity: ' + n(trade.quantity)));
-                detail.appendChild(text('span', 'Fill: ' + n(trade.executionPrice)));
+                detail.appendChild(text('span', 'Quantity: ' + q(trade.quantity)));
+                detail.appendChild(text('span', 'Fill: ' + p(trade.executionPrice)));
                 detail.appendChild(text('span', 'Fee: ' + n(trade.fee)));
-                detail.appendChild(text('span', 'Average entry: ' + value(worker.averageEntryPrice)));
-                detail.appendChild(text('span', 'Current: ' + value(worker.currentPrice)));
+                detail.appendChild(text(
+                  'span',
+                  'Average entry: ' + (worker.averageEntryPrice == null ? 'Waiting' : p(worker.averageEntryPrice))));
+                detail.appendChild(text(
+                  'span',
+                  'Current: ' + (worker.currentPrice == null ? 'Waiting' : p(worker.currentPrice))));
                 tradeCell.appendChild(detail);
                 tradeRow.appendChild(tradeCell);
                 body.appendChild(tradeRow);
@@ -1523,19 +1617,20 @@ app.MapGet("/experiments", () => Results.Content(
               activationResponse.json(),
               workersResponse.json()
             ]);
+            lastRefreshAt = new Date();
+            nextRefreshAt = new Date(lastRefreshAt.getTime() + 10000);
+            lastScannerRunAt = data.lastScanAtUtc ? new Date(data.lastScanAtUtc) : null;
+            const priceTimes = (workers.workers || [])
+              .map(worker => worker.currentPriceAsOfUtc ? new Date(worker.currentPriceAsOfUtc) : null)
+              .filter(Boolean);
+            latestPriceAt = priceTimes.length
+              ? new Date(Math.max(...priceTimes.map(value => value.getTime())))
+              : null;
+            renderRefreshStatus();
             state.replaceChildren(
-              text('p', 'Paper-training status: ' + data.state + '. Active slots: ' + data.slots + ' of 10.', 'muted'),
+              text('p', 'Paper-training scanner: ' + data.state + '. Active BUY opportunities: ' + workers.activeSlots + ' of 10.', 'muted'),
               text('p', data.notice, 'muted'));
-            qualifications.replaceChildren();
-            (data.qualifications || []).forEach(item => {
-              const disposition = item.accepted ? 'qualified' :
-                (item.paperOnlyExploration ? 'exploration' : 'rejected');
-              qualifications.appendChild(text('p',
-                (item.strategyId || 'approved strategy') + ' / ' + item.symbol + ' / ' +
-                  intervalLabel(item.interval) + ': ' +
-                  disposition + '. ' + item.reason,
-                item.accepted ? 'muted' : 'notice'));
-            });
+            renderCandidates(data.qualifications, workers.workers);
             renderWorkers(workers);
           } catch (error) {
             state.replaceChildren(text('p', error.message, 'notice'));
@@ -1547,19 +1642,20 @@ app.MapGet("/experiments", () => Results.Content(
         window.addEventListener('hashchange', selectTab);
         load();
         setInterval(load, 10000);
+        setInterval(renderRefreshStatus, 1000);
         document.getElementById('request-form').addEventListener('submit', async event => {
           event.preventDefault();
           document.getElementById('start').disabled = true;
           state.replaceChildren(text('p',
-            'Discovering liquid Kraken Spot pairs, then running validation and untouched holdout qualification.',
+            'Enabling continuous Kraken EUR paper scanning. Workers are created only after an opportunity is admitted.',
             'muted'));
           const response = await fetch('/api/paper-training', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              startingCash: Number(document.getElementById('starting-cash').value),
-              minimumNetReturnPercent: Number(document.getElementById('minimum-return').value),
-              minimumCompletedTrades: Number(document.getElementById('minimum-trades').value),
-              maximumDrawdownPercent: Number(document.getElementById('maximum-drawdown').value)
+              startingCash: 1000,
+              minimumNetReturnPercent: 0,
+              minimumCompletedTrades: 3,
+              maximumDrawdownPercent: 20
             })
           });
           document.getElementById('start').disabled = false;
@@ -2136,6 +2232,32 @@ app.MapGet("/orders", () => Results.Content(
       <script>
         // Every cell is written with textContent so no exchange or user supplied
         // string can be interpreted as markup.
+        function formatNumber(value) {
+          if (value === null || value === undefined) { return value; }
+          var number = Number(value);
+          return isFinite(number)
+            ? number.toLocaleString(undefined, { maximumFractionDigits: 2 })
+            : String(value);
+        }
+
+        function formatQuantity(value) {
+          if (value === null || value === undefined) { return value; }
+          var number = Number(value);
+          return isFinite(number)
+            ? number.toLocaleString(undefined, { maximumFractionDigits: 8 })
+            : String(value);
+        }
+
+        function formatPrice(value) {
+          if (value === null || value === undefined) { return value; }
+          var number = Number(value);
+          return isFinite(number)
+            ? number.toLocaleString(undefined, {
+                maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 0.01 ? 8 : 2
+              })
+            : String(value);
+        }
+
         function cell(row, text, className) {
           var td = document.createElement('td');
           td.textContent = text === null || text === undefined ? '-' : String(text);
@@ -2215,9 +2337,9 @@ app.MapGet("/orders", () => Results.Content(
               cell(tr, o.side);
               cell(tr, o.type);
               pill(tr, o.state, o.requiresReconciliation ? 'bad' : 'ok');
-              cell(tr, o.quantity, 'numeric');
-              cell(tr, o.filledQuantity, 'numeric');
-              cell(tr, o.price, 'numeric');
+              cell(tr, formatQuantity(o.quantity), 'numeric');
+              cell(tr, formatQuantity(o.filledQuantity), 'numeric');
+              cell(tr, formatPrice(o.price), 'numeric');
               cell(tr, o.clientOrderId);
             },
             'No orders yet.');
@@ -2229,10 +2351,10 @@ app.MapGet("/orders", () => Results.Content(
               cell(tr, p.symbol);
               cell(tr, p.direction);
               pill(tr, p.status, p.permitsIncrease ? 'ok' : 'warn');
-              cell(tr, p.quantity, 'numeric');
-              cell(tr, p.entryPrice, 'numeric');
-              cell(tr, p.markPrice, 'numeric');
-              cell(tr, p.unrealizedPnl, 'numeric');
+              cell(tr, formatQuantity(p.quantity), 'numeric');
+              cell(tr, formatPrice(p.entryPrice), 'numeric');
+              cell(tr, formatPrice(p.markPrice), 'numeric');
+              cell(tr, formatNumber(p.unrealizedPnl), 'numeric');
             },
             'No open positions.');
 
@@ -4117,8 +4239,9 @@ internal sealed record PaperTrainingResponse(
     string State,
     int Slots,
     DateTimeOffset? ChangedAtUtc,
+    DateTimeOffset? LastScanAtUtc,
     IReadOnlyList<object> Catalog,
-    IReadOnlyList<PaperTrainingQualificationResult> Qualifications,
+    IReadOnlyList<PaperTrainingCandidateResponse> Qualifications,
     string Notice)
 {
     public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
@@ -4126,6 +4249,7 @@ internal sealed record PaperTrainingResponse(
             activation?.State.ToString() ?? "NotStarted",
             activation?.Slots.Count ?? 0,
             activation?.ChangedAtUtc,
+            LastScanAtUtcFrom(activation),
             PaperTrainingActivationService.ApprovedSlots
                 .Where(slot => PaperTrainingHistoricalQualification.Supports(slot.StrategyId))
                 .GroupBy(slot => slot.StrategyId, StringComparer.Ordinal)
@@ -4136,8 +4260,61 @@ internal sealed record PaperTrainingResponse(
                 slot.ParameterSetId, slot.ProvenanceId,
                 Intervals = PaperTrainingAutoSelectionService.ApprovedIntervals
             }).ToArray(),
-            activation?.QualificationResults ?? Array.Empty<PaperTrainingQualificationResult>(),
-            "Paper only: fake funds only. Exploration slots are not historically qualified and never grant live eligibility. Starting requires every deployment prerequisite; live account stages remain untouched. Disable or emergency stop prevents further paper training.");
+            activation?.QualificationResults
+                .Where(result => result.CandidateDisposition is not null
+                    && result.StrategyId is not null)
+                .GroupBy(result => (result.StrategyId, result.Symbol, result.Interval))
+                .Select(group => group
+                    .OrderByDescending(result => result.SignalCloseUtc)
+                    .ThenByDescending(result => result.DatasetFingerprint, StringComparer.Ordinal)
+                    .First())
+                .OrderByDescending(result => result.SignalCloseUtc)
+                .ThenBy(result => Math.Max(
+                    0,
+                    (result.RequiredBullishChecks ?? 5) - (result.BullishChecks ?? 0)))
+                .ThenBy(result => result.StrategyId, StringComparer.Ordinal)
+                .ThenBy(result => result.Symbol, StringComparer.OrdinalIgnoreCase)
+                .Take(100)
+                .Select(PaperTrainingCandidateResponse.From)
+                .ToArray()
+                ?? Array.Empty<PaperTrainingCandidateResponse>(),
+            "Paper only: fake funds only. The scanner evaluates Kraken EUR Spot pairs every five minutes; queued observations consume no worker capacity and never grant live eligibility. Live account stages remain untouched.");
+
+    private static DateTimeOffset? LastScanAtUtcFrom(PaperTrainingActivation? activation) =>
+        activation?.QualificationResults
+            .Where(result => result.StrategyId == "platform.scanner"
+                && result.DatasetFingerprint.StartsWith("scan-run-", StringComparison.Ordinal))
+            .Select(result => DateTimeOffset.TryParse(
+                result.DatasetFingerprint["scan-run-".Length..],
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind,
+                out var scannedAt)
+                ? scannedAt
+                : (DateTimeOffset?)null)
+            .Where(value => value.HasValue)
+            .Max();
+}
+
+internal sealed record PaperTrainingCandidateResponse(
+    string StrategyId,
+    string Symbol,
+    CandleInterval Interval,
+    string Disposition,
+    int? BullishChecks,
+    int? RequiredBullishChecks,
+    DateTimeOffset? SignalCloseUtc,
+    string Reason)
+{
+    public static PaperTrainingCandidateResponse From(PaperTrainingQualificationResult result) =>
+        new(
+            result.StrategyId!,
+            result.Symbol,
+            result.Interval,
+            result.CandidateDisposition!.Value.ToString(),
+            result.BullishChecks,
+            result.RequiredBullishChecks,
+            result.SignalCloseUtc,
+            result.Reason);
 }
 
 internal static class PaperTrainingRole

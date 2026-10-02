@@ -11,6 +11,7 @@ public sealed class MarketDataWorkerTests
     [Fact]
     public void BackfillSelectsRequiredSafeContiguousCompletedCandles()
     {
+        Assert.Equal(ApprovedConsensusStrategyProfiles.RequiredHistory, PaperTrainingCandleBackfillService.RequiredCandleCount);
         var boundary = new DateTimeOffset(2026, 9, 22, 6, 0, 0, TimeSpan.Zero);
         var subscription = new CandleSubscription("BTC/EUR", CandleInterval.FiveMinutes);
         var candles = Enumerable.Range(0, PaperTrainingCandleBackfillService.RequiredCandleCount + 2)
@@ -104,6 +105,11 @@ public sealed class MarketDataWorkerTests
             {
                 Assert.Equal("ETH/USD", subscription.Symbol);
                 Assert.Equal(CandleInterval.FiveMinutes, subscription.Interval);
+            },
+            subscription =>
+            {
+                Assert.Equal("XRP/EUR", subscription.Symbol);
+                Assert.Equal(CandleInterval.OneDay, subscription.Interval);
             });
     }
 

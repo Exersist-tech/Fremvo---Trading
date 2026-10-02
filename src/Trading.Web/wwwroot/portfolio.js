@@ -7,6 +7,13 @@
     return new Date(value).toLocaleString();
   }
 
+  function formatQuantity(value) {
+    var numeric = Number(value);
+    return isFinite(numeric)
+      ? numeric.toLocaleString(undefined, { maximumFractionDigits: 8 })
+      : String(value);
+  }
+
   function setStatus(message, error) {
     var status = $('status');
     status.textContent = message;
@@ -112,9 +119,9 @@
       balances.forEach(function (balance) {
         var row = document.createElement('tr');
         cell(row, balance.asset, false);
-        cell(row, balance.total, true);
-        cell(row, balance.available, true);
-        cell(row, balance.held, true);
+        cell(row, formatQuantity(balance.total), true);
+        cell(row, formatQuantity(balance.available), true);
+        cell(row, formatQuantity(balance.held), true);
         table.appendChild(row);
       });
       tableWrap.appendChild(table);
