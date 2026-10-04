@@ -15,6 +15,7 @@ namespace Trading.Application.Execution;
 /// </remarks>
 public sealed class InMemoryOrderRepository : IOrderRepository
 {
+    private readonly object _admissionSync = new();
     private readonly ConcurrentDictionary<Guid, Order> _orders = new();
     private readonly ConcurrentDictionary<string, Guid> _clientOrderIds =
         new(StringComparer.Ordinal);
@@ -55,13 +56,18 @@ public sealed class InMemoryOrderRepository : IOrderRepository
     public Task AddAsync(Order order, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(order);
-
-        if (!_clientOrderIds.TryAdd(order.ClientOrderId, order.Id))
+        lock (_admissionSync)
         {
-            throw new DuplicateClientOrderIdException(order.ClientOrderId);
+            if (_clientOrderIds.ContainsKey(order.ClientOrderId))
+                throw new DuplicateClientOrderIdException(order.ClientOrderId);
+            if (order.Mode == TradingMode.Live && order.ExchangeAccountId is { } accountId
+                && _orders.Values.Any(existing => existing.Mode == TradingMode.Live
+                    && existing.ExchangeAccountId == accountId
+                    && (!existing.IsTerminal || existing.RequiresReconciliation)))
+                throw new WorkingLiveOrderConflictException();
+            _clientOrderIds[order.ClientOrderId] = order.Id;
+            _orders[order.Id] = order;
         }
-
-        _orders[order.Id] = order;
         return Task.CompletedTask;
     }
 
@@ -69,9 +75,13 @@ public sealed class InMemoryOrderRepository : IOrderRepository
     {
         ArgumentNullException.ThrowIfNull(order);
 
-        _orders[order.Id] = order;
+        lock (_admissionSync)
+            _orders[order.Id] = order;
         return Task.CompletedTask;
     }
+
+    public Task UpdateAsync(Order order, int expectedVersion, CancellationToken cancellationToken) =>
+        UpdateAsync(order, cancellationToken);
 }
 
 /// <summary>
@@ -100,7 +110,7 @@ public sealed class InMemoryPositionRepository : IPositionRepository
         return Task.CompletedTask;
     }
 
-    public Task UpdateAsync(Position position, CancellationToken cancellationToken)
+    public Task UpdateAsync(Position position, int expectedVersion, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(position);
 

@@ -118,7 +118,8 @@ public sealed class ExperimentDecisionPolicy
             evidence.StrategyId, evidence.StrategyVersion, evidence.StrategyFingerprint, candle.Symbol.Trim(), candle.Interval,
             candle.OpenTimeUtc, candle.CloseTimeUtc, candle.AsOfUtc);
         var proposal = Map(worker, analysis, portfolio);
-        var fingerprint = $"{analysis.Outcome}|{analysis.Value?.ToString(System.Globalization.CultureInfo.InvariantCulture)}|{analysis.Reason}|{evidence.ParametersFingerprint}|{evidence.ContextFingerprint}";
+        // Audit-only check labels must not change the identity of decisions written before the labels existed.
+        var fingerprint = $"{analysis.Outcome}|{analysis.Value?.ToString(System.Globalization.CultureInfo.InvariantCulture)}|{analysis.FingerprintReason}|{evidence.ParametersFingerprint}|{evidence.ContextFingerprint}";
         var candidate = new ExperimentDecisionRecord(key, proposal, fingerprint, _timeProvider.GetUtcNow());
         var write = await _ledger.RecordAsync(worker.UserId, candidate, cancellationToken).ConfigureAwait(false);
         return write.Result switch

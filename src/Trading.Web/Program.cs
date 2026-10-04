@@ -3,12 +3,22 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Globalization;
+using System.Net.WebSockets;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Threading.RateLimiting;
 using Azure.Identity;
+using Azure;
 using Azure.Security.KeyVault.Secrets;
+using Azure.Storage.Blobs;
+using Microsoft.ApplicationInsights.DependencyCollector;
 using Trading.Application.Execution;
 using Trading.Application.Experiments;
 using Trading.Application.Pipeline;
+using Trading.Application.Reporting;
 using Trading.Application.Scanner;
 using Trading.Application.Backtesting;
 using Trading.Application.Optimization;
@@ -20,10 +30,12 @@ using Trading.Application.Universe;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
 using Trading.Domain.Experiments;
+using Trading.Domain.Entitlements;
 using Trading.Domain.Identity;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
+using Trading.Domain.Reporting;
 using Trading.Domain.Universe;
 using Trading.Domain.Users;
 using Trading.Exchanges.Abstractions;
@@ -38,14 +50,18 @@ using Trading.Infrastructure.Data.Audit;
 using Trading.Infrastructure.Data.Execution;
 using Trading.Infrastructure.Data.ExchangeAccounts;
 using Trading.Infrastructure.Data.Experiments;
+using Trading.Application.Entitlements;
+using Trading.Infrastructure.Data.Reporting;
 using Trading.Infrastructure.Secrets;
 using Trading.MarketData;
 using Trading.Optimization;
 using Trading.Risk;
 using Trading.Web.Charting;
+using Trading.Web.Components;
 using Trading.Web.Development;
 using Trading.Web.Extensions;
 using Trading.Web.Optimization;
+using Trading.Web.Reporting;
 using Trading.Web.Security;
 using ITradingAuthenticationService = Trading.Application.UseCases.Identity.IAuthenticationService;
 using TradingAuthenticationService = Trading.Application.UseCases.Identity.AuthenticationService;
@@ -81,9 +97,42 @@ const string LiveBookDisclaimer =
     "This list is empty for that reason, not because of a filter. " +
     "No result shown is a prediction, and no strategy is guaranteed to be profitable.";
 
+var logOrderBookSourceFailure = LoggerMessage.Define<string>(
+    LogLevel.Warning,
+    new EventId(1001, "KrakenOrderBookSourceFailure"),
+    "Kraken order-book stream failed for {Symbol}.");
+var logOrderBookSocketFailure = LoggerMessage.Define<string>(
+    LogLevel.Warning,
+    new EventId(1002, "KrakenOrderBookSocketFailure"),
+    "Kraken order-book WebSocket disconnected for {Symbol}.");
+
 var builder = WebApplication.CreateBuilder(args);
+var telemetryConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+if (!string.IsNullOrWhiteSpace(telemetryConnection))
+{
+    builder.Services.AddApplicationInsightsTelemetry(options =>
+    {
+        options.ConnectionString = telemetryConnection;
+        options.EnableAdaptiveSampling = false;
+    });
+    builder.Services.ConfigureTelemetryModule<DependencyTrackingTelemetryModule>(
+        (module, _) => module.EnableSqlCommandTextInstrumentation = false);
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(LiveTradingService).FullName!, LogLevel.Warning);
+}
 
 builder.Services.AddTradingInfrastructure(builder.Configuration);
+builder.Services.AddSingleton<IPaperReportCountryFormatter, GbPaperReportCountryFormatter>();
+var reportContainerUri = builder.Configuration["Reporting:ContainerUri"];
+if (!string.IsNullOrWhiteSpace(reportContainerUri))
+{
+    if (!Uri.TryCreate(reportContainerUri, UriKind.Absolute, out var containerUri)
+        || containerUri.Scheme != Uri.UriSchemeHttps || containerUri.UserInfo.Length != 0
+        || containerUri.Query.Length != 0 || containerUri.Fragment.Length != 0)
+        throw new InvalidOperationException("Reporting:ContainerUri must be an HTTPS private Blob container URI without credentials.");
+    builder.Services.AddSingleton<IPaperTransactionReportStore>(_ =>
+        new AzureBlobPaperTransactionReportStore(new BlobContainerClient(containerUri, new DefaultAzureCredential())));
+}
 builder.Services.AddScoped<IInvitationService, InvitationService>();
 builder.Services.AddScoped<IRegistrationService, RegistrationService>();
 // Password hashing is a singleton: it holds a lazily computed decoy hash used
@@ -93,7 +142,34 @@ builder.Services.AddSingleton<Pbkdf2PasswordHasher>();
 builder.Services.AddSingleton<IPasswordHasher>(sp => sp.GetRequiredService<Pbkdf2PasswordHasher>());
 builder.Services.AddScoped<ITradingAuthenticationService, TradingAuthenticationService>();
 builder.Services.AddScoped<IAdministratorMfaPolicyService, AdministratorMfaPolicyService>();
+builder.Services.AddScoped<AdministratorTotpVerifier>();
 builder.Services.AddScoped<IAuditEventWriter, EfAuditEventWriter>();
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("sign-in", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("admin-mutation", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.OnRejected = (context, _) =>
+    {
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        return ValueTask.CompletedTask;
+    };
+});
 builder.Services.Configure<PaperTrainingPrerequisiteOptions>(
     builder.Configuration.GetSection(PaperTrainingPrerequisiteOptions.SectionName));
 builder.Services.AddScoped<PaperTrainingActivationService>();
@@ -101,6 +177,15 @@ builder.Services.AddSingleton(PaperTrainingUniversePolicy.PlatformDefault);
 builder.Services.AddScoped<PaperTrainingUniverseDiscovery>();
 builder.Services.AddScoped<PaperTrainingAutoSelectionService>();
 builder.Services.AddScoped<PaperTrainingMonitorService>();
+builder.Services.AddScoped<EfExperimentPaperExecutionLedger>();
+builder.Services.AddScoped<IExperimentPaperExecutionLedger>(
+    provider => provider.GetRequiredService<EfExperimentPaperExecutionLedger>());
+builder.Services.AddScoped<IExecutionCommandRepository, EfPaperExecutionCommands>();
+builder.Services.AddScoped<IPaperExecutionResultRepository, EfPaperExecutionResults>();
+builder.Services.AddScoped<IPortfolioUpdateRepository, EfPaperPortfolioUpdates>();
+builder.Services.AddScoped<IPaperTradeAuditEvidenceReader, EfPaperTradeAuditEvidenceReader>();
+builder.Services.AddScoped<IExperimentPaperPlanEvidenceRepository, EfExperimentPaperPlanEvidenceRepository>();
+builder.Services.AddScoped<ThreeSwingChannelDivergenceEvidenceQuery>();
 builder.Services.AddSingleton(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
 builder.Services.AddScoped<PaperTrainingHistoricalQualification>();
 builder.Services.AddScoped<IAuditQueryService>(provider =>
@@ -111,6 +196,14 @@ builder.Services.AddScoped<IExchangeAccountRepository, EfExchangeAccountReposito
 builder.Services.AddScoped<IExchangeAccountConnectionService, ExchangeAccountConnectionService>();
 builder.Services.AddScoped<IPortfolioQueryService, PortfolioQueryService>();
 builder.Services.AddSingleton<ChartIndicatorOverlayService>();
+builder.Services.AddSingleton<IStreamingOrderBookSource, KrakenStreamingOrderBookSource>();
+builder.Services.AddSingleton<KrakenStreamingTickerSource>();
+builder.Services.AddHttpClient<KrakenPublicTickerQuoteSource>(client =>
+{
+    client.BaseAddress = new Uri("https://api.kraken.com/0/");
+    client.Timeout = TimeSpan.FromSeconds(5);
+    client.DefaultRequestHeaders.CacheControl = new() { NoCache = true };
+});
 // There is no durable completed-backtest store yet. This deliberately empty
 // source keeps the reporting surface read-only and prevents a page load from
 // running an in-memory backtest or inventing results.
@@ -144,11 +237,13 @@ builder.Services.AddSingleton(liveTradingOptions);
 // of those must keep working for an account that was promoted and then had its
 // route withdrawn. Only the route registration below grants the ability to
 // promote an account in the first place.
-builder.Services.AddHttpClient<ISpotOrderGateway, KrakenSpotOrderGateway>(client =>
+builder.Services.AddHttpClient<KrakenSpotOrderGateway>(client =>
 {
     client.BaseAddress = new Uri("https://api.kraken.com");
     client.Timeout = TimeSpan.FromSeconds(20);
 });
+builder.Services.AddScoped<ISpotOrderGateway>(provider => provider.GetRequiredService<KrakenSpotOrderGateway>());
+builder.Services.AddScoped<ISpotOpenOrderGateway>(provider => provider.GetRequiredService<KrakenSpotOrderGateway>());
 
 if (liveExecutionEnabled)
 {
@@ -157,12 +252,15 @@ if (liveExecutionEnabled)
 }
 
 builder.Services.AddScoped<ISpotExecutionAccountSource, ExchangeAccountExecutionSource>();
+builder.Services.AddScoped<ILiveAccountOpenOrderCheck, LiveAccountOpenOrderCheck>();
 builder.Services.AddScoped<IExecutionAdapter>(provider => new SpotExecutionAdapter(
     provider.GetRequiredService<ISpotOrderGateway>(),
     provider.GetRequiredService<ISpotExecutionAccountSource>(),
     provider.GetRequiredService<TimeProvider>()));
 builder.Services.AddScoped<ILiveTradingService, LiveTradingService>();
 builder.Services.AddScoped<LiveOrderSyncService>();
+builder.Services.AddScoped<ILiveFillPersistenceTransaction, EfLiveFillPersistenceTransaction>();
+builder.Services.AddHostedService<Trading.Web.LiveReconciliationWorker>();
 
 // The Kraken permission probe talks to Kraken's private API to establish what a
 // user's key may do. It is the only component that sees a credential, and it
@@ -237,6 +335,42 @@ builder.Services
         options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
         options.SlidingExpiration = true;
         options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.Events.OnValidatePrincipal = async context =>
+        {
+            var principal = context.Principal;
+            var userId = CurrentUser.TryGetUserId(principal);
+            var db = context.HttpContext.RequestServices.GetRequiredService<TradingDbContext>();
+            var time = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>();
+            var user = userId is { } id
+                ? await db.Users.AsNoTracking().SingleOrDefaultAsync(value => value.Id == id,
+                    context.HttpContext.RequestAborted).ConfigureAwait(false)
+                : null;
+            var adminMfaValid = true;
+            if (user is not null
+                && RequiresAdministratorMfa(user, builder.Environment.IsDevelopment()))
+            {
+                var stepClaim = principal?.FindFirstValue(AdministratorTotpVerifier.StepClaim);
+                adminMfaValid = user.MultiFactorAuthenticationEnabled
+                    && long.TryParse(stepClaim, System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out var step)
+                    && await db.AdministratorMfaRedemptions.AsNoTracking().AnyAsync(
+                        value => value.UserId == user.Id && value.TimeStep == step
+                            && value.UsedAtUtc >= time.GetUtcNow().AddHours(-8),
+                        context.HttpContext.RequestAborted).ConfigureAwait(false);
+            }
+            if (user is null
+                || user.Status != UserStatus.Active
+                || !user.HasPassword
+                || principal?.FindAll(ClaimTypes.Role).Count() != 1
+                || !principal.IsInRole(user.Role.ToString())
+                || !string.Equals(principal.FindFirstValue(ClaimTypes.Name), user.Email, StringComparison.Ordinal)
+                || !adminMfaValid)
+            {
+                context.RejectPrincipal();
+                await context.HttpContext.SignOutAsync(
+                    CookieAuthenticationDefaults.AuthenticationScheme).ConfigureAwait(false);
+            }
+        };
 
         // API callers get a status code rather than a redirect to a sign-in page.
         // A browser navigating to a page is sent to the sign-in form instead, so
@@ -271,12 +405,56 @@ static bool WantsHtmlPage(HttpRequest request) =>
     && request.Headers.Accept.Any(value =>
         value is not null && value.Contains("text/html", StringComparison.OrdinalIgnoreCase));
 
-builder.Services.AddAuthorization();
+static bool RequiresAdministratorMfa(User user, bool isDevelopment) =>
+    user.Role == RoleType.Administrator
+    && (!isDevelopment || user.Id != DevelopmentDataSeeder.AdministratorId);
 
-// Halt state is shared by every trading path in this process. It is registered as a singleton so
-// an emergency stop takes effect immediately for all callers.
-builder.Services.AddSingleton<InMemoryTradingHaltState>();
-builder.Services.AddSingleton<ITradingHaltState>(sp => sp.GetRequiredService<InMemoryTradingHaltState>());
+static async Task<IResult?> VerifyFreshAdminActionAsync(
+    AdministratorTotpVerifier verifier, Guid administratorId, string? oneTimeCode,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        return await verifier.VerifyAndRedeemAsync(administratorId, oneTimeCode, cancellationToken)
+            .ConfigureAwait(false) is null
+            ? Results.BadRequest(new { error = "A fresh, unused administrator verification code is required." })
+            : null;
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Administrator verification is temporarily unavailable.");
+    }
+    catch (RequestFailedException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Administrator verification is temporarily unavailable.");
+    }
+}
+
+static async Task ObserveOrderBookClientAsync(WebSocket socket, CancellationTokenSource streamCancellation)
+{
+    try
+    {
+        var buffer = new ArraySegment<byte>(new byte[1]);
+        await socket.ReceiveAsync(buffer, streamCancellation.Token).ConfigureAwait(false);
+        await streamCancellation.CancelAsync().ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (streamCancellation.IsCancellationRequested)
+    {
+    }
+    catch (WebSocketException)
+    {
+        await streamCancellation.CancelAsync().ConfigureAwait(false);
+    }
+}
+
+builder.Services.AddAuthorization();
+builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddCascadingAuthenticationState();
+
+// Read the immutable halt decisions from SQL for every trade, including after a host restart.
+builder.Services.AddScoped<ITradingHaltState, EfAuditTradingHaltState>();
 
 // Execution storage. These are durable: an order that exists at the exchange
 // must never outlive its local record, because the client order id stored here
@@ -344,8 +522,15 @@ var app = builder.Build();
 await DevelopmentDataSeeder.SeedAsync(app).ConfigureAwait(false);
 
 app.UseStaticFiles();
+app.UseRouting();
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseAntiforgery();
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(20)
+});
 
 app.MapGet("/api/health", () => Results.Ok(new
 {
@@ -368,7 +553,402 @@ app.MapGet("/api/audit", async (IAuditQueryService queryService, CancellationTok
         e.OccurredAtUtc,
         e.CorrelationId
     }));
-});
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
+app.MapGet("/api/admin/entitlements/plans", async (TradingDbContext db, CancellationToken cancellationToken) =>
+    Results.Ok(await db.Plans.AsNoTracking()
+        .Where(plan => !plan.LiveTradingEligible && !plan.FuturesEligible)
+        .OrderBy(plan => plan.Code)
+        .Select(plan => new { plan.Id, plan.Code, plan.Name, plan.MaxExperimentWorkers,
+            plan.LiveTradingEligible, plan.FuturesEligible })
+        .ToListAsync(cancellationToken).ConfigureAwait(false)))
+    .RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
+app.MapGet("/api/entitlements/me", async (
+    ClaimsPrincipal principal, TradingDbContext db, IPaperWorkerAdmissionLimit paperLimit,
+    TimeProvider time, IConfiguration configuration, CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var active = await db.Entitlements.AsNoTracking()
+        .Where(item => item.UserId == ownerId.Value && item.Status == EntitlementStatus.Active)
+        .Join(db.Plans.AsNoTracking(), item => item.PlanId, plan => plan.Id,
+            (item, plan) => new { plan.Code, plan.MaxExperimentWorkers, plan.LiveTradingEligible,
+                item.TrialExpiresAtUtc })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    var now = time.GetUtcNow();
+    var capacity = await paperLimit.GetMaximumAsync(ownerId.Value, now, cancellationToken)
+        .ConfigureAwait(false);
+    return Results.Ok(new
+    {
+        paperWorkerLimitsEnabled = configuration.GetValue<bool>("Entitlements:PaperWorkerLimitsEnabled"),
+        effectivePaperWorkerCapacity = capacity,
+        planCode = active?.Code,
+        trialExpiresAtUtc = active?.TrialExpiresAtUtc,
+        trialExpired = active?.TrialExpiresAtUtc is { } expiry && expiry <= now,
+        livePlanEligible = active is { LiveTradingEligible: true }
+            && (active.TrialExpiresAtUtc is null || active.TrialExpiresAtUtc > now)
+    });
+}).RequireAuthorization();
+
+app.MapGet("/api/admin/entitlements/owners", async (
+    string email, TradingDbContext db, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(email) || email.Length > 256)
+        return Results.BadRequest(new { error = "Supply an account email." });
+    var owner = await db.Users.AsNoTracking().Where(user => user.Email == email.Trim())
+        .Select(user => new { user.Id, user.Email, user.Role, user.Status })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    if (owner is null)
+        return Results.NotFound();
+    var assignment = await db.Entitlements.AsNoTracking()
+        .Where(item => item.UserId == owner.Id && item.Status == EntitlementStatus.Active)
+        .Join(db.Plans.AsNoTracking(), item => item.PlanId, plan => plan.Id,
+            (item, plan) => new { item.Id, item.PlanId, plan.Code, plan.MaxExperimentWorkers,
+                plan.LiveTradingEligible, plan.FuturesEligible,
+                item.AssignedAtUtc, item.TrialExpiresAtUtc })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { owner.Id, owner.Email, Role = owner.Role.ToString(),
+        Status = owner.Status.ToString(),
+        Assignment = assignment });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
+app.MapGet("/api/admin/entitlements/owners/search", async (
+    string? query, int? page, TradingDbContext db, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(query) || query.Trim().Length < 3 || query.Length > 256
+        || page is < 0 or > 10_000)
+        return Results.BadRequest(new { error = "Use at least three email characters and a valid page." });
+    var currentPage = page.GetValueOrDefault();
+    var owners = await db.Users.AsNoTracking()
+        .Where(user => (user.Role == RoleType.User || user.Role == RoleType.RiskOfficer)
+            && user.Email.StartsWith(query.Trim()))
+        .OrderBy(user => user.Email).ThenBy(user => user.Id)
+        .Skip(currentPage * 50).Take(51)
+        .Select(user => new { user.Id, user.Email, Role = user.Role.ToString(),
+            Status = user.Status.ToString() })
+        .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { items = owners.Take(50), page = currentPage, hasMore = owners.Length > 50 });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/status", async (
+    Guid ownerId, ClaimsPrincipal principal, ChangeOwnerStatusRequest request,
+    AdministratorTotpVerifier mfa, TradingDbContext db, TimeProvider time,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if ((!string.Equals(request.Status, nameof(UserStatus.Active), StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(request.Status, nameof(UserStatus.Suspended), StringComparison.OrdinalIgnoreCase))
+        || !Enum.TryParse<UserStatus>(request.Status, ignoreCase: true, out var target)
+        || string.IsNullOrWhiteSpace(request.Reason)
+        || request.Reason.Length > 200)
+        return Results.BadRequest(new { error = "Select Active or Suspended and supply a short reason." });
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+    var owner = await db.Users.AsNoTracking().Where(user => user.Id == ownerId)
+        .Select(user => new { user.Id, user.Role, user.Status })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    if (owner is null)
+        return Results.NotFound();
+    if (owner.Role != RoleType.User)
+        return Results.Forbid();
+    if (owner.Status == target)
+        return Results.Conflict(new { error = "The owner already has this status." });
+
+    var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    var changed = await db.Users.Where(user => user.Id == ownerId
+            && user.Role == RoleType.User && user.Status == owner.Status)
+        .ExecuteUpdateAsync(setter => setter.SetProperty(user => user.Status, target),
+            cancellationToken).ConfigureAwait(false);
+    if (changed != 1)
+        return Results.Conflict(new { error = "The account changed during the status update." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), administratorId.Value,
+        target == UserStatus.Suspended ? "User.Suspended" : "User.Reactivated",
+        nameof(User), ownerId.ToString("D"), time.GetUtcNow(),
+        JsonSerializer.Serialize(new { Status = owner.Status.ToString() }),
+        JsonSerializer.Serialize(new { Status = target.ToString(), Reason = request.Reason.Trim() }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { ownerId, Status = target.ToString() });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/role", async (
+    Guid ownerId, ClaimsPrincipal principal, ChangeOwnerRoleRequest request,
+    AdministratorTotpVerifier mfa, TradingDbContext db, TimeProvider time,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if ((!string.Equals(request.Role, nameof(RoleType.User), StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(request.Role, nameof(RoleType.RiskOfficer), StringComparison.OrdinalIgnoreCase))
+        || !Enum.TryParse<RoleType>(request.Role, ignoreCase: true, out var target)
+        || string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 200)
+        return Results.BadRequest(new { error = "Select User or RiskOfficer and supply a short reason." });
+
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+    var owner = await db.Users.AsNoTracking().Where(user => user.Id == ownerId)
+        .Select(user => new { user.Role, user.Status })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    if (owner is null) return Results.NotFound();
+    if (owner.Status != UserStatus.Active || owner.Role is not (RoleType.User or RoleType.RiskOfficer))
+        return Results.Forbid();
+    if (owner.Role == target)
+        return Results.Conflict(new { error = "The account already has this role." });
+
+    var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    var changed = await db.Users.Where(user => user.Id == ownerId
+            && user.Role == owner.Role && user.Status == UserStatus.Active)
+        .ExecuteUpdateAsync(setter => setter.SetProperty(user => user.Role, target),
+            cancellationToken).ConfigureAwait(false);
+    if (changed != 1)
+        return Results.Conflict(new { error = "The account changed during the role update." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), administratorId.Value,
+        target == RoleType.RiskOfficer ? "User.RiskOfficerGranted" : "User.RiskOfficerRevoked",
+        nameof(User), ownerId.ToString("D"), time.GetUtcNow(),
+        JsonSerializer.Serialize(new { Role = owner.Role.ToString() }),
+        JsonSerializer.Serialize(new { Role = target.ToString(), Reason = request.Reason.Trim() }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { ownerId, Role = target.ToString() });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/account/administrator-mfa/prove", async (
+    ClaimsPrincipal principal, ProveAdministratorMfaRequest request,
+    TradingDbContext db, AdministratorTotpVerifier mfa, CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var eligible = await db.Users.AsNoTracking().AnyAsync(user => user.Id == ownerId.Value
+        && user.Role == RoleType.User && user.Status == UserStatus.Active,
+        cancellationToken).ConfigureAwait(false);
+    if (!eligible) return Results.Forbid();
+    try
+    {
+        if (await mfa.VerifyAndRedeemAsync(ownerId.Value, request.OneTimeCode, cancellationToken)
+            .ConfigureAwait(false) is null)
+            return Results.BadRequest(new { error = "A fresh administrator-enrollment verification code is required." });
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status412PreconditionFailed,
+            title: "Administrator MFA must be provisioned separately before verification.");
+    }
+    catch (RequestFailedException exception) when (exception.Status == 404)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status412PreconditionFailed,
+            title: "Administrator MFA must be provisioned separately before verification.");
+    }
+    return Results.Ok(new { message = "MFA ownership proved; an administrator must separately approve the role." });
+}).RequireAuthorization().RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/administrator", async (
+    Guid ownerId, ClaimsPrincipal principal, ApproveAdministratorRequest request,
+    AdministratorTotpVerifier mfa, TradingDbContext db, TimeProvider time,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if (administratorId.Value == ownerId || string.IsNullOrWhiteSpace(request.Reason)
+        || request.Reason.Length > 200)
+        return Results.BadRequest(new { error = "Select another active user and supply a short reason." });
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+
+    var now = time.GetUtcNow();
+    var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    var proved = await db.AdministratorMfaRedemptions.AsNoTracking()
+        .AnyAsync(value => value.UserId == ownerId && value.UsedAtUtc <= now
+            && value.UsedAtUtc >= now.AddMinutes(-5), cancellationToken).ConfigureAwait(false);
+    if (!proved)
+        return Results.Conflict(new { error = "The user must first verify a freshly provisioned administrator MFA secret." });
+    var changed = await db.Users.Where(user => user.Id == ownerId
+            && user.Role == RoleType.User && user.Status == UserStatus.Active
+            && !user.MultiFactorAuthenticationEnabled && user.PasswordHash != null)
+        .ExecuteUpdateAsync(setter => setter
+            .SetProperty(user => user.Role, RoleType.Administrator)
+            .SetProperty(user => user.MultiFactorAuthenticationEnabled, true),
+            cancellationToken).ConfigureAwait(false);
+    if (changed != 1)
+        return Results.Conflict(new { error = "The user is not an active, unpromoted account with a password." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), administratorId.Value,
+        "User.AdministratorGranted", nameof(User), ownerId.ToString("D"), now,
+        JsonSerializer.Serialize(new { Role = nameof(RoleType.User), MultiFactorAuthenticationEnabled = false }),
+        JsonSerializer.Serialize(new { Role = nameof(RoleType.Administrator),
+            MultiFactorAuthenticationEnabled = true, Reason = request.Reason.Trim() }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { ownerId, Role = nameof(RoleType.Administrator) });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/administrator/revoke", async (
+    Guid ownerId, ClaimsPrincipal principal, ApproveAdministratorRequest request,
+    AdministratorTotpVerifier mfa, TradingDbContext db, TimeProvider time,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if (administratorId.Value == ownerId || string.IsNullOrWhiteSpace(request.Reason)
+        || request.Reason.Length > 200)
+        return Results.BadRequest(new { error = "Another administrator and a short reason are required." });
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+
+    var transaction = await db.Database.BeginTransactionAsync(
+        System.Data.IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    if (!await db.Users.AsNoTracking().AnyAsync(user => user.Id == administratorId.Value
+        && user.Role == RoleType.Administrator && user.Status == UserStatus.Active,
+        cancellationToken).ConfigureAwait(false))
+        return Results.Forbid();
+    var target = await db.Users.AsNoTracking().Where(user => user.Id == ownerId)
+        .Select(user => new { user.Role, user.Status, user.MultiFactorAuthenticationEnabled })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    if (target is null) return Results.NotFound();
+    if (target.Role != RoleType.Administrator)
+        return Results.Conflict(new { error = "The target is not an administrator." });
+    if (target.Status == UserStatus.Active && await db.Users.AsNoTracking().CountAsync(
+        user => user.Role == RoleType.Administrator && user.Status == UserStatus.Active,
+        cancellationToken).ConfigureAwait(false) < 2)
+        return Results.Conflict(new { error = "The last active administrator cannot be removed." });
+    var changed = await db.Users.Where(user => user.Id == ownerId
+            && user.Role == RoleType.Administrator && user.Status == target.Status
+            && user.MultiFactorAuthenticationEnabled == target.MultiFactorAuthenticationEnabled)
+        .ExecuteUpdateAsync(setter => setter
+            .SetProperty(user => user.Role, RoleType.User)
+            .SetProperty(user => user.MultiFactorAuthenticationEnabled, false),
+            cancellationToken).ConfigureAwait(false);
+    if (changed != 1)
+        return Results.Conflict(new { error = "The account changed during the role update." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), administratorId.Value,
+        "User.AdministratorRevoked", nameof(User), ownerId.ToString("D"), time.GetUtcNow(),
+        JsonSerializer.Serialize(new { Role = nameof(RoleType.Administrator),
+            target.MultiFactorAuthenticationEnabled }),
+        JsonSerializer.Serialize(new { Role = nameof(RoleType.User),
+            MultiFactorAuthenticationEnabled = false, Reason = request.Reason.Trim() }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { ownerId, Role = nameof(RoleType.User) });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/plans", async (
+    ClaimsPrincipal principal, CreatePaperPlanRequest request, AdministratorTotpVerifier mfa,
+    IEntitlementRepository entitlements, CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    try
+    {
+        var plan = new Plan(Guid.NewGuid(), request.Code, request.Name, request.MaxExperimentWorkers);
+        var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+            cancellationToken).ConfigureAwait(false);
+        if (denial is not null) return denial;
+        await entitlements.AddPlanAsync(plan, administratorId.Value, cancellationToken).ConfigureAwait(false);
+        return Results.Created($"/api/admin/entitlements/plans/{plan.Id}", new
+        {
+            plan.Id, plan.Code, plan.Name, plan.MaxExperimentWorkers,
+            plan.LiveTradingEligible, plan.FuturesEligible
+        });
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/assign", async (
+    Guid ownerId, ClaimsPrincipal principal, AssignPaperPlanRequest request,
+    AdministratorTotpVerifier mfa, IEntitlementRepository entitlements,
+    TimeProvider time, CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    var now = time.GetUtcNow();
+    if (request.TrialExpiresAtUtc is { } expiry
+        && (expiry.Offset != TimeSpan.Zero || expiry <= now))
+        return Results.BadRequest(new { error = "Trial expiry must be a future UTC instant." });
+    try
+    {
+        var assignment = new Entitlement(Guid.NewGuid(), ownerId, request.PlanId,
+            now, request.TrialExpiresAtUtc);
+        var plan = await entitlements.GetPlanAsync(request.PlanId, cancellationToken).ConfigureAwait(false);
+        if (plan is null || plan.LiveTradingEligible || plan.FuturesEligible)
+            return Results.BadRequest(new { error = "Select an existing paper-only plan." });
+        var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+            cancellationToken).ConfigureAwait(false);
+        if (denial is not null) return denial;
+        await entitlements.AssignAsync(assignment, administratorId.Value, cancellationToken).ConfigureAwait(false);
+        return Results.Created($"/api/admin/entitlements/owners/{ownerId}", new
+        {
+            assignment.Id, assignment.UserId, assignment.PlanId,
+            assignment.AssignedAtUtc, assignment.TrialExpiresAtUtc, assignment.Status
+        });
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/revoke/{entitlementId:guid}", async (
+    Guid ownerId, Guid entitlementId, ClaimsPrincipal principal, VerifyAdminActionRequest request,
+    AdministratorTotpVerifier mfa, IEntitlementRepository entitlements, CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+    try
+    {
+        await entitlements.RevokeAsync(ownerId, entitlementId, administratorId.Value,
+            cancellationToken).ConfigureAwait(false);
+        return Results.NoContent();
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapPost("/api/admin/entitlements/owners/{ownerId:guid}/trials/{entitlementId:guid}/extend", async (
+    Guid ownerId, Guid entitlementId, ClaimsPrincipal principal, ExtendPaperTrialRequest request,
+    AdministratorTotpVerifier mfa, IEntitlementRepository entitlements, CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if (request.TrialExpiresAtUtc.Offset != TimeSpan.Zero)
+        return Results.BadRequest(new { error = "The new trial expiry must be UTC." });
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+    try
+    {
+        await entitlements.ExtendTrialAsync(ownerId, entitlementId, request.TrialExpiresAtUtc,
+            administratorId.Value, cancellationToken).ConfigureAwait(false);
+        return Results.NoContent();
+    }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
 
 // Completed backtest reports are a read-only projection. The signed-in user is
 // the only owner selector; platform-owned (ownerless) evidence is not a user
@@ -460,21 +1040,13 @@ app.MapGet("/api/scanner/results", async (
     }
 }).RequireAuthorization();
 
-app.MapPost("/api/audit", async (IAuditEventWriter writer, CancellationToken cancellationToken, AuditEvent request) =>
-{
-    ArgumentNullException.ThrowIfNull(request);
-    await writer.WriteAsync(request, cancellationToken).ConfigureAwait(false);
-    return Results.Ok(new { request.Id, request.Action, request.CorrelationId });
-});
-
 // The entry point is a decision, not a page. An anonymous visitor is sent to
 // sign-in, because on an invitation-only platform there is nothing else for
-// them to do; a signed-in user is sent straight to the trading application
-// rather than to a marketing page they have already read. The overview itself
-// still exists at /welcome for anyone who wants it.
+// them to do; a signed-in user is sent straight to the current trading
+// workspace. Legacy pages remain available at their existing routes.
 app.MapGet("/", (ClaimsPrincipal principal) =>
     principal.Identity?.IsAuthenticated == true
-        ? Results.Redirect("/chart")
+        ? Results.Redirect("/workspace/trade")
         : Results.Redirect("/login"));
 
 app.MapGet("/welcome", () => Results.Content(
@@ -630,9 +1202,11 @@ app.MapGet("/welcome", () => Results.Content(
 // authenticated, role-restricted, persisted, and audited.
 app.MapPost("/api/invitations", async (
     ClaimsPrincipal principal,
+    HttpContext httpContext,
     IInvitationService service,
     TradingDbContext dbContext,
-    IAuditEventWriter auditWriter,
+    AdministratorTotpVerifier mfa,
+    TimeProvider time,
     InvitationRequest request,
     CancellationToken cancellationToken) =>
 {
@@ -643,46 +1217,107 @@ app.MapPost("/api/invitations", async (
     {
         return Results.Unauthorized();
     }
+    if (string.IsNullOrWhiteSpace(request.Email) || request.Email.Length > 256
+        || !System.Net.Mail.MailAddress.TryCreate(request.Email.Trim(), out var recipient)
+        || !string.Equals(recipient.Address, request.Email.Trim(), StringComparison.Ordinal))
+        return Results.BadRequest(new { error = "Supply a recipient email." });
+    var denial = await VerifyFreshAdminActionAsync(mfa, issuerId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
 
     // The code is generated, never derived from the invitee's email address, which would make it
     // guessable by anyone who knows the address.
+    var now = time.GetUtcNow();
+    var code = InvitationCodeGenerator.Generate();
     var invitation = service.CreateInvitation(
         issuerId.Value,
-        InvitationCodeGenerator.Generate(),
+        code,
+        request.Email,
         1,
-        DateTimeOffset.UtcNow.AddDays(30));
+        now.AddDays(30));
 
     dbContext.Invitations.Add(invitation);
-    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-    await auditWriter.WriteAsync(
+    dbContext.AuditEvents.Add(
         new AuditEvent(
             Guid.NewGuid(),
             issuerId.Value,
             "Invitation.Issued",
             nameof(Invitation),
             invitation.Id.ToString(),
-            DateTimeOffset.UtcNow,
+            now,
             null,
-            // The code itself is never written to the audit trail or to logs.
-            $"Invitation issued for {request.Email}.",
-            Guid.NewGuid().ToString()),
-        cancellationToken).ConfigureAwait(false);
+            null,
+            Guid.NewGuid().ToString()));
+    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-    return Results.Ok(new { invitation.Id, invitation.Code, invitation.ExpiresAtUtc });
-}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+    httpContext.Response.Headers.CacheControl = "no-store";
+    return Results.Ok(new { invitation.Id, Code = code, invitation.RecipientEmail, invitation.ExpiresAtUtc });
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
+
+app.MapGet("/api/admin/invitations", async (
+    int? page, TradingDbContext db, CancellationToken cancellationToken) =>
+{
+    if (page is < 0 or > 10_000)
+        return Results.BadRequest(new { error = "The invitation page is outside the supported range." });
+    var currentPage = page.GetValueOrDefault();
+    var invitations = await db.Invitations.AsNoTracking()
+        .OrderByDescending(invitation => invitation.ExpiresAtUtc)
+        .ThenByDescending(invitation => invitation.Id)
+        .Skip(currentPage * 50).Take(51)
+        .Select(invitation => new
+        {
+            invitation.Id, invitation.RecipientEmail, invitation.ExpiresAtUtc, invitation.IsActive,
+            invitation.UsedCount, invitation.MaxUses
+        })
+        .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { items = invitations.Take(50), page = currentPage,
+        hasMore = invitations.Length > 50 });
+})
+    .RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
+app.MapPost("/api/admin/invitations/{invitationId:guid}/revoke", async (
+    Guid invitationId, ClaimsPrincipal principal, VerifyAdminActionRequest request,
+    AdministratorTotpVerifier mfa, TradingDbContext db, TimeProvider time,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    var denial = await VerifyFreshAdminActionAsync(mfa, administratorId.Value, request.OneTimeCode,
+        cancellationToken).ConfigureAwait(false);
+    if (denial is not null) return denial;
+    var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    var changed = await db.Invitations.Where(invitation => invitation.Id == invitationId
+            && invitation.IsActive && invitation.UsedCount < invitation.MaxUses
+            && invitation.ExpiresAtUtc > time.GetUtcNow())
+        .ExecuteUpdateAsync(setter => setter.SetProperty(invitation => invitation.IsActive, false),
+            cancellationToken).ConfigureAwait(false);
+    if (changed != 1)
+        return Results.Conflict(new { error = "No unused active invitation is available to revoke." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), administratorId.Value, "Invitation.Revoked",
+        nameof(Invitation), invitationId.ToString("D"), time.GetUtcNow(), null, null,
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    return Results.NoContent();
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)))
+    .RequireRateLimiting("admin-mutation");
 
 app.MapPost("/api/register", async (
     TradingDbContext dbContext,
     IRegistrationService registrationService,
-    IAuditEventWriter auditWriter,
+    TimeProvider time,
     RegisterUserRequest request,
     CancellationToken cancellationToken) =>
 {
     ArgumentNullException.ThrowIfNull(request);
 
+    string codeDigest;
+    try { codeDigest = InvitationCodeDigest.Compute(request.InvitationCode); }
+    catch (ArgumentException) { return Results.BadRequest(new { error = "Invitation code not found." }); }
     var invitation = await dbContext.Invitations
-        .SingleOrDefaultAsync(i => i.Code == request.InvitationCode, cancellationToken)
+        .SingleOrDefaultAsync(i => i.Code == codeDigest, cancellationToken)
         .ConfigureAwait(false);
 
     if (invitation is null)
@@ -690,30 +1325,40 @@ app.MapPost("/api/register", async (
         return Results.BadRequest(new { error = "Invitation code not found." });
     }
 
-    if (!invitation.IsUsableAt(DateTimeOffset.UtcNow))
+    var now = time.GetUtcNow();
+    if (!invitation.IsUsableAt(now))
     {
         return Results.BadRequest(new { error = "Invitation code is expired or exhausted." });
     }
 
+    if (!invitation.IsIssuedTo(request.Email))
+        return Results.BadRequest(new { error = "Invitation code is not valid for this email." });
+
     var user = registrationService.Register(request, invitation.Id, Guid.NewGuid());
 
+    var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken)
+        .ConfigureAwait(false);
+    await using var transactionLifetime = transaction.ConfigureAwait(false);
+    var redeemed = await dbContext.Invitations.Where(item => item.Id == invitation.Id
+            && item.RecipientEmail == invitation.RecipientEmail
+            && item.IsActive && item.ExpiresAtUtc > now && item.UsedCount < item.MaxUses)
+        .ExecuteUpdateAsync(setter => setter.SetProperty(item => item.UsedCount, item => item.UsedCount + 1),
+            cancellationToken).ConfigureAwait(false);
+    if (redeemed != 1)
+        return Results.BadRequest(new { error = "Invitation code is expired or exhausted." });
     dbContext.Users.Add(user);
-    var redeemedInvitation = invitation.Consume();
-    dbContext.Invitations.Update(redeemedInvitation);
-    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-    var audit = new AuditEvent(
+    dbContext.AuditEvents.Add(new AuditEvent(
         Guid.NewGuid(),
         user.Id,
         "User.Registered",
         nameof(User),
         user.Id.ToString(),
-        DateTimeOffset.UtcNow,
+        now,
         null,
         null,
-        Guid.NewGuid().ToString());
-
-    await auditWriter.WriteAsync(audit, cancellationToken).ConfigureAwait(false);
+        Guid.NewGuid().ToString()));
+    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
     return Results.Ok(new { user.Id, user.Email, user.DisplayName, user.Role });
 });
@@ -752,10 +1397,271 @@ app.MapGet("/api/me", (ClaimsPrincipal principal, TradingDbContext dbContext) =>
     });
 });
 
+app.MapGet("/api/reporting/profile", async (
+    ClaimsPrincipal principal, TradingDbContext db, CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var profile = await db.Users.AsNoTracking().Where(user => user.Id == ownerId.Value)
+        .Select(user => new { user.Locale, user.TimeZone, user.ReportingCurrency })
+        .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    return profile is null ? Results.NotFound() : Results.Ok(profile);
+}).RequireAuthorization();
+
+app.MapPut("/api/reporting/profile", async (
+    ClaimsPrincipal principal, ReportingProfileRequest request,
+    TradingDbContext db, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    ReportingProfile profile;
+    try { profile = new ReportingProfile(request.Locale, request.TimeZone, request.ReportingCurrency); }
+    catch (ArgumentException)
+    {
+        return Results.BadRequest(new { error = "Choose a supported locale, IANA time zone and ISO reporting currency." });
+    }
+    var user = await db.Users.SingleOrDefaultAsync(
+        candidate => candidate.Id == ownerId.Value, cancellationToken).ConfigureAwait(false);
+    if (user is null) return Results.NotFound();
+    if (user.Locale == profile.Locale && user.TimeZone == profile.TimeZone
+        && user.ReportingCurrency == profile.ReportingCurrency)
+        return Results.Ok(new { user.Locale, user.TimeZone, user.ReportingCurrency });
+
+    var before = JsonSerializer.Serialize(new { user.Locale, user.TimeZone, user.ReportingCurrency });
+    user.ChangeReportingProfile(profile);
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), ownerId.Value,
+        "Reporting.ProfileChanged", "ReportingProfile", ownerId.Value.ToString("D"),
+        timeProvider.GetUtcNow(), before,
+        JsonSerializer.Serialize(new { user.Locale, user.TimeZone, user.ReportingCurrency }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { user.Locale, user.TimeZone, user.ReportingCurrency });
+}).RequireAuthorization();
+
+app.MapPost("/api/reports/paper-transactions", async (
+    ClaimsPrincipal principal, PaperTransactionReportRequest request,
+    TradingDbContext db, IServiceProvider services, HttpContext context,
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    context.Response.Headers.CacheControl = "no-store";
+    var now = timeProvider.GetUtcNow();
+    if (request.FromUtc.Offset != TimeSpan.Zero || request.ToUtcExclusive.Offset != TimeSpan.Zero
+        || request.FromUtc >= request.ToUtcExclusive || request.ToUtcExclusive > now
+        || request.ToUtcExclusive - request.FromUtc > TimeSpan.FromDays(366))
+        return Results.BadRequest(new { error = "Choose a completed UTC interval no longer than 366 days." });
+    var formatter = request.CountryProfileCode is null ? null
+        : services.GetServices<IPaperReportCountryFormatter>()
+            .SingleOrDefault(candidate => candidate.Code == request.CountryProfileCode);
+    if (request.CountryProfileCode is not null && formatter is null)
+        return Results.BadRequest(new { error = "Choose a supported optional country report format." });
+    var store = request.Export ? services.GetService<IPaperTransactionReportStore>() : null;
+    if (request.Export && store is null)
+        return Results.Json(new { error = "Private paper-report Blob storage is not configured." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    var user = await db.Users.AsNoTracking().SingleOrDefaultAsync(
+        candidate => candidate.Id == ownerId.Value, cancellationToken).ConfigureAwait(false);
+    if (user is null) return Results.NotFound();
+    ReportingProfile profile;
+    try { profile = new ReportingProfile(user.Locale, user.TimeZone, user.ReportingCurrency); }
+    catch (ArgumentException)
+    {
+        return Results.Conflict(new { error = "Review and save valid reporting preferences before generating a report." });
+    }
+
+    var includedWorkerIds = await db.PaperTradingLedgerEntries.AsNoTracking()
+        .Where(entry => entry.UserId == ownerId.Value
+            && entry.OccurredAtUtc >= request.FromUtc && entry.OccurredAtUtc < request.ToUtcExclusive)
+        .Select(entry => entry.WorkerId).Distinct().Take(101)
+        .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    if (includedWorkerIds.Length > 100)
+        return Results.Json(new { error = "Narrow the report interval to at most 100 workers." },
+            statusCode: StatusCodes.Status413PayloadTooLarge);
+    var requestedRows = await db.PaperTradingLedgerEntries.AsNoTracking()
+        .Where(entry => entry.UserId == ownerId.Value
+            && entry.OccurredAtUtc >= request.FromUtc && entry.OccurredAtUtc < request.ToUtcExclusive)
+        .Select(entry => entry.Id).Take(501).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    if (requestedRows.Length > 500)
+        return Results.Json(new { error = "Narrow the report interval to at most 500 transactions." },
+            statusCode: StatusCodes.Status413PayloadTooLarge);
+
+    var entries = includedWorkerIds.Length == 0
+        ? []
+        : await db.PaperTradingLedgerEntries.AsNoTracking()
+            .Where(entry => entry.UserId == ownerId.Value && includedWorkerIds.Contains(entry.WorkerId)
+                && entry.OccurredAtUtc < request.ToUtcExclusive)
+            .OrderBy(entry => entry.OccurredAtUtc).ThenBy(entry => entry.Id)
+            .Take(20_001).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    if (entries.Length > 20_000)
+        return Results.Json(new { error = "The requested workers have more than 20,000 prior fills; review their ledger before reporting." },
+            statusCode: StatusCodes.Status413PayloadTooLarge);
+    var pendingWorkerIds = await db.ExperimentPaperExecutionAssociations.AsNoTracking()
+        .Where(value => value.UserId == ownerId.Value && value.AsOfUtc < request.ToUtcExclusive
+            && (value.Status == (int)ExperimentPaperExecutionStatus.Claimed
+                || value.Status == (int)ExperimentPaperExecutionStatus.Unknown))
+        .Select(value => value.WorkerId).Distinct().Take(101).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    if (pendingWorkerIds.Length > 100)
+        return Results.Json(new { error = "Too many unresolved worker claims to verify this report." },
+            statusCode: StatusCodes.Status413PayloadTooLarge);
+    var ledger = new EfExperimentPaperExecutionLedger(db);
+    foreach (var workerId in includedWorkerIds.Concat(pendingWorkerIds).Distinct())
+    {
+        if (await ledger.HasUnresolvedAsync(ownerId.Value, workerId, cancellationToken).ConfigureAwait(false))
+            return Results.Conflict(new { error = "An owner's paper worker has an unresolved execution. Reconcile it before generating a report." });
+    }
+
+    PaperTransactionReport report;
+    try
+    {
+        report = PaperTransactionReportGenerator.Generate(profile,
+            entries.Select(entry => new PaperTradingLedgerEntry(entry.Id, entry.WorkerId, entry.Symbol,
+                entry.Quantity, entry.ExecutionPrice, entry.Fee, entry.OccurredAtUtc, entry.Direction)),
+            request.FromUtc, request.ToUtcExclusive);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Conflict(new { error = "The paper ledger cannot produce a consistent report. Review its worker fills." });
+    }
+    catch (ArgumentException)
+    {
+        return Results.Conflict(new { error = "The paper ledger cannot produce a consistent report. Review its worker fills." });
+    }
+    catch (OverflowException)
+    {
+        return Results.Conflict(new { error = "The paper ledger cannot produce a consistent report. Review its worker fills." });
+    }
+    if (report.Transactions.Count > 500)
+        return Results.Json(new { error = "Narrow the report interval to at most 500 transactions." },
+            statusCode: StatusCodes.Status413PayloadTooLarge);
+    static string ExactAmount(decimal amount) => amount.ToString("G29", CultureInfo.InvariantCulture);
+    var response = new
+    {
+        report.FromUtc, report.ToUtcExclusive, report.ReportingCurrency, report.Disclaimer,
+        countryProfile = formatter?.Format(profile, report),
+        totalInReportingCurrency = report.TotalInReportingCurrency is decimal total ? ExactAmount(total) : null,
+        currencyTotals = report.CurrencyTotals.Select(item => new
+        {
+            item.Currency, realizedProfitAndLoss = ExactAmount(item.RealizedProfitAndLoss)
+        }),
+        transactions = report.Transactions.Select(item => new
+        {
+            item.WorkerId, item.FillId, item.ExecutedAtUtc, item.Symbol, item.QuoteCurrency, item.Direction,
+            quantity = ExactAmount(item.Quantity),
+            price = ExactAmount(item.Price),
+            fee = ExactAmount(item.Fee),
+            grossValue = ExactAmount(item.GrossValue),
+            cashChange = ExactAmount(item.CashChange),
+            realizedProfitAndLoss = item.RealizedProfitAndLoss is decimal realized ? ExactAmount(realized) : null
+        })
+    };
+    Guid? exportId = null;
+    if (store is not null)
+    {
+        var content = JsonSerializer.SerializeToUtf8Bytes(response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (content.Length > AzureBlobPaperTransactionReportStore.MaximumBytes)
+            return Results.Json(new { error = "Paper report is too large to export; narrow its UTC interval." },
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        var id = Guid.NewGuid();
+        await store.StoreAsync(ownerId.Value, id, content, cancellationToken).ConfigureAwait(false);
+        var metadata = new PaperReportExportMetadata(
+            Convert.ToHexString(SHA256.HashData(content)), report.FromUtc, report.ToUtcExclusive,
+            report.ReportingCurrency, content.Length, request.CountryProfileCode);
+        db.AuditEvents.Add(new AuditEvent(id, ownerId.Value, "Reporting.PaperTransactionsExported",
+            "PaperTransactionReport", id.ToString("D"), now, null, JsonSerializer.Serialize(metadata),
+            Guid.NewGuid().ToString("D")));
+        exportId = id;
+    }
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), ownerId.Value, "Reporting.PaperTransactionsGenerated",
+        "TransactionReport", ownerId.Value.ToString("D"), now, null,
+        JsonSerializer.Serialize(new { request.FromUtc, request.ToUtcExclusive,
+            count = report.Transactions.Count, report.ReportingCurrency }),
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { response.FromUtc, response.ToUtcExclusive, response.ReportingCurrency,
+        response.Disclaimer, response.countryProfile, response.totalInReportingCurrency, response.currencyTotals,
+        response.transactions, exportId });
+}).RequireAuthorization();
+
+app.MapGet("/api/reports/paper-transactions/exports", async (
+    ClaimsPrincipal principal, TradingDbContext db, HttpContext context,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    context.Response.Headers.CacheControl = "no-store";
+    var audits = await db.AuditEvents.AsNoTracking()
+        .Where(audit => audit.ActorUserId == ownerId.Value
+            && audit.Action == "Reporting.PaperTransactionsExported"
+            && audit.TargetType == "PaperTransactionReport")
+        .OrderByDescending(audit => audit.OccurredAtUtc).Take(50)
+        .Select(audit => new { audit.Id, audit.OccurredAtUtc, audit.After })
+        .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+    try
+    {
+        return Results.Ok(audits.Select(audit =>
+        {
+            var metadata = PaperReportExportMetadata.Parse(audit.After);
+            return new { audit.Id, audit.OccurredAtUtc, metadata.FromUtc,
+                metadata.ToUtcExclusive, metadata.ReportingCurrency, metadata.CountryProfileCode };
+        }).ToArray());
+    }
+    catch (InvalidDataException)
+    {
+        return Results.Conflict(new { error = "Saved paper report metadata is inconsistent." });
+    }
+}).RequireAuthorization();
+
+app.MapGet("/api/reports/paper-transactions/exports/{reportId:guid}", async (
+    Guid reportId, ClaimsPrincipal principal, TradingDbContext db,
+    IServiceProvider services, HttpContext context, TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    var audit = await db.AuditEvents.AsNoTracking()
+        .SingleOrDefaultAsync(item => item.Id == reportId && item.ActorUserId == ownerId.Value
+            && item.Action == "Reporting.PaperTransactionsExported"
+            && item.TargetType == "PaperTransactionReport"
+            && item.TargetId == reportId.ToString("D"), cancellationToken).ConfigureAwait(false);
+    if (audit is null) return Results.NotFound();
+    var store = services.GetService<IPaperTransactionReportStore>();
+    if (store is null)
+        return Results.Json(new { error = "Private paper-report Blob storage is not configured." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    PaperReportExportMetadata metadata;
+    try { metadata = PaperReportExportMetadata.Parse(audit.After); }
+    catch (InvalidDataException)
+    {
+        return Results.Conflict(new { error = "Saved paper report metadata is inconsistent." });
+    }
+    byte[] content;
+    try { content = await store.ReadAsync(ownerId.Value, reportId, cancellationToken).ConfigureAwait(false); }
+    catch (RequestFailedException error) when (error.Status == 404)
+    {
+        return Results.Conflict(new { error = "The recorded paper report is missing from private Blob storage." });
+    }
+    catch (InvalidDataException)
+    {
+        return Results.Conflict(new { error = "The stored paper report exceeds its size limit." });
+    }
+    if (content.Length != metadata.ByteCount
+        || !Convert.ToHexString(SHA256.HashData(content)).Equals(metadata.Sha256, StringComparison.Ordinal))
+        return Results.Conflict(new { error = "The stored paper report does not match its audited content hash." });
+    db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), ownerId.Value, "Reporting.PaperTransactionsDownloaded",
+        "PaperTransactionReport", reportId.ToString("D"), timeProvider.GetUtcNow(), null, null,
+        Guid.NewGuid().ToString("D")));
+    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.File(content, "application/json", $"paper-transactions-{reportId:N}.json");
+}).RequireAuthorization();
 app.MapPost("/api/login", async (
     HttpContext httpContext,
     ITradingAuthenticationService authService,
     Pbkdf2PasswordHasher passwordHasher,
+    AdministratorTotpVerifier adminMfa,
+    IHostEnvironment environment,
     TradingDbContext dbContext,
     LoginRequest request) =>
 {
@@ -788,6 +1694,31 @@ app.MapPost("/api/login", async (
         return Results.BadRequest(new { error = "Invalid login" });
     }
 
+    long? verifiedMfaStep = null;
+    if (user is not null && RequiresAdministratorMfa(user, environment.IsDevelopment()))
+    {
+        if (!user.MultiFactorAuthenticationEnabled)
+            return Results.BadRequest(new { error = "Invalid login" });
+        try
+        {
+            verifiedMfaStep = await adminMfa.VerifyAndRedeemAsync(
+                user.Id, request.OneTimeCode, httpContext.RequestAborted).ConfigureAwait(false);
+        }
+        catch (KeyNotFoundException)
+        {
+            return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "Administrator verification is temporarily unavailable.");
+        }
+        catch (RequestFailedException)
+        {
+            return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "Administrator verification is temporarily unavailable.");
+        }
+    }
+    if (user is not null && RequiresAdministratorMfa(user, environment.IsDevelopment())
+        && verifiedMfaStep is null)
+        return Results.BadRequest(new { error = "Invalid login" });
+
     if (outcome.PasswordNeedsRehash && user is not null)
     {
         // The password was correct but stored under weaker parameters. Upgrade
@@ -805,13 +1736,16 @@ app.MapPost("/api/login", async (
     identity.AddClaim(new Claim(CurrentUser.UserIdClaim, user.Id.ToString()));
     identity.AddClaim(new Claim(ClaimTypes.Name, user.Email));
     identity.AddClaim(new Claim(ClaimTypes.Role, user.Role.ToString()));
+    if (verifiedMfaStep is { } step)
+        identity.AddClaim(new Claim(AdministratorTotpVerifier.StepClaim,
+            step.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
     await httpContext.SignInAsync(
         CookieAuthenticationDefaults.AuthenticationScheme,
         new ClaimsPrincipal(identity)).ConfigureAwait(false);
 
     return Results.Ok(new { user.Id, user.Email });
-});
+}).RequireRateLimiting("sign-in");
 
 app.MapPost("/api/logout", async (HttpContext httpContext) =>
 {
@@ -1007,20 +1941,65 @@ app.MapGet("/optimization/plan-validation", () => Results.Content(
 app.MapGet("/api/paper-training", async (
     ClaimsPrincipal principal,
     IPaperTrainingActivationRepository repository,
+    TradingDbContext db,
+    TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
     var ownerId = CurrentUser.TryGetUserId(principal);
     if (ownerId is null) return Results.Unauthorized();
     var activation = await repository.GetAsync(ownerId.Value, cancellationToken).ConfigureAwait(false);
-    return Results.Ok(PaperTrainingResponse.From(activation));
+    var heartbeat = new EfPaperHostHeartbeatRepository(db);
+    var now = timeProvider.GetUtcNow();
+    var scanner = await heartbeat.LastAsync(EfPaperHostHeartbeatRepository.Scanner, cancellationToken).ConfigureAwait(false);
+    var experiments = await heartbeat.LastAsync(EfPaperHostHeartbeatRepository.Experiments, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(PaperTrainingResponse.From(activation) with
+    {
+        HostHealth =
+        [
+            PaperHostHealthResponse.From(EfPaperHostHeartbeatRepository.Scanner, scanner, now),
+            PaperHostHealthResponse.From(EfPaperHostHeartbeatRepository.Experiments, experiments, now)
+        ],
+        ForwardFeedObservedRecently = await heartbeat.HasRecentForwardCandleAsync(now, cancellationToken).ConfigureAwait(false)
+    });
+}).RequireAuthorization();
+
+app.MapPut("/api/paper-training/strategies", async (
+    ClaimsPrincipal principal,
+    PaperTrainingStrategyConfigurationRequest request,
+    PaperTrainingActivationService service,
+    CancellationToken cancellationToken) =>
+{
+    var ownerId = CurrentUser.TryGetUserId(principal);
+    if (ownerId is null) return Results.Unauthorized();
+    try
+    {
+        var assignments = request.Assignments
+            .Select(assignment => new PaperTrainingStrategyAssignment(
+                assignment.Slot,
+                assignment.StrategyId,
+                assignment.StrategyParametersJson ?? "{}"))
+            .ToArray();
+        var activation = await service.ConfigureScannerStrategiesAsync(
+            ownerId.Value,
+            ownerId.Value,
+            PaperTrainingRole.From(principal),
+            assignments,
+            request.StrategyParameters,
+            cancellationToken).ConfigureAwait(false);
+        return Results.Ok(PaperTrainingResponse.From(activation));
+    }
+    catch (UnauthorizedAccessException) { return Results.Forbid(); }
+    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
 }).RequireAuthorization();
 
 app.MapPost("/api/paper-training", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
-    IExchangeAccountRepository accounts,
+    ITradingHaltState halts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    TradingDbContext db,
     TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
@@ -1028,13 +2007,19 @@ app.MapPost("/api/paper-training", async (
     if (ownerId is null) return Results.Unauthorized();
     try
     {
-        var connected = (await accounts.ListForUserAsync(ownerId.Value, cancellationToken).ConfigureAwait(false))
-            .Any(account => account.CanTrade);
-        if (!connected)
-            return Results.BadRequest(new { error = "Connect and validate an exchange account before starting paper training." });
+        var flags = await halts.GetAsync(
+            new PipelineContext(ownerId.Value, TradingMode.Paper, "paper-start"),
+            string.Empty, Guid.Empty, cancellationToken).ConfigureAwait(false);
+        if (flags.EmergencyStop || flags.AccountHalted || flags.CloseOnlyMode || flags.ReduceOnlyMode)
+            return Results.Conflict(new { error = "A platform or owner trading restriction blocks new paper entries." });
 
+        var health = new EfPaperHostHeartbeatRepository(db);
+        var now = timeProvider.GetUtcNow();
+        if (!await health.BothFreshAsync(now, cancellationToken).ConfigureAwait(false))
+            return Results.Conflict(new { error = "Start the market-data and experiment hosts before enabling paper trading; both must have a fresh heartbeat." });
+        if (!await health.HasRecentForwardCandleAsync(now, cancellationToken).ConfigureAwait(false))
+            return Results.Conflict(new { error = "Wait for a recent safe, closed 1m or 5m candle from the forward Kraken stream before starting paper trading. Host heartbeats alone do not prove a working feed." });
         _ = request;
-        _ = timeProvider;
         var activation = await service.StartScannerAsync(
             ownerId.Value,
             ownerId.Value,
@@ -1053,8 +2038,9 @@ app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
     ClaimsPrincipal principal,
     PaperTrainingRequest request,
     PaperTrainingActivationService service,
-    IExchangeAccountRepository accounts,
+    ITradingHaltState halts,
     IOptions<PaperTrainingPrerequisiteOptions> prerequisites,
+    TradingDbContext db,
     TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
@@ -1065,12 +2051,18 @@ app.MapPost("/api/paper-training/{ownerId:guid}/start", async (
         var actorRole = PaperTrainingRole.From(principal);
         if (actorRole == RoleType.User && actorId.Value != ownerId)
             return Results.Forbid();
-        var connected = (await accounts.ListForUserAsync(ownerId, cancellationToken).ConfigureAwait(false))
-            .Any(account => account.CanTrade);
-        if (!connected)
-            return Results.BadRequest(new { error = "The owner must have a connected and validated exchange account." });
+        var flags = await halts.GetAsync(
+            new PipelineContext(ownerId, TradingMode.Paper, "paper-start"),
+            string.Empty, Guid.Empty, cancellationToken).ConfigureAwait(false);
+        if (flags.EmergencyStop || flags.AccountHalted || flags.CloseOnlyMode || flags.ReduceOnlyMode)
+            return Results.Conflict(new { error = "A platform or owner trading restriction blocks new paper entries." });
+        var health = new EfPaperHostHeartbeatRepository(db);
+        var now = timeProvider.GetUtcNow();
+        if (!await health.BothFreshAsync(now, cancellationToken).ConfigureAwait(false))
+            return Results.Conflict(new { error = "Start the market-data and experiment hosts before enabling paper trading; both must have a fresh heartbeat." });
+        if (!await health.HasRecentForwardCandleAsync(now, cancellationToken).ConfigureAwait(false))
+            return Results.Conflict(new { error = "Wait for a recent safe, closed 1m or 5m candle from the forward Kraken stream before starting paper trading. Host heartbeats alone do not prove a working feed." });
         _ = request;
-        _ = timeProvider;
         var activation = await service.StartScannerAsync(
             ownerId,
             actorId.Value,
@@ -1135,9 +2127,35 @@ app.MapPost("/api/paper-training/{ownerId:guid}/emergency-stop", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireAuthorization();
 
+app.MapPost("/api/paper-training/{ownerId:guid}/workers/{workerId:guid}/reconcile-filled", async (
+    Guid ownerId,
+    Guid workerId,
+    ClaimsPrincipal principal,
+    PaperExecutionRecoveryRequest request,
+    EfExperimentPaperExecutionLedger ledger,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    var administratorId = CurrentUser.TryGetUserId(principal);
+    if (administratorId is null) return Results.Unauthorized();
+    if (!request.ExperimentHostStopped || string.IsNullOrWhiteSpace(request.CorrelationId))
+        return Results.BadRequest(new { error = "Confirm that the experiment host is stopped and supply the unresolved correlation." });
+
+    var outcome = await ledger.ReconcileFilledAsync(ownerId, workerId, administratorId.Value,
+        request.CorrelationId, timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+    return outcome switch
+    {
+        PaperExecutionRecoveryResult.Reconciled => Results.Ok(new { status = "FilledReconciled" }),
+        PaperExecutionRecoveryResult.NoUnresolvedClaim => Results.NotFound(),
+        PaperExecutionRecoveryResult.HostNotStopped => Results.Conflict(new { error = "The experiment host must be stopped and its heartbeat stale before recovery." }),
+        _ => Results.Conflict(new { error = "Durable paper fill, worker, portfolio, protection, and audit evidence are not all consistent. The worker remains frozen." })
+    };
+}).RequireAuthorization(policy => policy.RequireRole(nameof(RoleType.Administrator)));
+
 app.MapGet("/api/experiments", async (
     ClaimsPrincipal principal,
     PaperTrainingMonitorService monitorService,
+    IExperimentDecisionLedger decisionLedger,
     CancellationToken cancellationToken) =>
 {
     // The owning user comes from the signed-in principal only. There is no user id parameter, so
@@ -1149,12 +2167,23 @@ app.MapGet("/api/experiments", async (
     }
 
     var monitor = await monitorService.GetAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var workerIds = monitor.Workers
+        .Where(worker => worker.WorkerId.HasValue)
+        .Select(worker => worker.WorkerId!.Value)
+        .Distinct()
+        .ToArray();
+    var decisions = workerIds.Length == 0
+        ? Array.Empty<ExperimentDecisionRecord>()
+        : (await decisionLedger.ListAsync(userId.Value, workerIds, cancellationToken).ConfigureAwait(false))
+            .TakeLast(1_000)
+            .ToArray();
 
     return Results.Ok(new
     {
         maxWorkers = ExperimentWorker.MaxWorkersPerUser,
-        used = monitor.Workers.Count(worker => worker.WorkerId is not null),
+        used = monitor.Workers.Count(worker => worker.RuntimeStatus != "Scanning"),
         activeSlots = monitor.Workers.Count,
+        scanning = monitor.Workers.Count(worker => worker.RuntimeStatus == "Scanning"),
         tradingMode = "Paper",
         disclaimer = ExperimentDisclaimer,
         workers = monitor.Workers.Select(worker => new
@@ -1162,6 +2191,7 @@ app.MapGet("/api/experiments", async (
                 worker.Slot,
                 worker.WorkerId,
                 worker.StrategyId,
+                worker.StrategyParameters,
                 worker.Symbol,
                 worker.Interval,
                 worker.AnalysisIntervals,
@@ -1172,6 +2202,9 @@ app.MapGet("/api/experiments", async (
                 worker.CashBalance,
                 worker.PositionQuantity,
                 worker.AverageEntryPrice,
+                worker.OpenBuyFillPrice,
+                worker.LastBuyFillPrice,
+                worker.LastSellFillPrice,
                 worker.PositionCost,
                 worker.CurrentPrice,
                 worker.CurrentPriceAsOfUtc,
@@ -1182,8 +2215,68 @@ app.MapGet("/api/experiments", async (
                 worker.MaximumAdditions,
                 worker.TradeCount,
                 worker.FailureReason,
-                worker.RecentTrades
-            })
+                worker.RecentTrades,
+                worker.UnresolvedExecution
+            }),
+        decisions = decisions.Select(decision => new
+        {
+            workerId = decision.Key.WorkerId,
+            symbol = decision.Key.Symbol,
+            interval = decision.Key.Interval.ToString(),
+            strategyId = decision.Key.StrategyId,
+            action = decision.Proposal.Action.ToString(),
+            reason = decision.Proposal.Reason,
+            decision.Key.OpenTimeUtc,
+            decision.Key.CloseTimeUtc,
+            decision.Key.AsOfUtc
+        })
+    });
+}).RequireAuthorization();
+
+app.MapGet("/api/workspace/overview", async (
+    ClaimsPrincipal principal,
+    PaperTrainingMonitorService monitorService,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null) return Results.Unauthorized();
+
+    var monitor = await monitorService.GetAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+    var workers = monitor.Workers;
+    var now = timeProvider.GetUtcNow();
+    var hasUnpricedExposure = workers.Any(worker =>
+        worker.PositionQuantity > 0m
+        && (worker.CurrentPrice is null
+            || worker.CurrentPriceAsOfUtc is null
+            || worker.CurrentPriceAsOfUtc.Value < now - PaperTrainingMonitorService.MaximumValuationAge
+            || worker.CurrentPriceAsOfUtc.Value > now));
+    var realizedPnl = workers.Sum(worker => worker.RealizedProfitAndLoss);
+    var cash = workers.Sum(worker => worker.CashBalance);
+    var markedExposure = hasUnpricedExposure
+        ? (decimal?)null
+        : workers.Sum(worker => worker.PositionMarketValue);
+    var unrealizedPnl = hasUnpricedExposure
+        ? (decimal?)null
+        : workers.Sum(worker => worker.UnrealizedProfitAndLoss);
+
+    return Results.Ok(new
+    {
+        tradingMode = "Paper",
+        disclaimer = ExperimentDisclaimer,
+        workerCount = workers.Count,
+        scanning = workers.Count(worker => worker.RuntimeStatus == "Scanning"),
+        reserved = workers.Count(worker => worker.RuntimeStatus != "Scanning"),
+        realizedProfitAndLoss = realizedPnl,
+        unrealizedProfitAndLoss = unrealizedPnl,
+        cash,
+        markedExposure,
+        equity = markedExposure.HasValue ? cash + markedExposure.Value : (decimal?)null,
+        hasUnpricedExposure,
+        asOfUtc = workers
+            .Where(worker => worker.CurrentPriceAsOfUtc.HasValue)
+            .Select(worker => worker.CurrentPriceAsOfUtc)
+            .Max()
     });
 }).RequireAuthorization();
 
@@ -1678,17 +2771,26 @@ app.MapGet("/experiments", () => Results.Content(
     """,
     "text/html")).RequireAuthorization();
 
-app.MapGet("/api/risk/halts", (InMemoryTradingHaltState halts) => Results.Ok(new
+app.MapGet("/api/risk/halts", async (
+    ClaimsPrincipal principal, ITradingHaltState halts, CancellationToken cancellationToken) =>
 {
-    emergencyStop = halts.EmergencyStop,
-    liveTradingEnabled = false,
-    note = "Live trading is disabled platform-wide. The emergency stop blocks every new order for every user."
-})).RequireAuthorization(policy => policy.RequireRole(
+    var actorId = CurrentUser.TryGetUserId(principal);
+    if (actorId is null) return Results.Unauthorized();
+    var flags = await halts.GetAsync(
+        new PipelineContext(actorId.Value, TradingMode.Paper, "halt-status"),
+        string.Empty, Guid.Empty, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new
+    {
+        emergencyStop = flags.EmergencyStop,
+        liveTradingEnabled = false,
+        note = "Live trading is disabled by default. Emergency stop blocks new exposure; verified reductions remain permitted."
+    });
+}).RequireAuthorization(policy => policy.RequireRole(
     nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
 
 app.MapPost("/api/risk/halts", async (
     ClaimsPrincipal principal,
-    InMemoryTradingHaltState halts,
+    ITradingHaltState halts,
     IAuditEventWriter auditWriter,
     HaltCommandRequest request,
     CancellationToken cancellationToken) =>
@@ -1712,15 +2814,6 @@ app.MapPost("/api/risk/halts", async (
     switch (request.Scope?.Trim().ToUpperInvariant())
     {
         case "EMERGENCY":
-            if (request.Engage)
-            {
-                halts.EngageEmergencyStop();
-            }
-            else
-            {
-                halts.ReleaseEmergencyStop();
-            }
-
             action = request.Engage ? "Trading.EmergencyStopEngaged" : "Trading.EmergencyStopReleased";
             break;
 
@@ -1728,15 +2821,6 @@ app.MapPost("/api/risk/halts", async (
             if (string.IsNullOrWhiteSpace(request.Symbol))
             {
                 return Results.BadRequest(new { error = "A symbol is required for a market halt." });
-            }
-
-            if (request.Engage)
-            {
-                halts.HaltMarket(request.Symbol);
-            }
-            else
-            {
-                halts.ResumeMarket(request.Symbol);
             }
 
             action = request.Engage ? "Trading.MarketHalted" : "Trading.MarketResumed";
@@ -1748,15 +2832,6 @@ app.MapPost("/api/risk/halts", async (
                 return Results.BadRequest(new { error = "A user id is required for a user halt." });
             }
 
-            if (request.Engage)
-            {
-                halts.HaltUser(targetUserId);
-            }
-            else
-            {
-                halts.ResumeUser(targetUserId);
-            }
-
             action = request.Engage ? "Trading.UserHalted" : "Trading.UserResumed";
             break;
 
@@ -1764,15 +2839,6 @@ app.MapPost("/api/risk/halts", async (
             if (request.TargetId is not { } targetStrategyId || targetStrategyId == Guid.Empty)
             {
                 return Results.BadRequest(new { error = "A strategy id is required for a strategy halt." });
-            }
-
-            if (request.Engage)
-            {
-                halts.HaltStrategy(targetStrategyId);
-            }
-            else
-            {
-                halts.ResumeStrategy(targetStrategyId);
             }
 
             action = request.Engage ? "Trading.StrategyHalted" : "Trading.StrategyResumed";
@@ -1784,7 +2850,6 @@ app.MapPost("/api/risk/halts", async (
                 return Results.BadRequest(new { error = "A user id is required for close-only mode." });
             }
 
-            halts.SetCloseOnly(closeOnlyUserId, request.Engage);
             action = request.Engage ? "Trading.CloseOnlyEnabled" : "Trading.CloseOnlyDisabled";
             break;
 
@@ -1794,7 +2859,6 @@ app.MapPost("/api/risk/halts", async (
                 return Results.BadRequest(new { error = "A user id is required for reduce-only mode." });
             }
 
-            halts.SetReduceOnly(reduceOnlyUserId, request.Engage);
             action = request.Engage ? "Trading.ReduceOnlyEnabled" : "Trading.ReduceOnlyDisabled";
             break;
 
@@ -1808,14 +2872,17 @@ app.MapPost("/api/risk/halts", async (
             actorId.Value,
             action,
             "TradingHalt",
-            request.TargetId?.ToString() ?? request.Symbol ?? "platform",
+            request.TargetId?.ToString("D") ?? request.Symbol?.Trim().ToUpperInvariant() ?? "platform",
             DateTimeOffset.UtcNow,
             null,
             request.Reason,
             Guid.NewGuid().ToString()),
         cancellationToken).ConfigureAwait(false);
 
-    return Results.Ok(new { action, emergencyStop = halts.EmergencyStop });
+    var current = await halts.GetAsync(
+        new PipelineContext(actorId.Value, TradingMode.Paper, "halt-status"),
+        string.Empty, Guid.Empty, cancellationToken).ConfigureAwait(false);
+    return Results.Ok(new { action, emergencyStop = current.EmergencyStop });
 }).RequireAuthorization(policy => policy.RequireRole(
     nameof(RoleType.Administrator), nameof(RoleType.RiskOfficer)));
 
@@ -2470,6 +3537,194 @@ app.MapGet("/api/portfolio", async (
 // never be mistaken for a finished one by anything that draws or trades on it.
 // ---------------------------------------------------------------------------
 
+app.MapGet("/api/marketdata/orderbook/stream", async (
+    HttpContext context,
+    string symbol,
+    IStreamingOrderBookSource orderBookSource,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+    if (normalizedSymbol.Length > 40
+        || normalizedSymbol.Count(character => character == '/') != 1
+        || normalizedSymbol.Any(character =>
+            !char.IsAsciiLetterOrDigit(character) && character != '/' && character != '-'))
+    {
+        return Results.BadRequest(new { error = "InvalidSymbol", message = "A normalized market symbol such as SOL/USD is required." });
+    }
+
+    if (!context.WebSockets.IsWebSocketRequest)
+        return Results.BadRequest(new { error = "WebSocketRequired", message = "Connect using a WebSocket." });
+
+    using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+    using var streamCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    // The monitor is awaited in the finally block before either resource is disposed.
+#pragma warning disable CA2025
+    var observeClient = ObserveOrderBookClientAsync(socket, streamCancellation);
+#pragma warning restore CA2025
+    try
+    {
+        await foreach (var snapshot in orderBookSource.StreamAsync(normalizedSymbol, streamCancellation.Token)
+            .WithCancellation(streamCancellation.Token)
+            .ConfigureAwait(false))
+        {
+            if (socket.State != WebSocketState.Open)
+                break;
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                symbol = snapshot.Symbol,
+                asOfUtc = snapshot.AsOfUtc,
+                bids = snapshot.Bids.Select(level => new
+                {
+                    price = level.Price.ToString("G29", CultureInfo.InvariantCulture),
+                    quantity = level.Quantity.ToString("G29", CultureInfo.InvariantCulture)
+                }),
+                asks = snapshot.Asks.Select(level => new
+                {
+                    price = level.Price.ToString("G29", CultureInfo.InvariantCulture),
+                    quantity = level.Quantity.ToString("G29", CultureInfo.InvariantCulture)
+                }),
+                checksum = snapshot.Checksum,
+                isSynchronized = snapshot.IsSynchronized
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await socket.SendAsync(payload, WebSocketMessageType.Text, true, streamCancellation.Token).ConfigureAwait(false);
+        }
+    }
+    catch (OperationCanceledException) when (streamCancellation.IsCancellationRequested)
+    {
+    }
+    catch (MarketDataSourceException exception)
+    {
+        logOrderBookSourceFailure(logger, normalizedSymbol, exception);
+        if (socket.State == WebSocketState.Open)
+        {
+            var error = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                type = "error",
+                message = $"Kraken order book unavailable: {exception.Message}"
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await socket.SendAsync(error, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
+        }
+    }
+    catch (WebSocketException exception)
+    {
+        logOrderBookSocketFailure(logger, normalizedSymbol, exception);
+        if (socket.State == WebSocketState.Open)
+        {
+            var error = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                type = "error",
+                message = "Kraken's market-data connection failed. Reconnecting…"
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await socket.SendAsync(error, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    finally
+    {
+        try
+        {
+            if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Order-book stream ended.", CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            await streamCancellation.CancelAsync().ConfigureAwait(false);
+            await observeClient.ConfigureAwait(false);
+        }
+    }
+
+    return Results.Empty;
+}).AllowAnonymous();
+
+app.MapGet("/api/marketdata/ticker/stream", async Task<IResult> (
+    HttpContext context,
+    string symbol,
+    KrakenStreamingTickerSource ticker,
+    CancellationToken cancellationToken) =>
+{
+    var normalized = symbol.Trim().ToUpperInvariant();
+    if (normalized.Length > 40 || normalized.Count(character => character == '/') != 1
+        || normalized.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '/' && character != '-'))
+        return Results.BadRequest(new { error = "InvalidSymbol", message = "A normalized market symbol is required." });
+
+    context.Response.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-store";
+    context.Response.Headers["X-Accel-Buffering"] = "no";
+    var lastSent = DateTimeOffset.MinValue;
+    try
+    {
+        await foreach (var trade in ticker.StreamAsync(normalized, cancellationToken)
+            .WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (!trade.IsSnapshot && now - lastSent < TimeSpan.FromSeconds(1))
+                continue;
+            if (!trade.IsSnapshot)
+                lastSent = now;
+            var payload = JsonSerializer.Serialize(new
+            {
+                trade.Symbol,
+                price = trade.Price.ToString("G29", CultureInfo.InvariantCulture),
+                trade.AsOfUtc,
+                trade.IsSnapshot
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await context.Response.WriteAsync($"data: {payload}\n\n", cancellationToken).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    catch (MarketDataSourceException)
+    {
+        await context.Response.WriteAsync("event: feed-error\ndata: Public trade feed unavailable.\n\n",
+            cancellationToken).ConfigureAwait(false);
+    }
+    catch (WebSocketException)
+    {
+        await context.Response.WriteAsync("event: feed-error\ndata: Public trade feed disconnected.\n\n",
+            cancellationToken).ConfigureAwait(false);
+    }
+    return Results.Empty;
+});
+
+app.MapGet("/api/marketdata/ticker/quote", async Task<IResult> (
+    HttpContext context,
+    string symbol,
+    KrakenPublicTickerQuoteSource quotes,
+    CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.CacheControl = "no-store";
+    if (string.IsNullOrWhiteSpace(symbol))
+        return Results.BadRequest(new { error = "InvalidSymbol", message = "A normalized market symbol is required." });
+    var normalized = symbol.Trim().ToUpperInvariant();
+    if (normalized.Length > 40 || normalized.Count(character => character == '/') != 1
+        || normalized.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '/' && character != '-'))
+        return Results.BadRequest(new { error = "InvalidSymbol", message = "A normalized market symbol is required." });
+
+    try
+    {
+        var quote = await quotes.GetAsync(normalized, cancellationToken).ConfigureAwait(false);
+        return Results.Ok(new
+        {
+            quote.Symbol,
+            price = quote.Price.ToString("G29", CultureInfo.InvariantCulture),
+            asOfUtc = quote.RetrievedAtUtc
+        });
+    }
+    catch (MarketDataSourceException)
+    {
+        return Results.Problem("Public Kraken quote unavailable.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem("Public Kraken quote request failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+        return Results.Problem("Public Kraken quote request timed out.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}).RequireAuthorization();
+
 app.MapGet("/api/marketdata/candles", async (
     string symbol,
     string interval,
@@ -2552,6 +3807,49 @@ app.MapGet("/api/marketdata/candles", async (
     catch (ArgumentException exception)
     {
         return Results.BadRequest(new { error = "InvalidRequest", message = exception.Message });
+    }
+}).RequireAuthorization();
+
+app.MapGet("/api/strategy/three-swing/evidence", async (
+    string symbol,
+    ThreeSwingChannelDivergenceEvidenceQuery evidenceQuery,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(symbol) || symbol.Length > 40)
+        return Results.BadRequest(new { error = "InvalidSymbol", message = "A valid market symbol is required." });
+
+    try
+    {
+        var evidence = await evidenceQuery.GetAsync(symbol, cancellationToken).ConfigureAwait(false);
+        return Results.Ok(new
+        {
+            evidence.IsAvailable,
+            direction = evidence.Direction.ToString(),
+            evidence.Pivots,
+            evidence.IsNearFiveMinuteChannel,
+            evidence.IsOneHourContextAligned,
+            evidence.IsFourHourContextAligned,
+            evidence.HasReversalConfirmation,
+            evidence.HasMacdConfirmation,
+            evidence.FiveMinuteChannelPositionPercent,
+            evidence.OneHourChannelPositionPercent,
+            evidence.FourHourChannelPositionPercent,
+            evidence.Rsi,
+            macd = evidence.Macd is { } value
+                ? new { value.Line, value.Signal, value.Histogram }
+                : null,
+            evidence.Reason
+        });
+    }
+    catch (MarketDataIntervalNotSupportedException exception)
+    {
+        return Results.BadRequest(new { error = "IntervalNotSupportedByVenue", message = exception.Message });
+    }
+    catch (MarketDataSourceException exception)
+    {
+        return Results.Json(
+            new { error = "MarketDataUnavailable", message = exception.Message },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 }).RequireAuthorization();
 
@@ -2669,7 +3967,7 @@ app.MapGet("/api/live/positions", async (
     catch (Exception exception) when (exception is not OperationCanceledException)
 #pragma warning restore CA1031
     {
-        staleWarning = "The exchange could not be reached, so this book may be out of date.";
+        staleWarning = "Live reconciliation could not establish complete exchange evidence; this book may be out of date.";
     }
 
     var valued = await valuation
@@ -2684,6 +3982,7 @@ app.MapGet("/api/live/positions", async (
         positions = valued.Where(item => item.Position.Mode == TradingMode.Live).Select(item => new
         {
             item.Position.Id,
+            item.Position.ExchangeAccountId,
             item.Position.Symbol,
             direction = item.Position.Direction == PositionDirection.DirectionShort ? "Short" : "Long",
             status = item.Position.Status.ToString(),
@@ -2731,6 +4030,7 @@ app.MapPost("/api/paper/positions/{positionId:guid}/exits", async (
         return Results.NotFound(new { error = "PositionNotFound", message = "No open position with that id." });
     }
 
+    var expectedVersion = position.Version;
     try
     {
         position.SetProtectiveExits(request.StopLossPrice, request.TakeProfitPrice, timeProvider.GetUtcNow());
@@ -2744,7 +4044,7 @@ app.MapPost("/api/paper/positions/{positionId:guid}/exits", async (
         return Results.BadRequest(new { error = "PositionNotOpen", message = exception.Message });
     }
 
-    await positions.UpdateAsync(position, cancellationToken).ConfigureAwait(false);
+    await positions.UpdateAsync(position, expectedVersion, cancellationToken).ConfigureAwait(false);
 
     await auditWriter.WriteAsync(
         new AuditEvent(
@@ -2827,7 +4127,15 @@ app.MapPost("/api/paper/orders", async (
     try
     {
         result = await paperTrading
-            .SubmitAsync(userId.Value, request.Symbol, side, request.Quantity, request.ClientOrderId, cancellationToken)
+            .SubmitAsync(
+                userId.Value,
+                request.Symbol,
+                side,
+                request.Quantity,
+                request.ClientOrderId,
+                request.StopLossPrice,
+                request.TakeProfitPrice,
+                cancellationToken)
             .ConfigureAwait(false);
     }
     catch (DbUpdateException exception)
@@ -2884,10 +4192,13 @@ app.MapPost("/api/paper/orders", async (
         },
         position = result.Position is null ? null : new
         {
+            result.Position.Id,
             result.Position.Symbol,
             direction = result.Position.Direction.ToString(),
             result.Position.Quantity,
             result.Position.EntryPrice,
+            result.Position.StopLossPrice,
+            result.Position.TakeProfitPrice,
             status = result.Position.Status.ToString()
         }
     });
@@ -2902,6 +4213,8 @@ app.MapPost("/api/paper/orders", async (
 app.MapGet("/api/live/orders", async (
     ClaimsPrincipal principal,
     IOrderRepository orders,
+    IOrderReconciliationRepository reconciliations,
+    OrderReconciliationService reconciliation,
     LiveOrderSyncService sync,
     CancellationToken cancellationToken) =>
 {
@@ -2917,12 +4230,22 @@ app.MapGet("/api/live/orders", async (
     try
     {
         synced = await sync.SyncAsync(userId.Value, cancellationToken).ConfigureAwait(false);
+        var owned = (await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false))
+            .Where(order => order.Mode == TradingMode.Live && order.RequiresReconciliation);
+        foreach (var order in owned)
+        {
+            var records = await reconciliations.ListForOrderAsync(order.Id, cancellationToken).ConfigureAwait(false);
+            foreach (var record in records.Where(record => !record.IsResolved))
+            {
+                await reconciliation.ResolveAsync(record, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 #pragma warning disable CA1031 // A failed refresh must not hide the orders themselves.
     catch (Exception exception) when (exception is not OperationCanceledException)
 #pragma warning restore CA1031
     {
-        syncFailure = "The exchange could not be reached, so these states may be out of date.";
+        syncFailure = "Live reconciliation could not establish complete exchange evidence; these states may be out of date.";
     }
 
     var all = await orders.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
@@ -2948,7 +4271,7 @@ app.MapGet("/api/live/orders", async (
                 price = order.Price,
                 limitPrice = order.Price,
                 order.CreatedAtUtc,
-                requiresReconciliation = order.State == OrderState.Failed
+                requiresReconciliation = order.RequiresReconciliation || order.State == OrderState.Failed
             })
     });
 }).RequireAuthorization();
@@ -2995,22 +4318,60 @@ app.MapPost("/api/live/orders", async (
     }
     catch (DbUpdateException exception)
     {
-        // A durable-record failure may occur before or after the exchange
-        // call. The browser cannot establish which, so it must not retry;
-        // this is treated as an unknown outcome and logged for an operator.
-        Trading.Web.LiveOrderEndpointLog.PersistenceFailure(
-            loggerFactory.CreateLogger("Trading.Web.LiveOrderEndpoint"),
-            exception);
-        return Results.Json(
-            new
-            {
-                error = "Unknown",
-                message = "The live order could not be recorded reliably. It may or may not exist at Kraken. Do not submit it again; check Orders and reconcile it first.",
-                action = "Do not resubmit this order."
-            },
-            statusCode: StatusCodes.Status202Accepted);
+        return LiveOrderPersistenceFailure(loggerFactory, exception);
     }
 
+    return LiveOrderResponse(result);
+}).RequireAuthorization();
+
+// Only a verified, account-bound long position can be reduced here. An
+// expired live plan blocks new orders but does not strand an existing position.
+app.MapPost("/api/live/positions/{positionId:guid}/close", async (
+    Guid positionId,
+    CloseLivePositionRequest request,
+    ClaimsPrincipal principal,
+    ILiveTradingService liveTrading,
+    ILoggerFactory loggerFactory,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUser.TryGetUserId(principal);
+    if (userId is null)
+        return Results.Unauthorized();
+
+    ArgumentNullException.ThrowIfNull(request);
+
+    LiveTradeResult result;
+    try
+    {
+        result = await liveTrading.ClosePositionAsync(
+            userId.Value, request.ExchangeAccountId, positionId, request.Quantity,
+            request.ClientOrderId, cancellationToken).ConfigureAwait(false);
+    }
+    catch (DbUpdateException exception)
+    {
+        return LiveOrderPersistenceFailure(loggerFactory, exception);
+    }
+
+    return LiveOrderResponse(result);
+}).RequireAuthorization();
+
+IResult LiveOrderPersistenceFailure(ILoggerFactory loggerFactory, DbUpdateException exception)
+{
+    // A durable-record failure may occur before or after venue contact.
+    Trading.Web.LiveOrderEndpointLog.PersistenceFailure(
+        loggerFactory.CreateLogger("Trading.Web.LiveOrderEndpoint"), exception);
+    return Results.Json(
+        new
+        {
+            error = "Unknown",
+            message = "The live order could not be recorded reliably. It may or may not exist at Kraken. Do not submit it again; check Orders and reconcile it first.",
+            action = "Do not resubmit this order."
+        },
+        statusCode: StatusCodes.Status202Accepted);
+}
+
+IResult LiveOrderResponse(LiveTradeResult result)
+{
     if (result.Outcome == LiveTradeOutcome.Unknown)
     {
         return Results.Json(
@@ -3061,7 +4422,7 @@ app.MapPost("/api/live/orders", async (
             limitPrice = order.Price
         }
     });
-}).RequireAuthorization();
+}
 
 // What this deployment can actually do, per mode. The page asks rather than
 // assumes, so the tab it offers matches what the server will accept.
@@ -3069,6 +4430,8 @@ app.MapGet("/api/trading/modes", async (
     ClaimsPrincipal principal,
     IExchangeAccountConnectionService connections,
     ILiveExecutionRouteProvider routes,
+    ILiveTradingEligibility eligibility,
+    TimeProvider time,
     CancellationToken cancellationToken) =>
 {
     var userId = CurrentUser.TryGetUserId(principal);
@@ -3080,6 +4443,8 @@ app.MapGet("/api/trading/modes", async (
     var accounts = await connections.ListAsync(userId.Value, cancellationToken).ConfigureAwait(false);
     var connected = accounts.Where(account => account.CanTrade).ToList();
     var liveRoute = connected.Exists(account => routes.HasRouteFor(account.ExchangeKind));
+    var livePlanEligible = liveRoute && await eligibility.IsEligibleAsync(
+        userId.Value, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
 
     return Results.Ok(new
     {
@@ -3092,13 +4457,15 @@ app.MapGet("/api/trading/modes", async (
         },
         live = new
         {
-            available = liveRoute && connected.Exists(account =>
+            available = livePlanEligible && connected.Exists(account =>
                 account.CanReachExchange && account.Stage != TradingStage.Paper),
             // Each reason names the specific thing that is missing, so a user
             // is never told "unavailable" when the only obstacle is a promotion
             // they can request themselves.
             reason = !liveRoute
                 ? "Live trading is unavailable: this deployment has no execution route to the exchange, so no order could reach it."
+                : !livePlanEligible
+                    ? "An active live-eligible owner plan is required for real trading."
                 : connected.TrueForAll(account => account.Stage == TradingStage.Paper)
                     ? "No account has been promoted out of paper. Promote an account to Proving to send a first small real order."
                     : null
@@ -3992,6 +5359,11 @@ app.MapGet("/login", (IHostEnvironment environment, IConfiguration configuration
                     </div>
                     <p id="capslock-note" class="hint" hidden>Caps Lock is on.</p>
                   </div>
+                  <div class="field">
+                    <label for="login-code">Administrator verification code (if applicable)</label>
+                    <input id="login-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+                           pattern="[0-9]{6}" maxlength="6" placeholder="6-digit code" />
+                  </div>
                   <button id="login-submit" type="submit" class="primary wide">Sign in</button>
                 </form>
 
@@ -4172,6 +5544,10 @@ app.MapGet("/account", () => Results.Content(
     """,
     "text/html"));
 
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode()
+    .RequireAuthorization();
+
 await app.RunAsync().ConfigureAwait(false);
 
 public partial class Program;
@@ -4235,31 +5611,122 @@ internal sealed record PaperTrainingRequest(
     }
 }
 
+internal sealed record PaperTrainingStrategyConfigurationRequest(
+    IReadOnlyList<PaperTrainingStrategyAssignmentRequest> Assignments,
+    IReadOnlyDictionary<string, string>? StrategyParameters = null);
+
+internal sealed record PaperExecutionRecoveryRequest(string CorrelationId, bool ExperimentHostStopped);
+
+internal sealed record ReportingProfileRequest(string Locale, string TimeZone, string ReportingCurrency);
+
+internal sealed record CreatePaperPlanRequest(
+    string Code, string Name, int MaxExperimentWorkers, string? OneTimeCode);
+
+internal sealed record AssignPaperPlanRequest(
+    Guid PlanId, DateTimeOffset? TrialExpiresAtUtc, string? OneTimeCode);
+
+internal sealed record ExtendPaperTrialRequest(DateTimeOffset TrialExpiresAtUtc, string? OneTimeCode);
+
+internal sealed record VerifyAdminActionRequest(string? OneTimeCode);
+
+internal sealed record ChangeOwnerStatusRequest(string Status, string Reason, string? OneTimeCode);
+internal sealed record ChangeOwnerRoleRequest(string Role, string Reason, string? OneTimeCode);
+internal sealed record ProveAdministratorMfaRequest(string? OneTimeCode);
+internal sealed record ApproveAdministratorRequest(string Reason, string? OneTimeCode);
+
+internal sealed record PaperTransactionReportRequest(
+    DateTimeOffset FromUtc, DateTimeOffset ToUtcExclusive, bool Export = false, string? CountryProfileCode = null);
+
+internal sealed record PaperReportExportMetadata(
+    string Sha256, DateTimeOffset FromUtc, DateTimeOffset ToUtcExclusive,
+    string ReportingCurrency, int ByteCount, string? CountryProfileCode = null)
+{
+    public static PaperReportExportMetadata Parse(string? json)
+    {
+        PaperReportExportMetadata? value;
+        try { value = JsonSerializer.Deserialize<PaperReportExportMetadata>(json ?? ""); }
+        catch (JsonException error)
+        {
+            throw new InvalidDataException("Paper report export metadata is malformed.", error);
+        }
+        if (value is null || value.Sha256 is null || value.Sha256.Length != 64
+            || value.Sha256.Any(character => !Uri.IsHexDigit(character))
+            || value.ByteCount is < 1 or > AzureBlobPaperTransactionReportStore.MaximumBytes
+            || value.FromUtc.Offset != TimeSpan.Zero || value.ToUtcExclusive.Offset != TimeSpan.Zero
+            || value.FromUtc >= value.ToUtcExclusive || string.IsNullOrWhiteSpace(value.ReportingCurrency))
+            throw new InvalidDataException("Paper report export metadata is incomplete.");
+        return value;
+    }
+}
+
+internal sealed record PaperTrainingStrategyAssignmentRequest(
+    int Slot,
+    string StrategyId,
+    string? StrategyParametersJson = null);
+
 internal sealed record PaperTrainingResponse(
     string State,
     int Slots,
+    int ConfiguredSlots,
     DateTimeOffset? ChangedAtUtc,
     DateTimeOffset? LastScanAtUtc,
+    PaperTrainingScanMetrics? LastScanMetrics,
     IReadOnlyList<object> Catalog,
+    IReadOnlyList<object> WorkerAssignments,
     IReadOnlyList<PaperTrainingCandidateResponse> Qualifications,
     string Notice)
 {
-    public static PaperTrainingResponse From(PaperTrainingActivation? activation) =>
-        new(
+    public IReadOnlyList<PaperHostHealthResponse>? HostHealth { get; init; }
+    public bool? ForwardFeedObservedRecently { get; init; }
+    public IReadOnlyDictionary<string, string> StrategyParameters { get; init; } =
+        ApprovedStrategyParameters.Defaults;
+
+    public static PaperTrainingResponse From(PaperTrainingActivation? activation)
+    {
+        var versions = ApprovedExperimentStrategyRegistry.CreatePlatformDefault().Definitions
+            .ToDictionary(definition => definition.FamilyId, definition => definition.Version, StringComparer.Ordinal);
+        return new(
             activation?.State.ToString() ?? "NotStarted",
             activation?.Slots.Count ?? 0,
+            activation?.ConfiguredStrategies.Count ?? 0,
             activation?.ChangedAtUtc,
             LastScanAtUtcFrom(activation),
-            PaperTrainingActivationService.ApprovedSlots
-                .Where(slot => PaperTrainingHistoricalQualification.Supports(slot.StrategyId))
-                .GroupBy(slot => slot.StrategyId, StringComparer.Ordinal)
-                .Select(group => group.First())
-                .Select(slot => (object)new
-            {
-                slot.Group, slot.StrategyId,
-                slot.ParameterSetId, slot.ProvenanceId,
-                Intervals = PaperTrainingAutoSelectionService.ApprovedIntervals
-            }).ToArray(),
+            activation?.QualificationResults
+                .Where(result => result.StrategyId == "platform.scanner"
+                    && result.DatasetFingerprint.StartsWith("scan-run-", StringComparison.Ordinal))
+                .OrderByDescending(result => result.DatasetFingerprint, StringComparer.Ordinal)
+                .FirstOrDefault()?.ScanMetrics,
+            StrategyCatalog(versions),
+            activation?.ConfiguredStrategies
+                .OrderBy(assignment => assignment.Slot)
+                .Select(assignment =>
+                {
+                    var slot = activation?.Slots.SingleOrDefault(item => item.Slot == assignment.Slot);
+                    return (object)new
+                    {
+                        assignment.Slot,
+                        assignment.StrategyId,
+                        assignment.StrategyParameters,
+                        StrategyVersion = versions[assignment.StrategyId],
+                        CurrentStrategyId = slot?.StrategyId,
+                        CurrentStrategyVersion = slot?.StrategyVersion,
+                        AdmissionCloseUtc = slot?.AdmissionCloseUtc,
+                        SelectedComponent = slot?.SelectedComponent is null ? null : new
+                        {
+                            slot.SelectedComponent.FamilyId,
+                            slot.SelectedComponent.Version,
+                            slot.SelectedComponent.SignalAsOfUtc,
+                            slot.SelectedComponent.ComponentDecisionFingerprint,
+                            UniverseSize = slot.SelectedComponent.UniverseSymbols.Count
+                        },
+                        Mode = "Paper",
+                        State = slot is not null
+                            ? "Reserved"
+                            : activation?.IsActive == true ? "Scanning" : "Stopped"
+                    };
+                })
+                .ToArray()
+                ?? Array.Empty<object>(),
             activation?.QualificationResults
                 .Where(result => result.CandidateDisposition is not null
                     && result.StrategyId is not null)
@@ -4278,7 +5745,35 @@ internal sealed record PaperTrainingResponse(
                 .Select(PaperTrainingCandidateResponse.From)
                 .ToArray()
                 ?? Array.Empty<PaperTrainingCandidateResponse>(),
-            "Paper only: fake funds only. The scanner evaluates Kraken EUR Spot pairs every five minutes; queued observations consume no worker capacity and never grant live eligibility. Live account stages remain untouched.");
+            "Paper only: fake funds only. The scanner evaluates Kraken EUR Spot pairs every five minutes; queued observations consume no worker capacity and never grant live eligibility. Live account stages remain untouched.")
+        {
+            StrategyParameters = activation?.ConfiguredStrategyParameters ?? ApprovedStrategyParameters.Defaults
+        };
+    }
+
+    private static object[] StrategyCatalog(Dictionary<string, int> versions)
+    {
+        var workerDefinitions = PaperTrainingActivationService.ApprovedStrategyCatalog
+            .GroupBy(slot => slot.StrategyId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        return ApprovedStrategyParameters.Catalog
+            .Select(strategy =>
+            {
+                workerDefinitions.TryGetValue(strategy.StrategyId, out var worker);
+                return (object)new
+                {
+                    Group = worker?.Group,
+                    strategy.StrategyId,
+                    StrategyVersion = versions[strategy.StrategyId],
+                    strategy.Name,
+                    strategy.Description,
+                    Intervals = PaperTrainingAutoSelectionService.ApprovedIntervals,
+                    Settings = strategy.Fields,
+                    DefaultsJson = strategy.DefaultsJson
+                };
+            })
+            .ToArray();
+    }
 
     private static DateTimeOffset? LastScanAtUtcFrom(PaperTrainingActivation? activation) =>
         activation?.QualificationResults
@@ -4293,6 +5788,12 @@ internal sealed record PaperTrainingResponse(
                 : (DateTimeOffset?)null)
             .Where(value => value.HasValue)
             .Max();
+}
+
+internal sealed record PaperHostHealthResponse(string Name, DateTimeOffset? LastHeartbeatUtc, bool Stale)
+{
+    public static PaperHostHealthResponse From(string name, DateTimeOffset? last, DateTimeOffset now) =>
+        new(name, last, last is null || last > now || now - last > TimeSpan.FromMinutes(2));
 }
 
 internal sealed record PaperTrainingCandidateResponse(
@@ -4343,7 +5844,9 @@ internal sealed record SubmitPaperOrderRequest(
     string Symbol,
     string Side,
     decimal Quantity,
-    string? ClientOrderId);
+    string? ClientOrderId,
+    decimal? StopLossPrice = null,
+    decimal? TakeProfitPrice = null);
 
 /// <summary>
 /// Live order submission. It carries no user id, because the owner is taken
@@ -4355,6 +5858,11 @@ internal sealed record SubmitLiveOrderRequest(
     Guid ExchangeAccountId,
     string Symbol,
     string Side,
+    decimal Quantity,
+    string? ClientOrderId);
+
+internal sealed record CloseLivePositionRequest(
+    Guid ExchangeAccountId,
     decimal Quantity,
     string? ClientOrderId);
 

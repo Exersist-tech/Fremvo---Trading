@@ -9,6 +9,8 @@ using Trading.Infrastructure.Data.Backtesting;
 using Trading.Infrastructure.Data.Experiments;
 using Trading.Application.Experiments;
 using Trading.Domain.Experiments;
+using Trading.Application.Entitlements;
+using Trading.Infrastructure.Data.Entitlements;
 
 namespace Trading.Web.Extensions;
 
@@ -28,6 +30,12 @@ internal static class ServiceCollectionExtensions
 
         services.AddDbContext<TradingDbContext>(options =>
             options.UseSqlServer(connectionString));
+        services.AddScoped<IEntitlementRepository, EfEntitlementRepository>();
+        services.AddScoped<ILiveTradingEligibility, EntitlementLiveTradingEligibility>();
+        services.AddScoped<IPaperWorkerAdmissionLimit>(provider =>
+            new EntitlementPaperWorkerAdmissionLimit(
+                provider.GetRequiredService<IEntitlementRepository>(),
+                configuration.GetValue<bool>("Entitlements:PaperWorkerLimitsEnabled")));
         services.AddScoped<ICandleRepository, EfCandleRepository>();
         services.AddScoped<IHistoricalDatasetRepository, EfHistoricalDatasetRepository>();
         services.AddScoped<IScanRequestRepository, EfScanRequestRepository>();

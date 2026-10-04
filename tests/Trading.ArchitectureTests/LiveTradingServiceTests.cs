@@ -1,12 +1,16 @@
 using Trading.Application.Execution;
+using Trading.Application.Entitlements;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
+using Trading.Application.UseCases.Portfolio;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Abstractions.Account;
+using Trading.Exchanges.Abstractions.Execution;
 using Trading.MarketData;
 using Trading.Risk;
 
@@ -28,6 +32,115 @@ public sealed class LiveTradingServiceTests
     private static readonly Guid OtherUserId = Guid.Parse("44444444-4444-4444-4444-444444444444");
 
     private const string Symbol = "XBTUSD";
+
+    [Fact]
+    public async Task OpenOrderReaderCannotQueryAnotherOwnersCredential()
+    {
+        var accountId = Guid.NewGuid();
+        var gateway = new StubOpenOrderGateway();
+        var account = new StubExecutionAccounts(new SpotExecutionAccount(
+            accountId, OtherUserId, ExchangeKind.Kraken, TradingStage.Live,
+            new ExchangeCredential("test-key", "c2VjcmV0")));
+        var check = new LiveAccountOpenOrderCheck(gateway, account);
+
+        var result = await check.ReadAsync(UserId, accountId, ExchangeKind.Kraken, CancellationToken.None);
+
+        Assert.Equal(SpotOpenOrderState.Unavailable, result);
+        Assert.Equal(0, gateway.Reads);
+    }
+
+    [Fact]
+    public async Task OpenOrderReaderUsesOnlyTheSelectedAccount()
+    {
+        var accountId = Guid.NewGuid();
+        var gateway = new StubOpenOrderGateway();
+        var account = new StubExecutionAccounts(new SpotExecutionAccount(
+            accountId, UserId, ExchangeKind.Kraken, TradingStage.Live,
+            new ExchangeCredential("test-key", "c2VjcmV0")));
+        var check = new LiveAccountOpenOrderCheck(gateway, account);
+
+        var result = await check.ReadAsync(UserId, accountId, ExchangeKind.Kraken, CancellationToken.None);
+
+        Assert.Equal(SpotOpenOrderState.Empty, result);
+        Assert.Equal(accountId, account.LastRequestedId);
+        Assert.Equal(1, gateway.Reads);
+    }
+
+    [Theory]
+    [InlineData(SpotOpenOrderState.Present)]
+    [InlineData(SpotOpenOrderState.Unavailable)]
+    public async Task ExchangeOpenOrdersOrUnavailableEvidenceBlockBeforeReservation(SpotOpenOrderState state)
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.OpenOrders.State = state;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "external-order");
+
+        Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+        Assert.Equal(1, harness.OpenOrders.Reads);
+    }
+
+    [Theory]
+    [InlineData(SpotOpenOrderState.Present)]
+    [InlineData(SpotOpenOrderState.Unavailable)]
+    public async Task ExchangeOpenOrdersAppearingAfterReservationRejectWithoutVenueContact(SpotOpenOrderState state)
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.OpenOrders.OnRead = reads => reads == 1 ? SpotOpenOrderState.Empty : state;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "external-order-late");
+
+        Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Equal(2, harness.OpenOrders.Reads);
+        Assert.Equal(OrderState.Rejected, Assert.Single(await harness.Orders.ListAsync(
+            UserId, CancellationToken.None)).State);
+        Assert.Contains(harness.Audit.Events, item => item.Action == "LiveOrderRejected");
+    }
+
+    [Fact]
+    public async Task ExternalBaseHoldingsBlockNewLiveExposure()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.01m, 0.01m, 0m, "XBT")
+        ];
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "external-holdings");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task BaseHoldingsChangedAfterReservationRejectTheOrder()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Funds.OnRead = read =>
+        {
+            if (read == 2)
+                harness.Funds.Balances =
+                [
+                    new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+                    new ExchangeBalance("XBT", 0.001m, 0.001m, 0m, "XBT")
+                ];
+        };
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "external-holdings-late");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, result.Outcome);
+        Assert.Equal(OrderState.Rejected, result.Order?.State);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
 
     [Fact]
     public async Task AnAcceptedOrderIsRecordedAsWorkingAndNotAsFilled()
@@ -100,6 +213,68 @@ public sealed class LiveTradingServiceTests
 
         Assert.Equal(LiveTradeOutcome.AccountNotEligible, result.Outcome);
         Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task APreviouslyPromotedAccountCannotTradeAfterTheOperatorWithdrawsItsRoute()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Routes.Enabled = false;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-route-off");
+
+        Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RouteWithdrawalAfterOrderPersistenceStillPreventsVenueSubmission()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Routes.DisableAfterFirstRead = true;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-route-withdrawn");
+
+        Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+        Assert.Equal(2, harness.Routes.Reads);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Equal(OrderState.Rejected, Assert.Single(await harness.Orders.ListAsync(
+            UserId, CancellationToken.None)).State);
+        Assert.Contains(harness.Audit.Events, item => item.Action == "LiveOrderRejected");
+    }
+
+    [Fact]
+    public async Task ARevokedLivePlanBlocksNewOrdersBeforeCreatingAnOrderOrCallingTheExchange()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Eligibility.Eligible = false;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-expired");
+
+        Assert.Equal(LiveTradeOutcome.AccountNotEligible, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task APlanRevokedBetweenSizingAndSubmissionRecordsARejectedOrderWithoutExchangeContact()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Eligibility.ExpireAfterFirstRead = true;
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "live-revoked-at-submit");
+
+        Assert.Equal(LiveTradeOutcome.AccountNotEligible, result.Outcome);
+        Assert.Equal(2, harness.Eligibility.Reads);
+        Assert.Equal(0, harness.Adapter.Calls);
+        Assert.Equal(OrderState.Rejected, Assert.Single(await harness.Orders.ListAsync(
+            UserId, CancellationToken.None)).State);
+        Assert.Contains(harness.Audit.Events, item => item.Action == "LiveOrderRejected");
     }
 
     [Fact]
@@ -348,12 +523,469 @@ public sealed class LiveTradingServiceTests
         Assert.Equal(0, harness.Adapter.Calls);
     }
 
+    [Fact]
+    public async Task ASpotSellCannotUseUnboundOrAnotherAccountsPosition()
+    {
+        var harness = new Harness(TradingStage.Live);
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.002m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: Guid.NewGuid()), CancellationToken.None);
+        var otherAccountResult = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.001m, "wrong-account-sell");
+        Assert.Equal(LiveTradeOutcome.Blocked, otherAccountResult.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+
+        var legacy = new Harness(TradingStage.Live);
+        await legacy.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.002m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live), CancellationToken.None);
+        var unboundResult = await legacy.Service.SubmitAsync(
+            UserId, legacy.AccountId, Symbol, OrderSide.Sell, 0.001m, "legacy-sell");
+        Assert.Equal(LiveTradeOutcome.Blocked, unboundResult.Outcome);
+        Assert.Equal(0, legacy.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task SpotSellMustFitOwnedPositionAndWaitForUnknownOrders()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.002m, 0.002m, 0m, "XBT")
+        ];
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.002m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId), CancellationToken.None);
+
+        var tooLarge = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.003m, "oversell");
+        Assert.Equal(LiveTradeOutcome.Blocked, tooLarge.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+
+        var accepted = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.001m, "owned-sell");
+        Assert.Equal(LiveTradeOutcome.Accepted, accepted.Outcome);
+        Assert.Equal(1, harness.Adapter.Calls);
+
+        var overlapping = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.001m, "overlapping-sell");
+        Assert.Equal(LiveTradeOutcome.Blocked, overlapping.Outcome);
+        Assert.Equal(1, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task ExistingAccountExposureCountsTowardMandatoryLiveCeiling()
+    {
+        var harness = new Harness(TradingStage.Live);
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.003m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId), CancellationToken.None);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "over-account-ceiling");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task AddedQuantityMustFitTheMandatoryPositionSizeCeiling()
+    {
+        var harness = new Harness(TradingStage.Live, platformRiskLimits: new RiskLimitHierarchy(
+            platformMaxExposure: 100m, platformMaxPositionSize: 0.002m));
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.0015m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId), CancellationToken.None);
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "over-position-ceiling");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task PerOrderNotionalCeilingIsNotMistakenForTotalAccountCeiling()
+    {
+        var harness = new Harness(TradingStage.Live);
+        harness.Options.MaxOrderNotional = 25m;
+        harness.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.001m, 0.001m, 0m, "XBT")
+        ];
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.001m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId), CancellationToken.None);
+
+        var withinLimit = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.0005m, "second-small-buy");
+        Assert.Equal(LiveTradeOutcome.Accepted, withinLimit.Outcome);
+        Assert.Equal(1, harness.Adapter.Calls);
+
+        var tooLarge = new Harness(TradingStage.Live);
+        tooLarge.Options.MaxOrderNotional = 25m;
+        var blocked = await tooLarge.Service.SubmitAsync(
+            UserId, tooLarge.AccountId, Symbol, OrderSide.Buy, 0.001m, "large-single-buy");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, blocked.Outcome);
+        Assert.Equal(0, tooLarge.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task AWorkingAccountOrderBlocksAnotherLiveBuyUntilReconciled()
+    {
+        var harness = new Harness(TradingStage.Live);
+        var first = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "first-live-buy");
+        var second = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "second-live-buy");
+
+        Assert.Equal(LiveTradeOutcome.Accepted, first.Outcome);
+        Assert.Equal(LiveTradeOutcome.Blocked, second.Outcome);
+        Assert.Equal(1, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task ConcurrentInMemoryOrdersCannotReserveTheSameLiveAccount()
+    {
+        var orders = new InMemoryOrderRepository();
+        var accountId = Guid.NewGuid();
+        var candidates = Enumerable.Range(0, 2).Select(_ => new Order(
+            Guid.NewGuid(), UserId, Guid.NewGuid(), Symbol, OrderSide.Buy,
+            OrderType.Limit, 0.001m, 30000m, Now, Guid.NewGuid().ToString("D"),
+            mode: TradingMode.Live, exchangeAccountId: accountId)).ToArray();
+        var outcomes = await Task.WhenAll(candidates.Select(candidate => Task.Run(async () =>
+        {
+            try
+            {
+                await orders.AddAsync(candidate, CancellationToken.None);
+                return true;
+            }
+            catch (WorkingLiveOrderConflictException)
+            {
+                return false;
+            }
+        })));
+
+        Assert.Equal(1, outcomes.Count(accepted => accepted));
+        Assert.Single(await orders.ListAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task LiveAdmissionRequiresFreshAccountScopedUnreservedSpotFunds()
+    {
+        var insufficient = new Harness(TradingStage.Live);
+        insufficient.Funds.Balances = [new ExchangeBalance("USD", 100m, 100m, 80m, "USD")];
+        var held = await insufficient.Service.SubmitAsync(
+            UserId, insufficient.AccountId, Symbol, OrderSide.Buy, 0.001m, "held-quote");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, held.Outcome);
+        Assert.Equal(0, insufficient.Adapter.Calls);
+
+        var creditOnly = new Harness(TradingStage.Live);
+        creditOnly.Funds.Balances = [new ExchangeBalance("USD", 0m, 100m, 0m, "USD")];
+        var borrowed = await creditOnly.Service.SubmitAsync(
+            UserId, creditOnly.AccountId, Symbol, OrderSide.Buy, 0.001m, "credit-only");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, borrowed.Outcome);
+
+        var stale = new Harness(TradingStage.Live);
+        stale.Funds.ObservedAtUtc = Now.AddMinutes(-1);
+        var late = await stale.Service.SubmitAsync(
+            UserId, stale.AccountId, Symbol, OrderSide.Buy, 0.001m, "stale-account");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, late.Outcome);
+
+        var missing = new Harness(TradingStage.Live);
+        missing.Funds.Balances = [];
+        var absent = await missing.Service.SubmitAsync(
+            UserId, missing.AccountId, Symbol, OrderSide.Buy, 0.001m, "missing-quote");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, absent.Outcome);
+    }
+
+    [Fact]
+    public async Task LiveSellRequiresTheExchangeToReportAvailableBaseAssets()
+    {
+        var harness = new Harness(TradingStage.Live);
+        await harness.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.002m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId), CancellationToken.None);
+        harness.Funds.Balances = [new ExchangeBalance("XBT", 0.002m, 0.0005m, 0.0015m, "XBT")];
+
+        var result = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.001m, "reserved-base");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, result.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task AdmissionRejectsFundsOrPositionsThatChangeBeforeExchangeContact()
+    {
+        var lostFunds = new Harness(TradingStage.Live);
+        lostFunds.Funds.OnRead = read =>
+        {
+            if (read == 2)
+                lostFunds.Funds.Balances = [];
+        };
+        var unavailable = await lostFunds.Service.SubmitAsync(
+            UserId, lostFunds.AccountId, Symbol, OrderSide.Buy, 0.001m, "funds-changed");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, unavailable.Outcome);
+        Assert.Equal(OrderState.Rejected, unavailable.Order?.State);
+        Assert.Equal(0, lostFunds.Adapter.Calls);
+
+        var changedPosition = new Harness(TradingStage.Live);
+        var position = new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.001m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: changedPosition.AccountId);
+        await changedPosition.Positions.AddAsync(position, CancellationToken.None);
+        changedPosition.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.001m, 0.001m, 0m, "XBT")
+        ];
+        changedPosition.Funds.OnRead = read =>
+        {
+            if (read == 2)
+                position.Increase(0.001m, 30000m);
+        };
+        var changed = await changedPosition.Service.SubmitAsync(
+            UserId, changedPosition.AccountId, Symbol, OrderSide.Buy, 0.001m, "position-changed");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, changed.Outcome);
+        Assert.Equal(OrderState.Rejected, changed.Order?.State);
+        Assert.Equal(0, changedPosition.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task UnknownAccountScopeOrDifferentQuoteExposureBlocksNewLiveOrders()
+    {
+        var unbound = new Harness(TradingStage.Live);
+        await unbound.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            "SOLEUR", PositionDirection.DirectionLong, 1m, 100m, 100m, Now.AddMinutes(-5),
+            mode: TradingMode.Live), CancellationToken.None);
+        var legacyResult = await unbound.Service.SubmitAsync(
+            UserId, unbound.AccountId, Symbol, OrderSide.Buy, 0.001m, "legacy-exposure");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, legacyResult.Outcome);
+
+        var differentQuote = new Harness(TradingStage.Live);
+        await differentQuote.Positions.AddAsync(new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            "SOLEUR", PositionDirection.DirectionLong, 1m, 100m, 100m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: differentQuote.AccountId), CancellationToken.None);
+        var mixedResult = await differentQuote.Service.SubmitAsync(
+            UserId, differentQuote.AccountId, Symbol, OrderSide.Buy, 0.001m, "mixed-exposure");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, mixedResult.Outcome);
+        Assert.Equal(0, differentQuote.Adapter.Calls);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task BoundSpotLongCanCloseAfterEntitlementExpiresInRestrictedModes(
+        bool closeOnly, bool reduceOnly)
+    {
+        var harness = new Harness(TradingStage.Live);
+        var position = await AddOwnedLongAsync(harness);
+        harness.Eligibility.Eligible = false;
+        harness.Halts.SetCloseOnly(UserId, closeOnly);
+        harness.Halts.SetReduceOnly(UserId, reduceOnly);
+
+        var ordinary = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Sell, 0.001m, "ordinary-expired");
+        var result = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, position.Id, 0.001m, "closing-expired");
+
+        Assert.Equal(LiveTradeOutcome.AccountNotEligible, ordinary.Outcome);
+        Assert.Equal(LiveTradeOutcome.Accepted, result.Outcome);
+        Assert.Equal(OrderSide.Sell, result.Order!.Side);
+        Assert.Equal(0m, result.Order.FilledQuantity);
+        Assert.Equal(1, harness.Adapter.Calls);
+        Assert.Equal(harness.AccountId, harness.Credentials.LastRequestedId);
+        Assert.Equal(1, harness.Eligibility.Reads);
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteDoesNotBypassEmergencyOrMarketHalt()
+    {
+        foreach (var halt in new Action<InMemoryTradingHaltState>[]
+                 { state => state.EngageEmergencyStop(), state => state.HaltMarket(Symbol),
+                   state => state.HaltUser(UserId), state => state.HaltStrategy(LiveTradingService.ManualLiveStrategyId) })
+        {
+            var harness = new Harness(TradingStage.Live);
+            var position = await AddOwnedLongAsync(harness);
+            harness.Eligibility.Eligible = false;
+            halt(harness.Halts);
+
+            var result = await harness.Service.ClosePositionAsync(
+                UserId, harness.AccountId, position.Id, 0.001m, null);
+
+            Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+            Assert.Equal(0, harness.Adapter.Calls);
+            Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteRejectsForeignUnboundOrOversizedPositions()
+    {
+        var harness = new Harness(TradingStage.Live);
+        var owned = await AddOwnedLongAsync(harness);
+        foreach (var id in new[] { Guid.NewGuid(), owned.Id })
+        {
+            var result = await harness.Service.ClosePositionAsync(UserId,
+                id == owned.Id ? Guid.NewGuid() : harness.AccountId, id, 0.001m, null);
+            Assert.Equal(LiveTradeOutcome.Blocked, result.Outcome);
+        }
+        var oversized = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, owned.Id, 0.003m, null);
+        var otherOwner = await harness.Service.ClosePositionAsync(
+            OtherUserId, harness.AccountId, owned.Id, 0.001m, null);
+        var unbound = new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.001m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live);
+        await harness.Positions.AddAsync(unbound, CancellationToken.None);
+        var legacy = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, unbound.Id, 0.001m, null);
+        Assert.Equal(LiveTradeOutcome.Blocked, oversized.Outcome);
+        Assert.Equal(LiveTradeOutcome.Blocked, otherOwner.Outcome);
+        Assert.Equal(LiveTradeOutcome.Blocked, legacy.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteRequiresFreshBaseFundsAndNoVenueOrders()
+    {
+        var harness = new Harness(TradingStage.Live);
+        var position = await AddOwnedLongAsync(harness);
+        harness.Funds.ObservedAtUtc = Now.AddMinutes(-1);
+        var stale = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, position.Id, 0.001m, "stale-close");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, stale.Outcome);
+
+        harness.Funds.ObservedAtUtc = Now;
+        harness.OpenOrders.State = SpotOpenOrderState.Present;
+        var working = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, position.Id, 0.001m, "venue-close");
+        Assert.Equal(LiveTradeOutcome.Blocked, working.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteRejectsStalePriceAndOrderExceedingExchangeFilters()
+    {
+        var stale = new Harness(TradingStage.Live, candles: [ClosedCandle(Now.AddHours(-2), 30000m)]);
+        var held = await AddOwnedLongAsync(stale);
+        var missingPrice = await stale.Service.ClosePositionAsync(
+            UserId, stale.AccountId, held.Id, 0.001m, "stale-price-close");
+        Assert.Equal(LiveTradeOutcome.PriceUnavailable, missingPrice.Outcome);
+
+        var filtered = new Harness(TradingStage.Live);
+        var owned = await AddOwnedLongAsync(filtered);
+        var wrongStep = await filtered.Service.ClosePositionAsync(
+            UserId, filtered.AccountId, owned.Id, 0.00105m, "wrong-step-close");
+        Assert.Equal(LiveTradeOutcome.Invalid, wrongStep.Outcome);
+        Assert.Equal(0, filtered.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteCannotOverlapWorkingOrUnknownAccountOrders()
+    {
+        var harness = new Harness(TradingStage.Live);
+        var position = await AddOwnedLongAsync(harness);
+        harness.Adapter.Result = ExecutionOutcome.Unknown;
+        var first = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, position.Id, 0.001m, "unknown-close");
+        var second = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId, position.Id, 0.001m, "another-close");
+
+        Assert.Equal(LiveTradeOutcome.Unknown, first.Outcome);
+        Assert.Equal(LiveTradeOutcome.Blocked, second.Outcome);
+        Assert.Equal(1, harness.Adapter.Calls);
+        Assert.Single(await harness.Reconciliations.ListUnresolvedAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CloseOnlyRouteRechecksPositionCredentialsAndHaltAfterReservation()
+    {
+        var changed = new Harness(TradingStage.Live);
+        var position = await AddOwnedLongAsync(changed);
+        changed.Funds.OnRead = read =>
+        {
+            if (read == 2)
+                position.Increase(0.001m, 30000m);
+        };
+        var blocked = await changed.Service.ClosePositionAsync(
+            UserId, changed.AccountId, position.Id, 0.001m, "changed-close");
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, blocked.Outcome);
+        Assert.Equal(OrderState.Rejected, blocked.Order?.State);
+        Assert.Equal(0, changed.Adapter.Calls);
+
+        var wrongCredential = new Harness(TradingStage.Live);
+        var held = await AddOwnedLongAsync(wrongCredential);
+        wrongCredential.Credentials.ReturnedOwner = OtherUserId;
+        var refused = await wrongCredential.Service.ClosePositionAsync(
+            UserId, wrongCredential.AccountId, held.Id, 0.001m, "wrong-credential");
+        Assert.Equal(LiveTradeOutcome.AccountNotEligible, refused.Outcome);
+        Assert.Equal(OrderState.Rejected, refused.Order?.State);
+        Assert.Equal(0, wrongCredential.Adapter.Calls);
+
+        var halted = new Harness(TradingStage.Live);
+        var exit = await AddOwnedLongAsync(halted);
+        halted.Funds.OnRead = read =>
+        {
+            if (read == 2)
+                halted.Halts.EngageEmergencyStop();
+        };
+        var stopped = await halted.Service.ClosePositionAsync(
+            UserId, halted.AccountId, exit.Id, 0.001m, "halted-close");
+        Assert.Equal(LiveTradeOutcome.Blocked, stopped.Outcome);
+        Assert.Equal(OrderState.Rejected, stopped.Order?.State);
+        Assert.Equal(0, halted.Adapter.Calls);
+    }
+
+    [Fact]
+    public async Task OtherVenueHoldingsBlockAdmissionEvenWhenSelectedPairReconciles()
+    {
+        var harness = new Harness(TradingStage.Live);
+        await AddOwnedLongAsync(harness);
+        harness.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.002m, 0.002m, 0m, "XBT"),
+            new ExchangeBalance("ETH", 0.1m, 0.1m, 0m, "ETH")
+        ];
+
+        var entry = await harness.Service.SubmitAsync(
+            UserId, harness.AccountId, Symbol, OrderSide.Buy, 0.001m, "external-asset-entry");
+        var exit = await harness.Service.ClosePositionAsync(
+            UserId, harness.AccountId,
+            (await harness.Positions.ListOpenAsync(UserId, CancellationToken.None)).Single().Id,
+            0.001m, "external-asset-close");
+
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, entry.Outcome);
+        Assert.Equal(LiveTradeOutcome.RiskBlocked, exit.Outcome);
+        Assert.Equal(0, harness.Adapter.Calls);
+    }
+
+    private static async Task<Position> AddOwnedLongAsync(Harness harness)
+    {
+        var position = new Position(Guid.NewGuid(), UserId, Guid.NewGuid(),
+            Symbol, PositionDirection.DirectionLong, 0.002m, 30000m, 30000m, Now.AddMinutes(-5),
+            mode: TradingMode.Live, exchangeAccountId: harness.AccountId);
+        await harness.Positions.AddAsync(position, CancellationToken.None);
+        harness.Funds.Balances =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0.002m, 0.002m, 0m, "XBT")
+        ];
+        return position;
+    }
+
     private sealed class Harness
     {
         public Harness(
             TradingStage stage,
             bool accountConnected = true,
-            IReadOnlyList<Candle>? candles = null)
+            IReadOnlyList<Candle>? candles = null,
+            RiskLimitHierarchy? platformRiskLimits = null)
         {
             Orders = new InMemoryOrderRepository();
             Positions = new InMemoryPositionRepository();
@@ -361,8 +993,14 @@ public sealed class LiveTradingServiceTests
             Halts = new InMemoryTradingHaltState();
             Audit = new RecordingAudit();
             Adapter = new StubAdapter();
-            Options = new LiveTradingOptions { AllowedUserIds = [UserId] };
+            Options = new LiveTradingOptions
+            {
+                AllowedUserIds = [UserId],
+                PlatformRiskLimits = platformRiskLimits ?? new RiskLimitHierarchy(100m, 100m)
+            };
             Pairs = new StubPairs();
+            Eligibility = new MutableLiveEligibility();
+            Routes = new MutableLiveRoutes();
 
             var time = new FixedTime(Now);
 
@@ -387,6 +1025,11 @@ public sealed class LiveTradingServiceTests
             }
 
             Accounts = new StubAccounts(Account);
+            Funds = new StubPortfolio(AccountId);
+            OpenOrders = new StubOpenOrders();
+            Credentials = new StubExecutionAccounts(new SpotExecutionAccount(
+                AccountId, UserId, ExchangeKind.Kraken, stage,
+                new ExchangeCredential("test-key", "c2VjcmV0")));
 
             Service = new LiveTradingService(
                 new StubCandles(candles ??
@@ -396,6 +1039,7 @@ public sealed class LiveTradingServiceTests
                 ]),
                 Pairs,
                 Orders,
+                Positions,
                 Accounts,
                 Adapter,
                 new OrderReconciliationService(
@@ -403,12 +1047,18 @@ public sealed class LiveTradingServiceTests
                     Reconciliations,
                     new UnavailableStatusQuery(),
                     Audit,
-                    time),
+                    time,
+                    new PassThroughLiveFillTransaction()),
                 Halts,
                 Audit,
                 new RiskEngine(),
                 Options,
-                time);
+                time,
+                Eligibility,
+                Routes,
+                Funds,
+                OpenOrders,
+                Credentials);
         }
 
         public ExchangeAccount Account { get; }
@@ -428,12 +1078,89 @@ public sealed class LiveTradingServiceTests
         public StubAdapter Adapter { get; }
 
         public StubAccounts Accounts { get; }
+        public StubPortfolio Funds { get; }
+        public StubOpenOrders OpenOrders { get; }
+        public StubExecutionAccounts Credentials { get; }
 
         public LiveTradingOptions Options { get; }
 
         public StubPairs Pairs { get; }
 
         public LiveTradingService Service { get; }
+        public MutableLiveEligibility Eligibility { get; }
+        public MutableLiveRoutes Routes { get; }
+    }
+
+    private sealed class StubOpenOrders : ILiveAccountOpenOrderCheck
+    {
+        public SpotOpenOrderState State { get; set; } = SpotOpenOrderState.Empty;
+        public Func<int, SpotOpenOrderState>? OnRead { get; set; }
+        public int Reads { get; private set; }
+
+        public Task<SpotOpenOrderState> ReadAsync(
+            Guid userId, Guid accountId, ExchangeKind exchange, CancellationToken cancellationToken)
+        {
+            Assert.Equal(UserId, userId);
+            Assert.NotEqual(Guid.Empty, accountId);
+            Assert.Equal(ExchangeKind.Kraken, exchange);
+            Reads++;
+            return Task.FromResult(OnRead?.Invoke(Reads) ?? State);
+        }
+    }
+
+    private sealed class StubExecutionAccounts(SpotExecutionAccount account) : ISpotExecutionAccountSource
+    {
+        public Guid LastRequestedId { get; private set; }
+        public Guid? ReturnedOwner { get; set; }
+
+        public Task<SpotExecutionAccount?> ResolveAsync(Guid exchangeAccountId, CancellationToken cancellationToken)
+        {
+            LastRequestedId = exchangeAccountId;
+            return Task.FromResult<SpotExecutionAccount?>(ReturnedOwner is { } owner
+                ? new SpotExecutionAccount(account.AccountId, owner, account.Exchange, account.Stage, account.Credential)
+                : account);
+        }
+    }
+
+    private sealed class StubOpenOrderGateway : ISpotOpenOrderGateway
+    {
+        public ExchangeKind Exchange => ExchangeKind.Kraken;
+        public int Reads { get; private set; }
+
+        public Task<SpotOpenOrderState> ReadAsync(
+            ExchangeCredential credential, CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return Task.FromResult(SpotOpenOrderState.Empty);
+        }
+    }
+
+    private sealed class MutableLiveRoutes : ILiveExecutionRouteProvider
+    {
+        public bool Enabled { get; set; } = true;
+        public bool DisableAfterFirstRead { get; set; }
+        public int Reads { get; private set; }
+
+        public bool HasRouteFor(ExchangeKind exchange)
+        {
+            Reads++;
+            return Enabled && exchange == ExchangeKind.Kraken
+                && (!DisableAfterFirstRead || Reads == 1);
+        }
+    }
+
+    private sealed class MutableLiveEligibility : ILiveTradingEligibility
+    {
+        public bool Eligible { get; set; } = true;
+        public bool ExpireAfterFirstRead { get; set; }
+        public int Reads { get; private set; }
+
+        public Task<bool> IsEligibleAsync(Guid ownerId, DateTimeOffset asOfUtc,
+            CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return Task.FromResult(Eligible && (!ExpireAfterFirstRead || Reads == 1));
+        }
     }
 
     private sealed class StubAdapter : IExecutionAdapter
@@ -489,6 +1216,32 @@ public sealed class LiveTradingServiceTests
 
         public Task UpdateAsync(ExchangeAccount account, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+    }
+
+    private sealed class StubPortfolio(Guid accountId) : IPortfolioQueryService
+    {
+        private int _reads;
+        public DateTimeOffset ObservedAtUtc { get; set; } = Now;
+        public Action<int>? OnRead { get; set; }
+        public IReadOnlyCollection<ExchangeBalance> Balances { get; set; } =
+        [
+            new ExchangeBalance("USD", 1000m, 1000m, 0m, "USD"),
+            new ExchangeBalance("XBT", 0m, 0m, 0m, "XBT")
+        ];
+
+        public Task<PortfolioAccountReading?> ReadAccountAsync(
+            Guid userId, Guid requestedAccountId, CancellationToken cancellationToken = default)
+        {
+            OnRead?.Invoke(++_reads);
+            return Task.FromResult<PortfolioAccountReading?>(userId == UserId && requestedAccountId == accountId
+                ? new PortfolioAccountReading(accountId, "Kraken", ExchangeKind.Kraken,
+                    ObservedAtUtc, Balances, null)
+                : null);
+        }
+
+        public Task<IReadOnlyCollection<PortfolioAccountReading>> ReadAsync(
+            Guid userId, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("Live admission must read only the selected account.");
     }
 
     private sealed class UnavailableStatusQuery : Trading.Exchanges.Abstractions.Execution.IExchangeOrderStatusQuery

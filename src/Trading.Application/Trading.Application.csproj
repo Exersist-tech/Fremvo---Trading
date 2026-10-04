@@ -18,4 +18,8 @@
     <ProjectReference Include="..\Trading.Strategies\Trading.Strategies.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Trading.ArchitectureTests" />
+  </ItemGroup>
+
 </Project>

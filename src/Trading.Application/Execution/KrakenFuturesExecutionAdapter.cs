@@ -56,6 +56,12 @@ public sealed class KrakenFuturesExecutionAdapter : IFuturesExecutionAdapter
             return Refuse(command, now, "The futures demo account and execution route must both be Kraken.");
         }
 
+        if (!command.ReduceOnly)
+        {
+            return Refuse(command, now,
+                "Futures demo exposure increases are disabled until current account, position and margin evidence is risk-checked.");
+        }
+
         var request = new FuturesOrderRequest(
             command.Symbol,
             command.Direction == TradeDirection.Buy ? FuturesOrderSide.Buy : FuturesOrderSide.Sell,

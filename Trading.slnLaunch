@@ -1,25 +1,5 @@
 [
   {
-    "Name": "Trading.Web",
-    "Projects": [
-      {
-        "Path": "src\\Trading.Web\\Trading.Web.csproj",
-        "Action": "StartWithoutDebugging",
-        "DebugTarget": "https"
-      }
-    ]
-  },
-  {
-    "Name": "Trading.Web (debug)",
-    "Projects": [
-      {
-        "Path": "src\\Trading.Web\\Trading.Web.csproj",
-        "Action": "Start",
-        "DebugTarget": "https"
-      }
-    ]
-  },
-  {
     "Name": "Paper training",
     "Projects": [
       {
@@ -36,6 +16,16 @@
         "Path": "src\\Trading.Workers.Experiments\\Trading.Workers.Experiments.csproj",
         "Action": "Start",
         "DebugTarget": "Trading.Workers.Experiments"
+      }
+    ]
+  },
+  {
+    "Name": "Trading.Web only",
+    "Projects": [
+      {
+        "Path": "src\\Trading.Web\\Trading.Web.csproj",
+        "Action": "Start",
+        "DebugTarget": "https"
       }
     ]
   }

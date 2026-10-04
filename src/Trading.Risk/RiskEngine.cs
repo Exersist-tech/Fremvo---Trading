@@ -214,7 +214,8 @@ public sealed class RiskEngine
         var effectiveCloseOnlyMode = closeOnlyMode || (tradingMode?.CloseOnlyMode ?? false);
         var effectiveReduceOnlyMode = reduceOnlyMode || (tradingMode?.ReduceOnlyMode ?? false);
 
-        if (effectiveEmergencyStop || effectiveMarketHalt || effectiveAccountHalted || effectiveStrategyHalted)
+        if (exposureIsIncreasing
+            && (effectiveEmergencyStop || effectiveMarketHalt || effectiveAccountHalted || effectiveStrategyHalted))
         {
             active.Add(new RiskLimit(RiskLimitType.MaxExposure, 0m, "Trading is halted by policy."));
             return new RiskEvaluationResult(false, "Trading is currently halted.", active);
@@ -249,6 +250,9 @@ public sealed class RiskEngine
             active.Add(new RiskLimit(RiskLimitType.MaxConcurrentOrders, 0m, "Duplicate or non-idempotent order request detected."));
             return new RiskEvaluationResult(false, "Duplicate or conflicting order state detected.", active);
         }
+
+        if (!exposureIsIncreasing)
+            return new RiskEvaluationResult(true, "Position-reducing safety exit passed risk and idempotency gates.", active);
 
         if (effectiveCloseOnlyMode && proposedExposure > 0m)
         {

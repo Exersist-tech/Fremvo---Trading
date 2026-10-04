@@ -392,6 +392,47 @@ public sealed class PaperTradingServiceTests
     }
 
     [Fact]
+    public async Task SpotPaperSellCannotOpenAShortPosition()
+    {
+        var harness = FreshMarket();
+
+        var result = await harness.Service.SubmitAsync(UserId, Symbol, OrderSide.Sell, 1m, null);
+
+        Assert.Equal(PaperTradeOutcome.Rejected, result.Outcome);
+        Assert.Contains("cannot open a short", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await harness.Orders.ListAsync(UserId, CancellationToken.None));
+        Assert.Empty(await harness.Positions.ListOpenAsync(UserId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PaperEntryStoresProtectiveExitsOnlyWhenTheyMatchTheFillPrice()
+    {
+        var harness = FreshMarket();
+
+        var filled = await harness.Service.SubmitAsync(
+            UserId,
+            Symbol,
+            OrderSide.Buy,
+            1m,
+            null,
+            stopLossPrice: 29_000m,
+            takeProfitPrice: 31_000m);
+        var rejected = await harness.Service.SubmitAsync(
+            OtherUserId,
+            Symbol,
+            OrderSide.Buy,
+            1m,
+            null,
+            stopLossPrice: 31_000m,
+            takeProfitPrice: 32_000m);
+
+        Assert.True(filled.Succeeded);
+        Assert.Equal(29_000m, filled.Position!.StopLossPrice);
+        Assert.Equal(31_000m, filled.Position.TakeProfitPrice);
+        Assert.Equal(PaperTradeOutcome.Rejected, rejected.Outcome);
+    }
+
+    [Fact]
     public async Task TwoOrdersInTheSameMillisecondAreBothAccepted()
     {
         // The time provider here is fixed, which is exactly the production case

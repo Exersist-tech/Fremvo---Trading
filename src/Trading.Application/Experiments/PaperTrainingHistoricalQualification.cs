@@ -1,6 +1,5 @@
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
+using Trading.Backtesting;
 using Trading.Domain.Market;
 using Trading.MarketData;
 using Trading.MarketData.Experiments;
@@ -15,9 +14,8 @@ public sealed record PaperTrainingQualificationRequest(
     PaperTrainingQualificationGate Gate);
 
 /// <summary>
-/// Replays the same compiled experiment evaluators used by forward paper training over immutable
-/// closed candles. Each accepted observation is modeled as one next-candle round trip, including
-/// adverse slippage and taker fees, so qualification never claims exchange execution precision.
+/// Provisional single-interval research with next-candle modeled round trips.
+/// It cannot qualify the active multi-timeframe scanner/worker rules for live trading.
 /// </summary>
 public sealed class PaperTrainingHistoricalQualification
 {
@@ -83,9 +81,7 @@ public sealed class PaperTrainingHistoricalQualification
         return (await _candles.FetchAsync(symbol, request.Interval, request.FromUtc, cancellationToken)
                 .ConfigureAwait(false))
             .Where(candle => candle.OpenTimeUtc >= request.FromUtc
-                && candle.CloseTimeUtc <= request.ToUtc
-                && candle.CanBeUsedForClosedCandleSignal)
-            .OrderBy(candle => candle.OpenTimeUtc)
+                && candle.OpenTimeUtc < request.ToUtc)
             .ToArray();
     }
 
@@ -95,25 +91,32 @@ public sealed class PaperTrainingHistoricalQualification
         Candle[] candles,
         CancellationToken cancellationToken)
     {
-        var fingerprint = Fingerprint(candles);
-        if (candles.Length < 30)
-            return Rejected(slot, fingerprint, "At least 30 safe closed candles are required.");
+        var fingerprint = HistoricalCandleFingerprint.Compute(candles);
         var intervalDuration = TimeSpan.FromMinutes((int)request.Interval);
         if (candles.Any(candle =>
                 !candle.Symbol.Equals(slot.Symbol, StringComparison.OrdinalIgnoreCase)
                 || candle.Interval != request.Interval
-                || candle.CloseTimeUtc - candle.OpenTimeUtc != intervalDuration)
+                || !candle.CanBeUsedForClosedCandleSignal
+                || candle.CloseTimeUtc > request.ToUtc
+                || candle.CloseTimeUtc - candle.OpenTimeUtc != intervalDuration
+                || candle.OpenTimeUtc.Ticks % intervalDuration.Ticks != 0
+                || candle.Open <= 0m || candle.Close <= 0m || candle.Low <= 0m
+                || candle.High < candle.Open || candle.High < candle.Close
+                || candle.Low > candle.Open || candle.Low > candle.Close)
             || candles.Select(candle => candle.OpenTimeUtc).Distinct().Count() != candles.Length
             || candles.Zip(candles.Skip(1), (left, right) => left.CloseTimeUtc == right.OpenTimeUtc).Any(consecutive => !consecutive))
             return Rejected(
                 slot,
                 fingerprint,
-                "Historical candles contain a wrong symbol, interval, duration, gap, duplicate, or out-of-order value.");
+                "Historical candles contain a wrong symbol, interval, duration, gap, duplicate, out-of-order, incomplete, or unsafe value.");
+        if (candles.Length < 30)
+            return Rejected(slot, fingerprint, "At least 30 safe closed candles are required.");
 
         var cash = slot.StartingCash;
         var peak = cash;
         var maximumDrawdown = 0m;
         var completedTrades = 0;
+        string? blockedReason = null;
         for (var index = 2; index < candles.Length - 2; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -122,7 +125,11 @@ public sealed class PaperTrainingHistoricalQualification
                 slot.Symbol, request.Interval, candles[index].CloseTimeUtc, prefix, "kraken-historical-qualification");
             var observation = _strategies.EvaluateHistorical(slot.StrategyId, series, "{}");
             if (observation.Outcome != ExperimentAnalysisOutcome.Analyzed)
+            {
+                if (observation.Outcome == ExperimentAnalysisOutcome.Blocked)
+                    blockedReason ??= observation.Reason;
                 continue;
+            }
 
             // The completed signal candle cannot be filled at its already-observed close. Model
             // entry and exit at later candle opens so no execution price was available to the
@@ -141,12 +148,16 @@ public sealed class PaperTrainingHistoricalQualification
             index += 2;
         }
 
+        if (completedTrades == 0 && blockedReason is not null)
+            return Rejected(slot, fingerprint,
+                $"The active multi-timeframe strategy cannot be qualified by single-interval replay: {blockedReason}");
+
         var netReturn = ((cash - slot.StartingCash) / slot.StartingCash) * 100m;
-        var accepted = netReturn >= request.Gate.MinimumNetReturnPercent
+        var metNumericGates = netReturn >= request.Gate.MinimumNetReturnPercent
             && completedTrades >= request.Gate.MinimumCompletedTrades
             && maximumDrawdown <= request.Gate.MaximumDrawdownPercent;
-        var reason = accepted
-            ? "Historical qualification passed all configured gates."
+        var reason = metNumericGates
+            ? "Provisional single-interval simulation met numeric gates, but cannot qualify the active multi-timeframe strategy without point-in-time universe, verified costs, and faithful worker replay."
             : string.Create(CultureInfo.InvariantCulture,
                 $"Historical qualification failed: return {netReturn:F4}% (minimum {request.Gate.MinimumNetReturnPercent:F4}%), " +
                 $"completed trades {completedTrades} (minimum {request.Gate.MinimumCompletedTrades}), " +
@@ -154,7 +165,7 @@ public sealed class PaperTrainingHistoricalQualification
         return new(
             slot.Slot,
             slot.Symbol,
-            accepted,
+            false,
             netReturn,
             completedTrades,
             maximumDrawdown,
@@ -170,12 +181,4 @@ public sealed class PaperTrainingHistoricalQualification
         string reason) =>
         new(slot.Slot, slot.Symbol, false, 0m, 0, 0m, fingerprint, reason, slot.StrategyId,
             Interval: slot.Interval);
-
-    private static string Fingerprint(IReadOnlyList<Candle> candles)
-    {
-        var canonical = string.Join('\n', candles.Select(candle => string.Create(
-            CultureInfo.InvariantCulture,
-            $"{candle.Symbol}|{(int)candle.Interval}|{candle.OpenTimeUtc:O}|{candle.CloseTimeUtc:O}|{candle.Open}|{candle.High}|{candle.Low}|{candle.Close}|{candle.Volume}")));
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
-    }
 }

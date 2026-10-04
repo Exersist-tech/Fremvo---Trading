@@ -144,4 +144,6 @@ public interface IRiskEvaluationRepository : IPipelineRecordRepository<RiskEvalu
 
 public interface IExecutionCommandRepository : IPipelineRecordRepository<ExecutionCommand>;
 
+public interface IPaperExecutionResultRepository : IPipelineRecordRepository<PaperExecutionEvidence>;
+
 public interface IPortfolioUpdateRepository : IPipelineRecordRepository<PortfolioUpdate>;

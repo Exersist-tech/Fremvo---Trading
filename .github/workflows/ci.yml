@@ -31,3 +31,56 @@ jobs:
 
       - name: Run tests
         run: dotnet test Trading.sln --configuration Release --no-build --logger "trx;LogFileName=test-results.trx"
+
+      - name: Test trading workspace interactions
+        run: node --test tests/*.test.mjs
+
+      - name: Publish web and continuous paper worker hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/trading-release/site"
+          for job in market-data experiments; do
+            mkdir -p "$site/App_Data/jobs/continuous/$job"
+          done
+          dotnet publish src/Trading.Web/Trading.Web.csproj -c Release --no-restore -o "$site"
+          dotnet publish src/Trading.Workers.MarketData/Trading.Workers.MarketData.csproj -c Release --no-restore -o "$site/App_Data/jobs/continuous/market-data"
+          dotnet publish src/Trading.Workers.Experiments/Trading.Workers.Experiments.csproj -c Release --no-restore -o "$site/App_Data/jobs/continuous/experiments"
+          for job in market-data experiments; do
+            cp "deploy/webjobs/$job/run.sh" "$site/App_Data/jobs/continuous/$job/run.sh"
+            cp deploy/webjobs/settings.job "$site/App_Data/jobs/continuous/$job/settings.job"
+            chmod +x "$site/App_Data/jobs/continuous/$job/run.sh"
+            sh -n "$site/App_Data/jobs/continuous/$job/run.sh"
+            test -x "$site/App_Data/jobs/continuous/$job/run.sh"
+            test -f "$site/App_Data/jobs/continuous/$job/settings.job"
+          done
+          test -f "$site/Trading.Web.dll"
+          test -f "$site/App_Data/jobs/continuous/market-data/Trading.Workers.MarketData.dll"
+          test -f "$site/App_Data/jobs/continuous/experiments/Trading.Workers.Experiments.dll"
+          set +e
+          missing_db_output=$(env DOTNET_ENVIRONMENT=Production MarketDataStreaming__Enabled=true ConnectionStrings__TradingDb= \
+            dotnet "$site/App_Data/jobs/continuous/market-data/Trading.Workers.MarketData.dll" 2>&1)
+          missing_db_status=$?
+          set -e
+          if [ "$missing_db_status" -eq 0 ] || ! grep -q 'requires ConnectionStrings:TradingDb' <<< "$missing_db_output"; then
+            echo 'Enabled scanner did not fail closed without durable SQL.' >&2
+            exit 1
+          fi
+          rm "$site/appsettings.Development.json"
+          rm "$site/App_Data/jobs/continuous/market-data/appsettings.Development.json"
+          rm "$site/App_Data/jobs/continuous/experiments/appsettings.Development.json"
+          (cd "$site" && zip -qr "$RUNNER_TEMP/trading-release/trading-site.zip" .)
+          unzip -Z -1 "$RUNNER_TEMP/trading-release/trading-site.zip" > "$RUNNER_TEMP/trading-release/entries.txt"
+          grep -Fxq 'App_Data/jobs/continuous/market-data/run.sh' "$RUNNER_TEMP/trading-release/entries.txt"
+          grep -Fxq 'App_Data/jobs/continuous/experiments/run.sh' "$RUNNER_TEMP/trading-release/entries.txt"
+          if grep -q 'appsettings.Development.json' "$RUNNER_TEMP/trading-release/entries.txt"; then
+            echo 'A development configuration file is present in the production artifact.' >&2
+            exit 1
+          fi
+
+      - name: Save deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-site-with-paper-workers
+          path: ${{ runner.temp }}/trading-release/trading-site.zip
+          if-no-files-found: error

@@ -37,6 +37,16 @@ public sealed class FuturesExecutionCommand
             throw new ArgumentException("Symbol is required.", nameof(symbol));
         }
 
+        if (!Enum.IsDefined(direction))
+            throw new ArgumentOutOfRangeException(nameof(direction), "Trade direction is invalid.");
+
+        if (!Enum.IsDefined(positionDirection))
+            throw new ArgumentOutOfRangeException(nameof(positionDirection), "Futures position direction is invalid.");
+
+        if (reduceOnly && (positionDirection == FuturesPositionDirection.LongPosition && direction != TradeDirection.Sell
+            || positionDirection == FuturesPositionDirection.ShortPosition && direction != TradeDirection.Buy))
+            throw new ArgumentException("A reduce-only futures order must oppose its position direction.", nameof(direction));
+
         if (quantity <= 0m)
         {
             throw new ArgumentOutOfRangeException(nameof(quantity), "Quantity must be positive.");
@@ -51,6 +61,11 @@ public sealed class FuturesExecutionCommand
         {
             throw new ArgumentException("Client order id is required.", nameof(clientOrderId));
         }
+
+        if (createdAtUtc.Offset != TimeSpan.Zero)
+            throw new ArgumentException("Futures execution time must be UTC.", nameof(createdAtUtc));
+        if (createdAtUtc > DateTimeOffset.UtcNow)
+            throw new ArgumentOutOfRangeException(nameof(createdAtUtc), "Futures execution time cannot be in the future.");
 
         Id = id;
         FuturesDemoAccountId = futuresDemoAccountId;

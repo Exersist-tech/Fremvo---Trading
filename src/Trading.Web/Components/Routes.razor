@@ -1,0 +1,22 @@
+<Router AppAssembly="@typeof(App).Assembly">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)">
+            <NotAuthorized>
+                <main class="page">
+                    <h1>Sign in required</h1>
+                    <p class="lede">Sign in to open the private trading workspace.</p>
+                    <a href="/login">Sign in</a>
+                </main>
+            </NotAuthorized>
+        </AuthorizeRouteView>
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="@typeof(MainLayout)">
+            <main class="page">
+                <h1>Page not found</h1>
+                <a href="/workspace/overview">Open workspace overview</a>
+            </main>
+        </LayoutView>
+    </NotFound>
+</Router>

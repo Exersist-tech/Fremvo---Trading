@@ -93,6 +93,18 @@ public sealed class TradePipelineHaltTests
     }
 
     [Fact]
+    public async Task EmergencyStopStillPermitsAnExactPositionReducingExit()
+    {
+        var halts = new InMemoryTradingHaltState();
+        halts.EngageEmergencyStop();
+
+        var result = await RunAsync(Build(halts), new SellStrategy(), positionQuantity: 5m);
+
+        Assert.True(result.Executed);
+        Assert.Equal(PipelineStage.AuditEvent, result.ReachedStage);
+    }
+
+    [Fact]
     public async Task ReleasingTheEmergencyStopAllowsTradingAgain()
     {
         var halts = new InMemoryTradingHaltState();

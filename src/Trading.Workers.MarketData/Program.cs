@@ -7,8 +7,26 @@ using Trading.Infrastructure.Data.Experiments;
 using Trading.Domain.Experiments;
 using Trading.MarketData;
 using Trading.Application.Experiments;
+using Trading.Application.Entitlements;
+using Trading.Infrastructure.Data.Entitlements;
 
 var builder = Host.CreateApplicationBuilder(args);
+var telemetryConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+if (!string.IsNullOrWhiteSpace(telemetryConnection))
+{
+    builder.Services.AddApplicationInsightsTelemetryWorkerService(options =>
+    {
+        options.ConnectionString = telemetryConnection;
+        options.EnableAdaptiveSampling = false;
+    });
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(PaperHostHeartbeatWorker).FullName!, LogLevel.Information);
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(Worker).FullName!, LogLevel.Information);
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(ContinuousPaperScannerWorker).FullName!, LogLevel.Information);
+}
+builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(45));
 builder.Services.Configure<MarketDataStreamingOptions>(
     builder.Configuration.GetSection(MarketDataStreamingOptions.SectionName));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -38,9 +56,22 @@ builder.Services.AddScoped<CandleIngestionProcessor>(serviceProvider =>
         options.Intervals.Contains(Trading.Domain.Market.CandleInterval.OneMinute));
 });
 var connectionString = builder.Configuration.GetConnectionString("TradingDb");
-if (!string.IsNullOrWhiteSpace(connectionString))
+var streamingEnabled = builder.Configuration.GetValue<bool>("MarketDataStreaming:Enabled");
+if (streamingEnabled)
 {
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException(
+            "MarketDataStreaming:Enabled requires ConnectionStrings:TradingDb; no scanner or feed was started.");
+    }
+
     builder.Services.AddDbContext<TradingDbContext>(options => options.UseSqlServer(connectionString));
+    builder.Services.AddScoped<IEntitlementRepository, EfEntitlementRepository>();
+    builder.Services.AddScoped<IPaperWorkerAdmissionLimit>(provider =>
+        new EntitlementPaperWorkerAdmissionLimit(
+            provider.GetRequiredService<IEntitlementRepository>(),
+            builder.Configuration.GetValue<bool>("Entitlements:PaperWorkerLimitsEnabled")));
+    builder.Services.AddHostedService<PaperHostSchemaReadiness>();
     builder.Services.AddScoped<EfPaperTrainingActivationRepository>();
     builder.Services.AddScoped<IPaperTrainingActivationRepository>(
         serviceProvider => serviceProvider.GetRequiredService<EfPaperTrainingActivationRepository>());
@@ -49,6 +80,9 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     builder.Services.AddScoped<IPaperTrainingSubscriptionSource>(
         serviceProvider => serviceProvider.GetRequiredService<EfPaperTrainingActivationRepository>());
     builder.Services.AddScoped<EfExperimentWorkerRepository>();
+    builder.Services.AddScoped<EfExperimentPaperExecutionLedger>();
+    builder.Services.AddScoped<IExperimentPaperExecutionLedger>(
+        serviceProvider => serviceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>());
     builder.Services.AddScoped<IExperimentWorkerRepository>(
         serviceProvider => serviceProvider.GetRequiredService<EfExperimentWorkerRepository>());
     builder.Services.AddSingleton(PaperTrainingUniversePolicy.PlatformDefault);
@@ -56,7 +90,9 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(
         _ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
     builder.Services.AddScoped<ContinuousPaperOpportunityScanner>();
+    builder.Services.AddScoped<IPaperScanEvidenceStager, DurablePaperScanEvidenceStager>();
     builder.Services.AddHostedService<ContinuousPaperScannerWorker>();
+    builder.Services.AddHostedService<PaperHostHeartbeatWorker>();
 }
 else
 {

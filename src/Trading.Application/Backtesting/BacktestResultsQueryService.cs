@@ -78,7 +78,13 @@ public sealed class BacktestResultsQueryService
             events,
             result.Events.Count > events.Length,
             snapshots,
-            result.EquitySnapshots.Count > snapshots.Length);
+            result.EquitySnapshots.Count > snapshots.Length,
+            result.FillTiming switch
+            {
+                BacktestFillTiming.NextCandleOpen => "Next candle open (modeled)",
+                BacktestFillTiming.SignalCloseLegacy => "Signal close (legacy)",
+                _ => "Not recorded"
+            });
     }
 
     private static BacktestEventReport ToEvent(BacktestEvent eventItem) =>
@@ -281,7 +287,8 @@ public sealed record BacktestResultReport(
     IReadOnlyList<BacktestEventReport> Events,
     bool HasAdditionalEvents,
     IReadOnlyList<BacktestEquitySnapshotReport> EquitySnapshots,
-    bool HasAdditionalEquitySnapshots);
+    bool HasAdditionalEquitySnapshots,
+    string FillTiming);
 
 public sealed record BacktestEventReport(
     string ObservedAtUtc,

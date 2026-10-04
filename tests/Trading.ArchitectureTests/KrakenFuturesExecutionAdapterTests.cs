@@ -34,13 +34,15 @@ public sealed class KrakenFuturesExecutionAdapterTests
     }
 
     [Fact]
-    public async Task ReduceOnlyIsMappedExactlyWithoutInference()
+    public async Task IncreasingDemoExposureWithoutRiskEvidenceNeverContactsTheVenue()
     {
         var gateway = new StubGateway(FuturesOrderPlacement.Create(FuturesPlacementOutcome.Rejected, "future-001"));
 
-        await Adapter(gateway, DemoAccount()).ExecuteAsync(Command(reduceOnly: false));
+        var result = await Adapter(gateway, DemoAccount()).ExecuteAsync(Command(reduceOnly: false));
 
-        Assert.False(gateway.LastRequest!.ReduceOnly);
+        Assert.Equal(ExecutionOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, gateway.PlaceCalls);
+        Assert.Null(gateway.LastRequest);
     }
 
     [Theory]
@@ -101,6 +103,34 @@ public sealed class KrakenFuturesExecutionAdapterTests
         var command = Command();
 
         Assert.True(command.ReduceOnly);
+    }
+
+    [Fact]
+    public void InvalidOrExposureIncreasingReduceOnlyCommandsAreRefusedBeforeTheAdapter()
+    {
+        FuturesExecutionCommand Create(TradeDirection direction, DomainPositionDirection positionDirection,
+            DateTimeOffset? createdAtUtc = null, bool reduceOnly = true) =>
+            new(Guid.NewGuid(), AccountId, "PI_XBTUSD", direction, positionDirection,
+                0.25m, 30_000.5m, createdAtUtc ?? Now, "future-001", reduceOnly);
+
+        Assert.Throws<ArgumentException>(() =>
+            Create(TradeDirection.Buy, DomainPositionDirection.LongPosition));
+        Assert.Throws<ArgumentException>(() =>
+            Create(TradeDirection.Sell, DomainPositionDirection.ShortPosition));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Create((TradeDirection)99, DomainPositionDirection.LongPosition));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Create(TradeDirection.Sell, (DomainPositionDirection)99));
+        Assert.Throws<ArgumentException>(() =>
+            Create(TradeDirection.Sell, DomainPositionDirection.LongPosition,
+                Now.ToOffset(TimeSpan.FromHours(1))));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            Create(TradeDirection.Sell, DomainPositionDirection.LongPosition,
+                DateTimeOffset.UtcNow.AddDays(1)));
+        Assert.Equal(TradeDirection.Buy,
+            Create(TradeDirection.Buy, DomainPositionDirection.ShortPosition).Direction);
+        Assert.False(Create(TradeDirection.Buy, DomainPositionDirection.LongPosition,
+            reduceOnly: false).ReduceOnly);
     }
 
     [Fact]

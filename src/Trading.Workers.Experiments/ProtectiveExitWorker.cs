@@ -52,23 +52,26 @@ public sealed class ProtectiveExitWorker : BackgroundService
     private static readonly Action<ILogger, int, Exception?> s_logTick =
         LoggerMessage.Define<int>(LogLevel.Information, new EventId(12, "ExperimentProtectiveExitTickCompleted"),
             "Experiment protective-exit tick completed. Submitted exits: {Submitted}.");
+    private static readonly Action<ILogger, Guid, int, Exception?> s_logBlocked =
+        LoggerMessage.Define<Guid, int>(LogLevel.Warning, new EventId(13, "ExperimentProtectiveExitBlocked"),
+            "Paper protective-exit evaluation returned {Blocked} blocked results for owner {OwnerId}; review the open positions and data feed.");
 
     private readonly ILogger<ProtectiveExitWorker> _logger;
     private readonly IExperimentProtectiveExitOwnerEvaluator _orchestrator;
-    private readonly IPaperTrainingActivationSource _activations;
+    private readonly IPaperTrainingProtectionOwnerSource _protections;
     private readonly ExperimentProtectiveExitWorkerOptions _options;
     private readonly TimeProvider _timeProvider;
 
     public ProtectiveExitWorker(
         ILogger<ProtectiveExitWorker> logger,
         IExperimentProtectiveExitOwnerEvaluator orchestrator,
-        IPaperTrainingActivationSource activations,
+        IPaperTrainingProtectionOwnerSource protections,
         IOptions<ExperimentProtectiveExitWorkerOptions> options,
         TimeProvider timeProvider)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
-        _activations = activations ?? throw new ArgumentNullException(nameof(activations));
+        _protections = protections ?? throw new ArgumentNullException(nameof(protections));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
@@ -96,8 +99,8 @@ public sealed class ProtectiveExitWorker : BackgroundService
 
         cancellationToken.ThrowIfCancellationRequested();
         var submitted = 0;
-        var activeOwners = await _activations.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var owner in activeOwners.Distinct())
+        var protectedOwners = await _protections.GetProtectedOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var owner in protectedOwners.Distinct())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (owner == Guid.Empty)
@@ -107,6 +110,9 @@ public sealed class ProtectiveExitWorker : BackgroundService
             {
                 var results = await _orchestrator.EvaluateOwnerAsync(owner, cancellationToken).ConfigureAwait(false);
                 submitted += results.Count(result => result.Submitted);
+                var blocked = results.Count(result => !result.Submitted);
+                if (blocked > 0)
+                    s_logBlocked(_logger, owner, blocked, null);
             }
             catch (OperationCanceledException)
             {

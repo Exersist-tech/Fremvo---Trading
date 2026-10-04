@@ -33,7 +33,8 @@ public sealed class BacktestResult
         int tradeCount,
         string? datasetVersionIdentity,
         IReadOnlyList<BacktestEvent> events,
-        IReadOnlyList<BacktestEquitySnapshot> equitySnapshots)
+        IReadOnlyList<BacktestEquitySnapshot> equitySnapshots,
+        BacktestFillTiming? fillTiming = null)
     {
         if (string.IsNullOrWhiteSpace(strategyId))
         {
@@ -55,6 +56,11 @@ public sealed class BacktestResult
             throw new ArgumentOutOfRangeException(nameof(initialCapital), "Initial capital must be positive.");
         }
 
+        if (fillTiming.HasValue && !Enum.IsDefined(fillTiming.Value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(fillTiming), "Backtest fill timing is not supported.");
+        }
+
         StrategyId = strategyId.Trim();
         Symbol = symbol.Trim();
         FromUtc = fromUtc;
@@ -66,6 +72,7 @@ public sealed class BacktestResult
         TotalSlippage = totalSlippage;
         TradeCount = tradeCount;
         DatasetVersionIdentity = datasetVersionIdentity;
+        FillTiming = fillTiming;
         Events = new ReadOnlyCollection<BacktestEvent>((events ?? throw new ArgumentNullException(nameof(events))).ToArray());
         EquitySnapshots = new ReadOnlyCollection<BacktestEquitySnapshot>((equitySnapshots ?? throw new ArgumentNullException(nameof(equitySnapshots))).ToArray());
     }
@@ -91,6 +98,9 @@ public sealed class BacktestResult
     public int TradeCount { get; }
 
     public string? DatasetVersionIdentity { get; }
+
+    /// <summary>Null when an older or externally supplied result did not record its timing assumption.</summary>
+    public BacktestFillTiming? FillTiming { get; }
 
     public IReadOnlyList<BacktestEvent> Events { get; }
 

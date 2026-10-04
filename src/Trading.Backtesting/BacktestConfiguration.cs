@@ -12,7 +12,8 @@ public sealed class BacktestConfiguration
         FeeModel feeModel,
         SlippageModel slippageModel,
         ExchangeFilter exchangeFilter,
-        string? datasetName = null)
+        string? datasetName = null,
+        BacktestFillTiming fillTiming = BacktestFillTiming.NextCandleOpen)
     {
         if (string.IsNullOrWhiteSpace(strategyId))
         {
@@ -39,6 +40,11 @@ public sealed class BacktestConfiguration
             throw new ArgumentOutOfRangeException(nameof(initialCapital), "Initial capital must be positive.");
         }
 
+        if (!Enum.IsDefined(fillTiming))
+        {
+            throw new ArgumentOutOfRangeException(nameof(fillTiming), "Backtest fill timing is not supported.");
+        }
+
         StrategyId = strategyId.Trim();
         Symbol = symbol.Trim();
         FromUtc = fromUtc;
@@ -49,6 +55,7 @@ public sealed class BacktestConfiguration
         SlippageModel = slippageModel ?? throw new ArgumentNullException(nameof(slippageModel));
         ExchangeFilter = exchangeFilter ?? throw new ArgumentNullException(nameof(exchangeFilter));
         DatasetName = datasetName?.Trim();
+        FillTiming = fillTiming;
     }
 
     [Obsolete("Use the constructor with explicit fee, slippage, and exchange-filter models.")]
@@ -68,7 +75,8 @@ public sealed class BacktestConfiguration
             new SlippageModel(0m, slippageRate),
             // Compatibility only: new backtests must explicitly name venue rules.
             new ExchangeFilter(0m, 0m, 0.0000000000000000000000000001m, 0.0000000000000000000000000001m),
-            datasetName)
+            datasetName,
+            BacktestFillTiming.SignalCloseLegacy)
     {
     }
 
@@ -90,6 +98,9 @@ public sealed class BacktestConfiguration
 
     public ExchangeFilter ExchangeFilter { get; }
 
+    /// <summary>Signal-close fills are retained only for comparison with historical backtest results.</summary>
+    public BacktestFillTiming FillTiming { get; }
+
     [Obsolete("Use FeeModel instead.")]
     public decimal CommissionRate => FeeModel.TakerFeeRate;
 
@@ -97,4 +108,10 @@ public sealed class BacktestConfiguration
     public decimal SlippageRate => SlippageModel.PercentSlippage;
 
     public string? DatasetName { get; }
+}
+
+public enum BacktestFillTiming
+{
+    SignalCloseLegacy,
+    NextCandleOpen
 }

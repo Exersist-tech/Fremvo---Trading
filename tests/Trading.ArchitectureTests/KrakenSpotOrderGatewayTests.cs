@@ -35,6 +35,40 @@ public sealed class KrakenSpotOrderGatewayTests
     private static SpotOrderRequest LimitBuy(bool validateOnly = true) =>
         new("XBTUSD", SpotOrderSide.Buy, SpotOrderType.Limit, 0.25m, 30000.5m, ClientOrderId, validateOnly);
 
+    [Theory]
+    [InlineData("""{"error":[],"result":{"open":{}}}""", SpotOpenOrderState.Empty)]
+    [InlineData("""{"error":[],"result":{"open":{"EXTERNAL-ORDER":{"status":"open"}}}}""", SpotOpenOrderState.Present)]
+    [InlineData("""{"error":["EGeneral:Permission denied"],"result":{"open":{}}}""", SpotOpenOrderState.Unavailable)]
+    [InlineData("""{"error":[],"result":{}}""", SpotOpenOrderState.Unavailable)]
+    [InlineData("""{"error":[],"result":{"open":[]}}""", SpotOpenOrderState.Unavailable)]
+    [InlineData("""{"result":{"open":{}}}""", SpotOpenOrderState.Unavailable)]
+    [InlineData("""{"error":[123],"result":{"open":{}}}""", SpotOpenOrderState.Unavailable)]
+    [InlineData("not-json", SpotOpenOrderState.Unavailable)]
+    public async Task OpenOrdersOnlyReportsEmptyForAnExplicitEmptyVenueBook(
+        string payload, SpotOpenOrderState expected)
+    {
+        using var handler = new StubHandler(payload);
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.com") };
+        var gateway = new KrakenSpotOrderGateway(client, new FixedClock(Now));
+
+        var result = await gateway.ReadAsync(Credential());
+
+        Assert.Equal(expected, result);
+        Assert.Equal("/0/private/OpenOrders", handler.LastPath);
+        Assert.StartsWith("nonce=", handler.LastBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("AddOrder", handler.LastBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OpenOrdersTransportFailureCannotBeInterpretedAsAnEmptyBook()
+    {
+        using var handler = new OfflineHandler();
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.com") };
+        var gateway = new KrakenSpotOrderGateway(client, new FixedClock(Now));
+
+        Assert.Equal(SpotOpenOrderState.Unavailable, await gateway.ReadAsync(Credential()));
+    }
+
     // ---- Request shape -------------------------------------------------
 
     [Fact]
@@ -464,6 +498,42 @@ public sealed class KrakenSpotOrderGatewayTests
         Assert.Empty(result.Fills);
     }
 
+    [Fact]
+    public async Task FillHistoryMustFinishAllCursorPagesBeforeItCanBeCalledComplete()
+    {
+        using var handler = new PagedHandler(
+            """
+            {"error":[],"result":{"trades":{"trade-1":{"ordertxid":"order-1","pair":"XXBTZUSD","time":1688667012.2678,"type":"buy","price":"100","fee":"0","vol":"1"}},"cursor":{"next":"opaque+cursor"}}}
+            """,
+            """
+            {"error":[],"result":{"trades":{"trade-2":{"ordertxid":"order-1","pair":"XXBTZUSD","time":1688667013.2678,"type":"buy","price":"110","fee":"0","vol":"1"}}}}
+            """);
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.test") };
+
+        var result = await new KrakenSpotOrderGateway(client, new FixedClock(Now))
+            .ListFillsAsync(Credential(), Now.AddDays(-1));
+
+        Assert.Equal(SpotFillQueryOutcome.Answered, result.Outcome);
+        Assert.Equal(2, result.Fills.Count);
+        Assert.Contains("with_cursor=true", handler.RequestBodies[0], StringComparison.Ordinal);
+        Assert.Contains("cursor=opaque%2Bcursor", handler.RequestBodies[1], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"error":[],"result":{"trades":{"bad":{"ordertxid":"order-1","pair":"XXBTZUSD","time":1688667012,"type":"buy","price":"100","vol":"1"}}}}""")]
+    [InlineData("""{"error":[],"result":{"trades":{},"cursor":{"next":123}}}""")]
+    public async Task MalformedTradeOrCursorCannotImplyNoMissingFills(string body)
+    {
+        using var handler = new StubHandler(body);
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.test") };
+
+        var result = await new KrakenSpotOrderGateway(client, new FixedClock(Now))
+            .ListFillsAsync(Credential(), Now.AddDays(-1));
+
+        Assert.Equal(SpotFillQueryOutcome.Unavailable, result.Outcome);
+        Assert.Empty(result.Fills);
+    }
+
     // ---- Safety properties -----------------------------------------------
 
     [Fact]
@@ -515,11 +585,13 @@ public sealed class KrakenSpotOrderGatewayTests
         public StubHandler(string payload) => _payload = payload;
 
         public string LastBody { get; private set; } = string.Empty;
+        public string? LastPath { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
+            LastPath = request.RequestUri?.AbsolutePath;
             if (request.Content is not null)
             {
                 LastBody = await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -528,6 +600,22 @@ public sealed class KrakenSpotOrderGatewayTests
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_payload, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class PagedHandler(params string[] pages) : HttpMessageHandler
+    {
+        private readonly Queue<string> _pages = new(pages);
+        public List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestBodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(_pages.Dequeue(), Encoding.UTF8, "application/json")
             };
         }
     }

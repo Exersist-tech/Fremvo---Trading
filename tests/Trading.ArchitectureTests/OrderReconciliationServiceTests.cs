@@ -138,6 +138,46 @@ public sealed class OrderReconciliationServiceTests
         Assert.Equal(1.5m, order.RemainingQuantity);
     }
 
+    [Theory]
+    [InlineData(ExchangeOrderState.Filled, 2)]
+    [InlineData(ExchangeOrderState.PartiallyFilled, 1)]
+    public async Task LiveFillStatusAloneCannotResolveWithoutPositionAccounting(
+        ExchangeOrderState state, int quantity)
+    {
+        var harness = new Harness();
+        var order = harness.AddLiveOrder();
+        var record = await harness.Service.OpenAsync(
+            order, "spot-adapter", "The submission timed out.", CancellationToken.None);
+        harness.Query.Result = OrderStatusQueryResult.Found(state, "EX-LIVE", quantity);
+
+        var outcome = await harness.Service.ResolveAsync(record, CancellationToken.None);
+
+        Assert.Equal(ReconciliationDisposition.Unresolved, outcome.Disposition);
+        Assert.True(order.RequiresReconciliation);
+        Assert.Equal(0m, order.FilledQuantity);
+        Assert.Equal(OrderState.Draft, order.State);
+        Assert.False(record.IsResolved);
+        Assert.Contains("Trade.ReconciliationAwaitingFills", harness.AuditActions);
+    }
+
+    [Fact]
+    public async Task PreviouslyAppliedLiveFillsCannotBeDeclaredAbsentAndSafeToResubmit()
+    {
+        var harness = new Harness();
+        var order = harness.AddLiveOrder();
+        var record = await harness.Service.OpenAsync(
+            order, "spot-adapter", "The submission timed out.", CancellationToken.None);
+        order.MarkPartiallyFilled(1m, Now);
+        harness.Query.Result = OrderStatusQueryResult.NotFound();
+
+        var outcome = await harness.Service.ResolveAsync(record, CancellationToken.None);
+
+        Assert.Equal(ReconciliationDisposition.Unresolved, outcome.Disposition);
+        Assert.True(order.RequiresReconciliation);
+        Assert.False(outcome.MayResubmit);
+        Assert.False(record.IsResolved);
+    }
+
     [Fact]
     public async Task APendingCancelKeepsTheOrderLive()
     {
@@ -222,7 +262,8 @@ public sealed class OrderReconciliationServiceTests
         public Harness()
         {
             var time = new FakeTimeProvider(Now);
-            Service = new OrderReconciliationService(Orders, Records, Query, Audit, time);
+            Service = new OrderReconciliationService(
+                Orders, Records, Query, Audit, time, new PassThroughLiveFillTransaction());
         }
 
         public InMemoryOrderRepository Orders { get; } = new();
@@ -251,6 +292,17 @@ public sealed class OrderReconciliationServiceTests
                 Now,
                 $"coid-{Guid.NewGuid():N}");
 
+            Orders.AddAsync(order, CancellationToken.None).GetAwaiter().GetResult();
+            return order;
+        }
+
+        public Order AddLiveOrder()
+        {
+            var order = new Order(
+                Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "XBTUSD",
+                OrderSide.Buy, OrderType.Limit, 2m, 50000m, Now,
+                $"coid-{Guid.NewGuid():N}", mode: TradingMode.Live,
+                exchangeAccountId: Guid.NewGuid());
             Orders.AddAsync(order, CancellationToken.None).GetAwaiter().GetResult();
             return order;
         }

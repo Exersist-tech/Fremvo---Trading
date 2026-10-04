@@ -209,21 +209,22 @@ internal static class KrakenAssetPairMapper
         // a guessed filter would let the platform submit an order the venue
         // rejects, or refuse one it would have accepted.
         var minimumQuantity = ReadDecimal(value, "ordermin");
+        var minimumNotional = ReadDecimal(value, "costmin");
         var priceTick = ReadDecimal(value, "tick_size");
         var lotDecimals = ReadInt32(value, "lot_decimals");
 
-        if (minimumQuantity is null or <= 0m || priceTick is null or <= 0m || lotDecimals is null or < 0 or > 18)
+        if (minimumQuantity is null or <= 0m || minimumNotional is <= 0m
+            || priceTick is null or <= 0m || lotDecimals is null or < 0 or > 18)
         {
             return null;
         }
 
         var quantityStep = QuantityStepFromDecimals(lotDecimals.Value);
 
-        // Kraken marks a delisted or paused pair through 'status'. A pair that
-        // is absent from that field is treated as tradable, matching the
-        // venue's own default.
+        // A missing or unrecognized status does not establish permission
+        // to simulate a trade on this pair.
         var status = ReadString(value, "status");
-        var isActive = status is null || string.Equals(status, "online", StringComparison.OrdinalIgnoreCase);
+        var isActive = string.Equals(status, "online", StringComparison.OrdinalIgnoreCase);
 
         return new TradablePair(
             altName,
@@ -233,7 +234,8 @@ internal static class KrakenAssetPairMapper
             isActive,
             minimumQuantity.Value,
             quantityStep,
-            priceTick.Value);
+            priceTick.Value,
+            minimumNotional);
     }
 
     /// <summary>

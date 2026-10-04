@@ -13,9 +13,8 @@ namespace Trading.Exchanges.Kraken.MarketData;
 /// history needs no permission on a user's account and must never consume one.
 /// </para>
 /// <para>
-/// Kraken caps a single OHLC response at roughly 720 bars regardless of the
-/// requested start, so a caller backfilling a long history calls this
-/// repeatedly, advancing <c>sinceUtc</c> past the last bar it received.
+/// Kraken exposes only its most recent roughly 720 OHLC bars regardless of the
+/// requested start. Earlier history cannot be recovered by paging this endpoint.
 /// </para>
 /// </remarks>
 public sealed class KrakenHistoricalCandleSource : IHistoricalCandleSource
@@ -80,8 +79,11 @@ public sealed class KrakenHistoricalCandleSource : IHistoricalCandleSource
             return displaySymbol;
 
         var pairs = await _pairs.ListAsync(cancellationToken).ConfigureAwait(false);
+        var streamName = KrakenV2SymbolNames.ForPublicStream(displaySymbol);
         var pair = pairs.SingleOrDefault(candidate =>
             candidate.DisplayName.Equals(displaySymbol, StringComparison.OrdinalIgnoreCase)
+            || KrakenV2SymbolNames.ForPublicStream(candidate.DisplayName)
+                .Equals(streamName, StringComparison.OrdinalIgnoreCase)
             || candidate.Symbol.Equals(displaySymbol, StringComparison.OrdinalIgnoreCase));
         return pair?.Symbol
             ?? throw new MarketDataSourceException(

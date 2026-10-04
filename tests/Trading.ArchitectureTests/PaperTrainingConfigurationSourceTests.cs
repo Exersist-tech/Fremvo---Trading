@@ -33,8 +33,10 @@ public sealed class PaperTrainingConfigurationSourceTests
         Assert.Empty(await workers.ListAsync(ownerId));
     }
 
-    [Fact]
-    public async Task ScannerAdmissionCreatesOneStableWorkerAfterOpportunityExists()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task ScannerAdmissionPreservesPinnedStrategyVersionAcrossReads(int strategyVersion)
     {
         var ownerId = Guid.NewGuid();
         var now = new DateTimeOffset(2026, 9, 21, 19, 18, 7, TimeSpan.Zero);
@@ -42,7 +44,8 @@ public sealed class PaperTrainingConfigurationSourceTests
         {
             Symbol = "XBT/EUR",
             Interval = CandleInterval.FifteenMinutes,
-            ProvenanceId = "scan-1234567890ABCDEF12345678"
+            ProvenanceId = "scan-1234567890ABCDEF12345678",
+            StrategyVersion = strategyVersion
         };
         var activations = new InMemoryPaperTrainingActivationRepository();
         await activations.TrySaveAsync(
@@ -61,13 +64,18 @@ public sealed class PaperTrainingConfigurationSourceTests
             ApprovedExperimentStrategyRegistry.CreatePlatformDefault(),
             activations);
 
-        Assert.NotNull(await source.GetAsync(ownerId, CancellationToken.None));
+        var configuration = await source.GetAsync(ownerId, CancellationToken.None);
+        Assert.NotNull(configuration);
         var worker = Assert.Single(await workers.ListAsync(ownerId));
         Assert.Equal("Paper opportunity scan-1234567890ABCDEF12345678", worker.Name);
+        Assert.Equal(strategyVersion, Assert.Single(configuration.Assignments)
+            .Provenance.Approval.StrategyVersion.Identity.Version);
 
         var changed = (await activations.GetAsync(ownerId))! with { ChangedAtUtc = now.AddMinutes(5) };
         Assert.True(await activations.TrySaveAsync(changed, PaperTrainingActivationState.Active));
-        Assert.NotNull(await source.GetAsync(ownerId, CancellationToken.None));
+        configuration = await source.GetAsync(ownerId, CancellationToken.None);
+        Assert.Equal(strategyVersion, Assert.Single(configuration!.Assignments)
+            .Provenance.Approval.StrategyVersion.Identity.Version);
         Assert.Single(await workers.ListAsync(ownerId));
     }
 
@@ -113,6 +121,38 @@ public sealed class PaperTrainingConfigurationSourceTests
         Assert.Equal(ApprovedConsensusStrategyProfiles.RequiredHistory, assignment.Provenance.Approval.Requirements.MinimumClosedHistoryCandles);
         Assert.True(assignment.Provenance.GateEvaluation.Accepted);
         Assert.Equal(ExperimentWorkerStatus.Running, Assert.Single(await workers.ListAsync(ownerId)).Status);
+    }
+
+    [Fact]
+    public async Task ExactCloseBoundaryWaitsForTheNextTickBeforeCreatingDatasetProvenance()
+    {
+        var owner = Guid.NewGuid();
+        var boundary = new DateTimeOffset(2026, 9, 21, 19, 15, 0, TimeSpan.Zero);
+        var clock = new AdvancingTimeProvider(boundary);
+        var activations = new InMemoryPaperTrainingActivationRepository();
+        var slot = PaperTrainingActivationService.ApprovedSlots[0] with
+        {
+            Interval = CandleInterval.FifteenMinutes,
+            ProvenanceId = "scan-1234567890ABCDEF12345678"
+        };
+        Assert.True(await activations.TrySaveAsync(new(
+            owner, PaperTrainingActivationState.Active, [slot],
+            new(true, true, true, true, true, true), boundary, owner), null));
+        var workers = new InMemoryExperimentWorkerRepository();
+        var source = new PaperTrainingConfigurationSource(workers, clock,
+            ApprovedExperimentStrategyRegistry.CreatePlatformDefault(), activations);
+
+        Assert.Null(await source.GetAsync(owner, CancellationToken.None));
+        Assert.Empty(await workers.ListAsync(owner));
+        clock.UtcNow = boundary.AddSeconds(1);
+        Assert.NotNull(await source.GetAsync(owner, CancellationToken.None));
+        Assert.Single(await workers.ListAsync(owner));
+    }
+
+    private sealed class AdvancingTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public DateTimeOffset UtcNow { get; set; } = now;
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

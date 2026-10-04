@@ -17,6 +17,26 @@ public sealed class FuturesPositionTests
     }
 
     [Fact]
+    public void VerifiedNonUnitContractMultiplierControlsBothSidesAndPartialRealization()
+    {
+        var longPosition = Create(FuturesPositionSide.LongPosition, quantity: 3m,
+            entryPrice: 100m, markPrice: 104m, contractMultiplier: 0.25m);
+        var shortPosition = Create(FuturesPositionSide.ShortPosition, quantity: 3m,
+            entryPrice: 100m, markPrice: 104m, contractMultiplier: 0.25m);
+
+        Assert.Equal(3m, longPosition.UnrealizedPnl);
+        Assert.Equal(-3m, shortPosition.UnrealizedPnl);
+
+        var reducedLong = longPosition.ApplyReduceOnly(1m, 106m, InitialValuation.AddMinutes(1));
+        var reducedShort = shortPosition.ApplyReduceOnly(1m, 106m, InitialValuation.AddMinutes(1));
+        Assert.Equal(0.25m, reducedLong.ContractMultiplier);
+        Assert.Equal(1.5m, reducedLong.RealizedPnl);
+        Assert.Equal(-1.5m, reducedShort.RealizedPnl);
+        Assert.Equal(3m, reducedLong.UnrealizedPnl);
+        Assert.Equal(-3m, reducedShort.UnrealizedPnl);
+    }
+
+    [Fact]
     public void ObservesFundingMarginMarkAndLiquidationWithoutChangingLeverage()
     {
         var position = Create();
@@ -65,20 +85,22 @@ public sealed class FuturesPositionTests
     }
 
     [Fact]
-    public void LiquidationIsTerminalAndRealizesCurrentPnl()
+    public void LiquidationIsTerminalAndUsesOnlyObservedRealizedPnl()
     {
         var position = Create(markPrice: 90m, liquidationPrice: 85m);
 
-        var liquidated = position.MarkLiquidated(InitialValuation.AddMinutes(1));
+        var liquidated = position.MarkLiquidated(-17.25m, InitialValuation.AddMinutes(1));
 
         Assert.Equal(FuturesPositionStatus.Liquidated, liquidated.Status);
         Assert.True(liquidated.IsTerminal);
         Assert.Equal(0m, liquidated.Quantity);
-        Assert.Equal(85m, liquidated.MarkPrice);
-        Assert.Equal(-10m, liquidated.RealizedPnl);
+        Assert.Equal(90m, liquidated.MarkPrice);
+        Assert.Equal(-17.25m, liquidated.RealizedPnl);
         Assert.Equal(0m, liquidated.UnrealizedPnl);
         Assert.Throws<InvalidOperationException>(() =>
             liquidated.ObserveValuation(90m, 1m, 80m, InitialValuation.AddMinutes(2)));
+        Assert.Throws<ArgumentException>(() =>
+            position.MarkLiquidated(-17.25m, InitialValuation.AddMinutes(1).ToOffset(TimeSpan.FromHours(1))));
     }
 
     [Fact]
@@ -87,9 +109,10 @@ public sealed class FuturesPositionTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new FuturesPosition(
                 Guid.NewGuid(),
-                "PI_XBTUSD",
+                "BTC-USD-LINEAR",
                 FuturesPositionSide.LongPosition,
                 1m,
+                contractMultiplier: 1m,
                 entryPrice: 0m,
                 markPrice: 100m,
                 margin: 10m,
@@ -101,6 +124,8 @@ public sealed class FuturesPositionTests
                 valuedAtUtc: InitialValuation));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             Create().ObserveValuation(100m, -1m, 80m, InitialValuation.AddMinutes(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(contractMultiplier: 0m));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(contractMultiplier: -1m));
     }
 
     private static FuturesPosition Create(
@@ -109,12 +134,14 @@ public sealed class FuturesPositionTests
         decimal entryPrice = 100m,
         decimal markPrice = 100m,
         decimal liquidationPrice = 80m,
+        decimal contractMultiplier = 1m,
         DateTimeOffset? valuedAtUtc = null) =>
         new(
             Guid.NewGuid(),
-            "PI_XBTUSD",
+            "BTC-USD-LINEAR",
             side,
             quantity,
+            contractMultiplier,
             entryPrice,
             markPrice,
             margin: 10m,

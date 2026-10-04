@@ -9,7 +9,7 @@ namespace Trading.Exchanges.Kraken.Account;
 /// <summary>Read-only Kraken Spot balance client.</summary>
 public sealed class KrakenBalanceGateway : IExchangeBalanceGateway
 {
-    internal const string BalancePath = "/0/private/Balance";
+    internal const string BalancePath = "/0/private/BalanceEx";
 
     private readonly HttpClient _httpClient;
     private readonly IKrakenNonceSource _nonceSource;
@@ -93,14 +93,32 @@ public sealed class KrakenBalanceGateway : IExchangeBalanceGateway
             }
 
             var balances = new List<ExchangeBalance>();
+            var assets = new HashSet<string>(StringComparer.Ordinal);
             foreach (var property in result.EnumerateObject())
             {
-                if (!decimal.TryParse(property.Value.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var total))
-                {
-                    throw new ExchangeBalanceReadException("Kraken returned an invalid balance amount.");
-                }
+                if (property.Value.ValueKind != JsonValueKind.Object)
+                    throw new ExchangeBalanceReadException("Kraken returned an invalid extended balance.");
 
-                balances.Add(new ExchangeBalance(NormalizeAsset(property.Name), total, total));
+                var total = ReadAmount(property.Value, "balance", required: true);
+                var held = ReadAmount(property.Value, "hold_trade", required: true);
+                var credit = ReadAmount(property.Value, "credit", required: false);
+                var usedCredit = ReadAmount(property.Value, "credit_used", required: false);
+                if (held < 0m || credit < 0m || usedCredit < 0m)
+                    throw new ExchangeBalanceReadException("Kraken returned an invalid credit or trade hold.");
+
+                var asset = NormalizeAsset(property.Name);
+                if (string.IsNullOrWhiteSpace(asset) || !assets.Add(asset))
+                    throw new ExchangeBalanceReadException("Kraken returned an ambiguous balance asset.");
+
+                try
+                {
+                    balances.Add(new ExchangeBalance(asset, total,
+                        total + credit - usedCredit - held, held, property.Name));
+                }
+                catch (OverflowException exception)
+                {
+                    throw new ExchangeBalanceReadException("Kraken returned an unrepresentable balance.", exception);
+                }
             }
 
             return new ExchangeBalanceSnapshot(retrievedAtUtc, balances);
@@ -109,6 +127,22 @@ public sealed class KrakenBalanceGateway : IExchangeBalanceGateway
         {
             throw new ExchangeBalanceReadException("Kraken returned an unreadable balance response.", exception);
         }
+    }
+
+    private static decimal ReadAmount(JsonElement entry, string name, bool required)
+    {
+        if (!entry.TryGetProperty(name, out var value))
+        {
+            if (!required)
+                return 0m;
+            throw new ExchangeBalanceReadException("Kraken omitted a required extended balance amount.");
+        }
+        if (value.ValueKind != JsonValueKind.String
+            || !decimal.TryParse(value.GetString(),
+                NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture, out var amount))
+            throw new ExchangeBalanceReadException("Kraken returned an invalid extended balance amount.");
+        return amount;
     }
 
     internal static string NormalizeAsset(string asset) => asset.ToUpperInvariant() switch

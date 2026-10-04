@@ -115,6 +115,41 @@ public sealed class BacktestEngineTests
     }
 
     [Fact]
+    public void RejectsImpossibleOhlcEvenWithAMatchingDatasetFingerprint()
+    {
+        var candles = Candles(10m, 11m, 12m);
+        candles[1] = new Candle("BTCUSD", CandleInterval.OneMinute,
+            s_start.AddMinutes(1), s_start.AddMinutes(2),
+            10m, 10.5m, 9m, 11m, 1m, true, false);
+        var dataset = Dataset(candles);
+
+        var error = Assert.Throws<ArgumentException>(() => BacktestEngine.Run(
+            dataset, candles, new NeutralStrategy(), Parameters(), Configuration(dataset, 0)));
+
+        Assert.Contains("OHLC prices", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RejectsOverlappingIntervalsAndAnEmptyPostWarmupRun()
+    {
+        var candles = Candles(10m, 11m, 12m);
+        candles[1] = new Candle("BTCUSD", CandleInterval.OneMinute,
+            s_start.AddMinutes(1), s_start.AddMinutes(2).AddSeconds(30),
+            11m, 11m, 11m, 11m, 1m, true, false);
+        var dataset = Dataset(candles);
+        Assert.Throws<ArgumentException>(() => BacktestEngine.Run(
+            dataset, candles, new NeutralStrategy(), Parameters(), Configuration(dataset, 0)));
+
+        var valid = Candles(10m, 11m, 12m);
+        var validDataset = Dataset(valid);
+        Assert.Throws<ArgumentException>(() => BacktestEngine.Run(
+            validDataset, valid, new NeutralStrategy(), Parameters(), Configuration(validDataset, valid.Count)));
+        var createdAtLastClose = Dataset(valid, createdAtUtc: valid[^1].CloseTimeUtc);
+        Assert.Throws<ArgumentException>(() => BacktestEngine.Run(
+            createdAtLastClose, valid, new NeutralStrategy(), Parameters(), Configuration(createdAtLastClose, 0)));
+    }
+
+    [Fact]
     public void RejectsAccumulationAndNeverCreatesShortOrLeverage()
     {
         var candles = Candles(10m, 10m, 10m, 10m, 10m);
@@ -159,6 +194,100 @@ public sealed class BacktestEngineTests
         Assert.Equal(result.Events.Sum(@event => @event.Fee), result.TotalFees);
         Assert.Equal(result.Events.Sum(@event => @event.Slippage), result.TotalSlippage);
         Assert.Equal(result.InitialCapital + result.NetPnL, result.FinalPortfolioValue);
+    }
+
+    [Fact]
+    public void NextCandleOpenFillsOnlyAfterTheSignalCandleAndPreservesTheLegacyControl()
+    {
+        var candles = Candles(10m, 10m, 12m, 15m, 9m);
+        var dataset = Dataset(candles);
+        var next = BacktestEngine.Run(dataset, candles, new LifecycleStrategy(), Parameters(),
+            Configuration(dataset, 1, fillTiming: BacktestFillTiming.NextCandleOpen));
+        var buy = Assert.Single(next.Events.Where(@event => @event.Action == BacktestSimulatedAction.Buy));
+        var sell = Assert.Single(next.Events.Where(@event => @event.Action == BacktestSimulatedAction.Sell));
+
+        Assert.Equal(candles[1].CloseTimeUtc, buy.Proposal.ObservedAtUtc);
+        Assert.Equal(candles[2].OpenTimeUtc, buy.ObservedAtUtc);
+        Assert.Equal(12m, buy.ReferencePrice);
+        Assert.Equal(12m, buy.Price);
+        Assert.Equal(10m, buy.Quantity);
+        Assert.Equal(candles[3].CloseTimeUtc, sell.Proposal.ObservedAtUtc);
+        Assert.Equal(candles[4].OpenTimeUtc, sell.ObservedAtUtc);
+        Assert.Equal(9m, sell.ReferencePrice);
+        Assert.Equal(90m, next.FinalPortfolioValue);
+        Assert.Equal(BacktestFillTiming.NextCandleOpen, next.FillTiming);
+        Assert.Equal(120m, next.EquitySnapshots[1].Equity);
+        Assert.Equal(120m, next.EquitySnapshots[2].Equity);
+
+        var legacy = BacktestEngine.Run(dataset, candles, new LifecycleStrategy(), Parameters(),
+            Configuration(dataset, 1));
+        Assert.Equal(candles[1].CloseTimeUtc,
+            Assert.Single(legacy.Events.Where(@event => @event.Action == BacktestSimulatedAction.Buy)).ObservedAtUtc);
+        Assert.Equal(180m, legacy.FinalPortfolioValue);
+        Assert.Equal(BacktestFillTiming.SignalCloseLegacy, legacy.FillTiming);
+    }
+
+    [Fact]
+    public void NextCandleOpenAppliesCostsAndFiltersToTheLaterPrice()
+    {
+        var candles = Candles(10m, 10m, 12m, 15m, 9m);
+        var dataset = Dataset(candles);
+        var configuration = Configuration(dataset, 1, initialCapital: 120m,
+            feeModel: new FeeModel(0.01m, 0.01m, 0m),
+            slippageModel: new SlippageModel(0.10m),
+            exchangeFilter: new ExchangeFilter(0m, 0m, 0.01m, 0.01m),
+            fillTiming: BacktestFillTiming.NextCandleOpen);
+
+        var result = BacktestEngine.Run(dataset, candles, new LifecycleStrategy(), Parameters(), configuration);
+        var buy = Assert.Single(result.Events.Where(@event => @event.Action == BacktestSimulatedAction.Buy));
+        var sell = Assert.Single(result.Events.Where(@event => @event.Action == BacktestSimulatedAction.Sell));
+        Assert.Equal(12.10m, buy.Price);
+        Assert.Equal(9.81m, buy.Quantity);
+        Assert.Equal(1.18701m, buy.Fee);
+        Assert.Equal(8.90m, sell.Price);
+        Assert.Equal(0.87309m, sell.Fee);
+        Assert.Equal(86.54790m, result.FinalPortfolioValue);
+        Assert.Equal(buy.Fee + sell.Fee, result.TotalFees);
+        Assert.Equal(buy.Slippage + sell.Slippage, result.TotalSlippage);
+        Assert.Equal(1.962m, result.TotalSlippage);
+
+        var offTick = Candles(10m, 10m, 12.005m);
+        var offTickDataset = Dataset(offTick);
+        var rejected = BacktestEngine.Run(offTickDataset, offTick, new LifecycleStrategy(), Parameters(),
+            Configuration(offTickDataset, 1, fillTiming: BacktestFillTiming.NextCandleOpen));
+        Assert.Equal(0, rejected.TradeCount);
+        Assert.Equal(120m, rejected.FinalPortfolioValue);
+        Assert.Equal(offTick[2].OpenTimeUtc, rejected.Events[0].ObservedAtUtc);
+        Assert.Contains("price tick", rejected.Events[0].Rationale, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LastCandleSignalCannotFillWithoutLaterEvidence()
+    {
+        var candles = Candles(10m, 10m);
+        var dataset = Dataset(candles);
+        var result = BacktestEngine.Run(dataset, candles, new LifecycleStrategy(), Parameters(),
+            Configuration(dataset, 1, fillTiming: BacktestFillTiming.NextCandleOpen));
+
+        var unfilled = Assert.Single(result.Events);
+        Assert.Equal(BacktestSimulatedAction.Rejected, unfilled.Action);
+        Assert.Contains("No later candle", unfilled.Rationale, StringComparison.Ordinal);
+        Assert.Equal(0, result.TradeCount);
+        Assert.Equal(120m, result.FinalPortfolioValue);
+        Assert.Equal(120m, unfilled.CashBalance);
+    }
+
+    [Fact]
+    public void BacktestConfigurationRejectsUnsupportedFillTiming()
+    {
+        var candles = Candles(10m, 10m);
+        var dataset = Dataset(candles);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Configuration(dataset, 1,
+            fillTiming: (BacktestFillTiming)99));
+        var safeDefault = new BacktestConfiguration(
+            "test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, 1, 120m,
+            FeeModel.Zero, SlippageModel.Zero, new ExchangeFilter(0m, 0m, 0.01m, 0.01m));
+        Assert.Equal(BacktestFillTiming.NextCandleOpen, safeDefault.FillTiming);
     }
 
     [Fact]
@@ -235,12 +364,16 @@ public sealed class BacktestEngineTests
             candles.Count, fingerprint ?? HistoricalCandleFingerprint.Compute(candles), "fixture-v1",
             createdAtUtc ?? s_start.AddHours(1));
 
-    private static BacktestConfiguration Configuration(HistoricalDataset dataset, int warmup) =>
+    private static BacktestConfiguration Configuration(
+        HistoricalDataset dataset,
+        int warmup,
+        BacktestFillTiming fillTiming = BacktestFillTiming.SignalCloseLegacy) =>
         new(
             "test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, warmup, 120m,
             FeeModel.Zero,
             SlippageModel.Zero,
-            new ExchangeFilter(0m, 0m, 0.01m, 0.01m));
+            new ExchangeFilter(0m, 0m, 0.01m, 0.01m),
+            fillTiming: fillTiming);
 
     private static BacktestConfiguration Configuration(
         HistoricalDataset dataset,
@@ -248,9 +381,10 @@ public sealed class BacktestEngineTests
         decimal initialCapital,
         FeeModel feeModel,
         SlippageModel slippageModel,
-        ExchangeFilter exchangeFilter) =>
+        ExchangeFilter exchangeFilter,
+        BacktestFillTiming fillTiming = BacktestFillTiming.SignalCloseLegacy) =>
         new("test-approved-v1", dataset.Symbol, dataset.FromUtc, dataset.ToUtc, warmup, initialCapital,
-            feeModel, slippageModel, exchangeFilter);
+            feeModel, slippageModel, exchangeFilter, fillTiming: fillTiming);
 
     private static StrategyParameterSet Parameters() => new(Array.Empty<StrategyParameterDefinition>());
 

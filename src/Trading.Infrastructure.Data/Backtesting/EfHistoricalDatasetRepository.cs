@@ -131,7 +131,7 @@ public sealed class EfHistoricalDatasetRepository : IHistoricalDatasetRepository
             throw new InvalidOperationException("Persisted historical datasets must contain only closed candles.");
         }
 
-        return new HistoricalDataset(
+        var manifest = new HistoricalDataset(
             dataset.Id,
             dataset.Source,
             dataset.Symbol,
@@ -142,6 +142,9 @@ public sealed class EfHistoricalDatasetRepository : IHistoricalDatasetRepository
             dataset.ContentFingerprint,
             dataset.SourceVersion,
             dataset.CreatedAtUtc.ToUniversalTime());
+        if (!string.Equals(manifest.VersionIdentity, dataset.VersionIdentity, StringComparison.Ordinal))
+            throw new InvalidOperationException("Persisted historical dataset identity does not match its immutable manifest.");
+        return manifest;
     }
 
     private Task<PersistedHistoricalDataset?> FindAsync(string versionIdentity, CancellationToken cancellationToken) =>

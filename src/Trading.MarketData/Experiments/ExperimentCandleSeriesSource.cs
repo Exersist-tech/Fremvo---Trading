@@ -21,7 +21,7 @@ public sealed record ExperimentCandleSeriesRequest(
 
 public sealed record ExperimentCandleFreshnessPolicy(TimeSpan MaximumAge)
 {
-    public static readonly ExperimentCandleFreshnessPolicy Default = new(TimeSpan.FromHours(2));
+    public static readonly ExperimentCandleFreshnessPolicy Default = new(TimeSpan.FromDays(2));
 }
 
 public enum ExperimentCandleSeriesBlockReason
@@ -161,7 +161,10 @@ public sealed class DurableExperimentCandleSeriesSource : IExperimentCandleSerie
         }
 
         var latest = candles[^1];
-        var intervalFreshness = intervalDuration + intervalDuration;
+        var grace = intervalDuration < TimeSpan.FromMinutes(5)
+            ? intervalDuration
+            : TimeSpan.FromMinutes(5);
+        var intervalFreshness = intervalDuration + grace;
         var maximumAge = intervalFreshness < _freshnessPolicy.MaximumAge
             ? intervalFreshness
             : _freshnessPolicy.MaximumAge;

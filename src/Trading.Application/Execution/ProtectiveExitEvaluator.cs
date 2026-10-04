@@ -148,8 +148,9 @@ public sealed class ProtectiveExitEvaluator : IProtectiveExitEvaluator
                 continue;
             }
 
+            var expectedVersion = position.Version;
             position.Reduce(position.Quantity);
-            await _positions.UpdateAsync(position, cancellationToken).ConfigureAwait(false);
+            await _positions.UpdateAsync(position, expectedVersion, cancellationToken).ConfigureAwait(false);
 
             await _auditWriter.WriteAsync(
                 new AuditEvent(

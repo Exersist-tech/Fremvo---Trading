@@ -11,13 +11,10 @@ namespace Trading.Exchanges.Kraken.Execution;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This type can reach a real exchange with a real credential. It is
-/// deliberately <b>not</b> registered in the application's dependency
-/// injection container and does not implement
-/// <c>ILiveExecutionRoute</c>, so its existence does not make live trading
-/// reachable. The remaining Phase 9 tasks — the execution adapter, the replay
-/// harness, the reconciliation taxonomy and the proving ceiling — must be in
-/// place before anything is allowed to call it with a live credential.
+/// This type can reach a real exchange with a real credential. Its read-only
+/// queries support admission and reconciliation even when live submissions
+/// are disabled. Merely registering the gateway does not enable a live route:
+/// operator configuration, owner eligibility and risk gates are still required.
 /// </para>
 /// <para>
 /// Every order carries the platform's own client order id in Kraken's
@@ -31,8 +28,9 @@ namespace Trading.Exchanges.Kraken.Execution;
 /// could be extended into one.
 /// </para>
 /// </remarks>
-public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
+public sealed class KrakenSpotOrderGateway : ISpotOrderGateway, ISpotOpenOrderGateway
 {
+    internal const string OpenOrdersPath = "/0/private/OpenOrders";
     internal const string AddOrderPath = "/0/private/AddOrder";
     internal const string CancelOrderPath = "/0/private/CancelOrder";
     internal const string QueryOrdersPath = "/0/private/QueryOrders";
@@ -53,6 +51,35 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
     }
 
     public ExchangeKind Exchange => ExchangeKind.Kraken;
+
+    public async Task<SpotOpenOrderState> ReadAsync(
+        ExchangeCredential credential,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(credential);
+
+        KrakenResponse response;
+        try
+        {
+            response = await SendAsync(
+                credential, OpenOrdersPath, nonce => $"nonce={nonce}", cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (KrakenTransportException)
+        {
+            return SpotOpenOrderState.Unavailable;
+        }
+
+        if (response.Errors.Count > 0 || response.Result is not { ValueKind: JsonValueKind.Object } result
+            || !result.TryGetProperty("open", out var open) || open.ValueKind != JsonValueKind.Object)
+        {
+            return SpotOpenOrderState.Unavailable;
+        }
+
+        return open.EnumerateObject().Any()
+            ? SpotOpenOrderState.Present
+            : SpotOpenOrderState.Empty;
+    }
 
     /// <summary>
     /// Builds the AddOrder body. Exposed to tests so the encoding of an order
@@ -286,63 +313,102 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
 
         var since = sinceUtc.ToUniversalTime().ToUnixTimeSeconds();
 
-        KrakenResponse response;
-        try
-        {
-            response = await SendAsync(
-                credential,
-                TradesHistoryPath,
-                nonce => string.Create(CultureInfo.InvariantCulture, $"nonce={nonce}&type=all&start={since}"),
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (KrakenTransportException exception)
-        {
-            return SpotFillQueryResult.Unavailable(exception.Message);
-        }
-
-        if (response.Errors.Count > 0)
-        {
-            return SpotFillQueryResult.Unavailable(
-                "Kraken did not return trade history. It answered: " + string.Join(", ", response.Errors));
-        }
-
-        if (!response.Result.HasValue
-            || !response.Result.Value.TryGetProperty("trades", out var trades)
-            || trades.ValueKind != JsonValueKind.Object)
-        {
-            return SpotFillQueryResult.Unavailable("Kraken returned no trade collection.");
-        }
-
         var fills = new List<SpotFill>();
-        foreach (var trade in trades.EnumerateObject())
+        var fillIds = new HashSet<string>(StringComparer.Ordinal);
+        var cursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        for (var page = 0; page < 100; page++)
         {
-            if (trade.Value.ValueKind != JsonValueKind.Object)
+            KrakenResponse response;
+            try
             {
-                continue;
+                response = await SendAsync(
+                    credential,
+                    TradesHistoryPath,
+                    nonce => string.Create(CultureInfo.InvariantCulture,
+                        $"nonce={nonce}&type=all&start={since}&limit=100&with_cursor=true")
+                        + (cursor is null ? "" : "&cursor=" + Uri.EscapeDataString(cursor)),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (KrakenTransportException exception)
+            {
+                return SpotFillQueryResult.Unavailable(exception.Message);
             }
 
-            var quantity = ReadDecimal(trade.Value, "vol");
-            if (quantity <= 0m)
+            if (response.Errors.Count > 0)
+                return SpotFillQueryResult.Unavailable("Kraken did not return complete trade history.");
+
+            if (!response.Result.HasValue
+                || !response.Result.Value.TryGetProperty("trades", out var trades)
+                || trades.ValueKind != JsonValueKind.Object)
+                return SpotFillQueryResult.Unavailable("Kraken returned no trade collection.");
+
+            foreach (var trade in trades.EnumerateObject())
             {
-                continue;
+                if (trade.Value.ValueKind != JsonValueKind.Object
+                    || string.IsNullOrWhiteSpace(trade.Name)
+                    || string.IsNullOrWhiteSpace(ReadString(trade.Value, "ordertxid"))
+                    || string.IsNullOrWhiteSpace(ReadString(trade.Value, "pair"))
+                    || !TryReadDecimal(trade.Value, "vol", out var quantity) || quantity <= 0m
+                    || !TryReadDecimal(trade.Value, "price", out var price) || price <= 0m
+                    || !TryReadDecimal(trade.Value, "fee", out var fee) || fee < 0m
+                    || !TryReadDecimal(trade.Value, "time", out var seconds) || seconds <= 0m
+                    || ReadString(trade.Value, "type") is not ("buy" or "sell")
+                    || !fillIds.Add(trade.Name))
+                    return SpotFillQueryResult.Unavailable("Kraken returned incomplete or duplicate trade evidence.");
+
+                DateTimeOffset executedAt;
+                try
+                {
+                    var milliseconds = decimal.ToInt64(decimal.Round(seconds * 1000m, 0, MidpointRounding.AwayFromZero));
+                    executedAt = DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
+                }
+                catch (Exception exception) when (exception is OverflowException or ArgumentOutOfRangeException)
+                {
+                    return SpotFillQueryResult.Unavailable("Kraken returned an invalid trade time.");
+                }
+
+                fills.Add(new SpotFill(
+                    trade.Name,
+                    ReadString(trade.Value, "ordertxid")!,
+                    ReadString(trade.Value, "pair")!,
+                    ReadString(trade.Value, "type") == "buy" ? SpotOrderSide.Buy : SpotOrderSide.Sell,
+                    quantity,
+                    price,
+                    fee,
+                    feeCurrency: null,
+                    executedAt));
             }
 
-            fills.Add(new SpotFill(
-                trade.Name,
-                ReadString(trade.Value, "ordertxid") ?? trade.Name,
-                ReadString(trade.Value, "pair") ?? "unknown",
-                string.Equals(ReadString(trade.Value, "type"), "sell", StringComparison.Ordinal)
-                    ? SpotOrderSide.Sell
-                    : SpotOrderSide.Buy,
-                quantity,
-                ReadDecimal(trade.Value, "price"),
-                ReadDecimal(trade.Value, "fee"),
-                // Kraken does not name the fee's currency on a trade.
-                feeCurrency: null,
-                ReadUnixTime(trade.Value, "time")));
+            if (!response.Result.Value.TryGetProperty("cursor", out var cursorElement)
+                || cursorElement.ValueKind == JsonValueKind.Null)
+                return SpotFillQueryResult.Answered(fills);
+            if (cursorElement.ValueKind != JsonValueKind.Object
+                || !cursorElement.TryGetProperty("next", out var next)
+                || next.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                return SpotFillQueryResult.Unavailable("Kraken returned an invalid trade-history cursor.");
+            if (next.ValueKind == JsonValueKind.Null)
+                return SpotFillQueryResult.Answered(fills);
+            cursor = next.GetString();
+            if (string.IsNullOrWhiteSpace(cursor) || !cursors.Add(cursor))
+                return SpotFillQueryResult.Unavailable("Kraken repeated or omitted a trade-history cursor.");
         }
 
-        return SpotFillQueryResult.Answered(fills);
+        return SpotFillQueryResult.Unavailable("Kraken trade history exceeded the bounded pagination limit.");
+    }
+
+    private static bool TryReadDecimal(JsonElement element, string property, out decimal value)
+    {
+        value = 0m;
+        if (!element.TryGetProperty(property, out var field))
+            return false;
+        return field.ValueKind switch
+        {
+            JsonValueKind.Number => field.TryGetDecimal(out value),
+            JsonValueKind.String => decimal.TryParse(
+                field.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value),
+            _ => false
+        };
     }
 
     /// <summary>
@@ -393,21 +459,6 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
             JsonValueKind.Number => value.TryGetDecimal(out var number) ? number : 0m,
             _ => 0m
         };
-    }
-
-    /// <summary>
-    /// Reads Kraken's fractional Unix seconds as a UTC instant.
-    /// </summary>
-    /// <remarks>
-    /// The value is read as decimal and scaled to milliseconds before
-    /// conversion, so the sub-second part survives without going through a
-    /// double.
-    /// </remarks>
-    private static DateTimeOffset ReadUnixTime(JsonElement element, string property)
-    {
-        var seconds = ReadDecimal(element, property);
-        var milliseconds = decimal.ToInt64(decimal.Round(seconds * 1000m, 0, MidpointRounding.AwayFromZero));
-        return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
     }
 
     private static string? ReadDescription(JsonElement? result) =>
@@ -505,6 +556,12 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
     /// </remarks>
     internal static KrakenResponse Parse(string payload, bool httpSucceeded)
     {
+        if (!httpSucceeded)
+        {
+            throw new KrakenTransportException(
+                "Kraken returned an unsuccessful HTTP response, so the outcome of this request is unknown.");
+        }
+
         if (string.IsNullOrWhiteSpace(payload))
         {
             throw new KrakenTransportException(
@@ -527,16 +584,29 @@ public sealed class KrakenSpotOrderGateway : ISpotOrderGateway
         using (document)
         {
             var errors = new List<string>();
-            if (document.RootElement.TryGetProperty("error", out var errorElement)
-                && errorElement.ValueKind == JsonValueKind.Array)
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("error", out var errorElement)
+                || errorElement.ValueKind != JsonValueKind.Array)
             {
-                foreach (var error in errorElement.EnumerateArray())
+                throw new KrakenTransportException(
+                    "Kraken returned a malformed error envelope, so the outcome of this request is unknown.");
+            }
+
+            foreach (var error in errorElement.EnumerateArray())
+            {
+                if (error.ValueKind != JsonValueKind.String)
                 {
-                    if (error.GetString() is { } text)
-                    {
-                        errors.Add(text);
-                    }
+                    throw new KrakenTransportException(
+                        "Kraken returned a malformed error, so the outcome of this request is unknown.");
                 }
+
+                if (error.GetString() is not { } text)
+                {
+                    throw new KrakenTransportException(
+                        "Kraken returned a malformed error, so the outcome of this request is unknown.");
+                }
+
+                errors.Add(text);
             }
 
             JsonElement? result = null;

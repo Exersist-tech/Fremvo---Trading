@@ -4,6 +4,7 @@ using Trading.Domain.Experiments;
 using Trading.Domain.Market;
 using Trading.Domain.Universe;
 using Trading.MarketData;
+using Trading.Risk;
 
 namespace Trading.Application.Experiments;
 
@@ -43,7 +44,8 @@ public sealed record PaperTrainingUniverseCandidate(
     string Symbol,
     decimal MedianDailyQuoteVolume,
     decimal MinimumDailyQuoteVolume,
-    int ObservedDays);
+    int ObservedDays,
+    PaperExchangeFilters PairFilters);
 
 /// <summary>
 /// Discovers a bounded, point-in-time Kraken-neutral paper universe from active Spot pairs and
@@ -64,6 +66,8 @@ public sealed class PaperTrainingUniverseDiscovery
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
         _policy = (policy ?? throw new ArgumentNullException(nameof(policy))).Validate();
     }
+
+    public PaperTrainingUniversePolicy Policy => _policy;
 
     public async Task<IReadOnlyList<PaperTrainingUniverseCandidate>> DiscoverAsync(
         DateTimeOffset evidenceAsOfUtc,
@@ -108,7 +112,10 @@ public sealed class PaperTrainingUniverseDiscovery
                     pair.DisplayName,
                     median,
                     quoteVolumes.Min(),
-                    daily.Length));
+                    daily.Length,
+                    new PaperExchangeFilters(pair.PriceTick, pair.QuantityStep,
+                        pair.MinimumQuantity, pair.MinimumNotional
+                            ?? throw new InvalidOperationException("An eligible paper pair requires a published minimum notional."))));
             }).ConfigureAwait(false);
 
         return candidates
@@ -120,7 +127,8 @@ public sealed class PaperTrainingUniverseDiscovery
 
     private bool IsEligibleSpotPair(TradablePair pair)
     {
-        if (!pair.IsActive || pair.DisplayName.Contains('.', StringComparison.Ordinal))
+        if (!pair.IsActive || pair.MinimumNotional is not > 0m
+            || pair.DisplayName.Contains('.', StringComparison.Ordinal))
             return false;
 
         var parts = pair.DisplayName.Split(

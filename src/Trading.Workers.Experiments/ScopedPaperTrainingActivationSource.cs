@@ -4,7 +4,8 @@ using Trading.Infrastructure.Data.Experiments;
 namespace Trading.Workers.Experiments;
 
 /// <summary>Reads durable activation state in a short-lived scope on each host tick.</summary>
-public sealed class ScopedPaperTrainingActivationSource : IPaperTrainingActivationSource
+public sealed class ScopedPaperTrainingActivationSource :
+    IPaperTrainingActivationSource, IPaperTrainingProtectionOwnerSource
 {
     private readonly IServiceScopeFactory _scopes;
 
@@ -16,6 +17,13 @@ public sealed class ScopedPaperTrainingActivationSource : IPaperTrainingActivati
         using var scope = _scopes.CreateScope();
         var source = scope.ServiceProvider.GetRequiredService<EfPaperTrainingActivationRepository>();
         return await source.GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyCollection<Guid>> GetProtectedOwnerIdsAsync(CancellationToken cancellationToken = default)
+    {
+        using var scope = _scopes.CreateScope();
+        var source = scope.ServiceProvider.GetRequiredService<EfPaperTrainingActivationRepository>();
+        return await source.GetProtectedOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
     }
 }
 

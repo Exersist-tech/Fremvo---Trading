@@ -37,6 +37,7 @@ public sealed class BacktestResultsReportingTests
         Assert.Equal("Simulation rejected", report.Events[1].Status);
         Assert.Equal("Minimum notional was not met.", report.Events[1].Rationale);
         Assert.Equal("1.25", report.EquitySnapshots[0].Equity);
+        Assert.Equal("Not recorded", report.FillTiming);
     }
 
     [Fact]
@@ -47,6 +48,21 @@ public sealed class BacktestResultsReportingTests
 
         Assert.Empty(page.Results);
         Assert.False(page.HasMore);
+    }
+
+    [Fact]
+    public async Task ReportDisclosesRecordedFillTiming()
+    {
+        var owner = Guid.NewGuid();
+        var source = new SuppliedBacktestResultSource(
+        [
+            Envelope(owner, 100m, BacktestFillTiming.NextCandleOpen)
+        ]);
+
+        var report = Assert.Single((await new BacktestResultsQueryService(source)
+            .ListAsync(owner, 0)).Results);
+
+        Assert.Equal("Next candle open (modeled)", report.FillTiming);
     }
 
     [Fact]
@@ -106,12 +122,16 @@ public sealed class BacktestResultsReportingTests
         Assert.DoesNotContain("<form", backtestPage, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("button", backtestPage, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("No completed reproducible backtest is available yet.", script, StringComparison.Ordinal);
+        Assert.Contains("Fill timing", script, StringComparison.Ordinal);
         Assert.Contains("Hypothetical historical results.", backtestPage, StringComparison.Ordinal);
         Assert.Contains("do not represent an order", backtestPage, StringComparison.Ordinal);
         Assert.Contains("live or paper execution", backtestPage, StringComparison.Ordinal);
     }
 
-    private static BacktestResultEnvelope Envelope(Guid? owner, decimal initialPortfolio)
+    private static BacktestResultEnvelope Envelope(
+        Guid? owner,
+        decimal initialPortfolio,
+        BacktestFillTiming? fillTiming = null)
     {
         var start = DateTimeOffset.UnixEpoch;
         var result = new BacktestResult(
@@ -149,7 +169,8 @@ public sealed class BacktestResultsReportingTests
                     100m,
                     1m)
             ],
-            [new BacktestEquitySnapshot(start.AddHours(2), 1m, 0.25m, 1m, 1.25m)]);
+            [new BacktestEquitySnapshot(start.AddHours(2), 1m, 0.25m, 1m, 1.25m)],
+            fillTiming);
 
         return new BacktestResultEnvelope(
             Guid.NewGuid(),

@@ -30,7 +30,8 @@ public sealed class Position
         decimal markPrice,
         DateTimeOffset openedAtUtc,
         decimal unrealizedPnl = 0m,
-        TradingMode mode = TradingMode.Paper)
+        TradingMode mode = TradingMode.Paper,
+        Guid? exchangeAccountId = null)
     {
         if (id == Guid.Empty)
         {
@@ -66,6 +67,10 @@ public sealed class Position
         {
             throw new ArgumentOutOfRangeException(nameof(markPrice), "Mark price must be positive.");
         }
+        if (exchangeAccountId == Guid.Empty || (mode != TradingMode.Live && exchangeAccountId is not null))
+        {
+            throw new ArgumentException("Only a live position can bind an exchange account.", nameof(exchangeAccountId));
+        }
 
         Id = id;
         UserId = userId;
@@ -78,6 +83,7 @@ public sealed class Position
         OpenedAtUtc = openedAtUtc;
         UnrealizedPnl = unrealizedPnl;
         Mode = mode;
+        ExchangeAccountId = exchangeAccountId;
         Status = PositionStatus.Open;
     }
 
@@ -93,7 +99,7 @@ public sealed class Position
 
     public decimal Quantity { get; private set; }
 
-    public decimal EntryPrice { get; }
+    public decimal EntryPrice { get; private set; }
 
     public decimal MarkPrice { get; private set; }
 
@@ -107,6 +113,9 @@ public sealed class Position
     /// simulated record rather than one that claims to be real.
     /// </summary>
     public TradingMode Mode { get; }
+
+    /// <summary>Null only for paper positions or legacy live rows requiring reconciliation.</summary>
+    public Guid? ExchangeAccountId { get; }
 
     public decimal UnrealizedPnl { get; private set; }
 
@@ -277,6 +286,30 @@ public sealed class Position
 
         // The concurrency token has to move whenever persisted state changes,
         // otherwise a concurrent writer can overwrite this reduction.
+        Version++;
+    }
+
+    /// <summary>Applies an observed fill in the position's existing direction.</summary>
+    public void Increase(decimal filledQuantity, decimal executionPrice)
+    {
+        if (Status != PositionStatus.Open)
+        {
+            throw new InvalidOperationException("Only an unrestricted open position can increase.");
+        }
+
+        if (filledQuantity <= 0m || executionPrice <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(filledQuantity), "An increase requires a positive fill and execution price.");
+        }
+
+        var newQuantity = Quantity + filledQuantity;
+        var newEntryPrice = ((EntryPrice * Quantity) + (executionPrice * filledQuantity)) / newQuantity;
+        var unrealizedPnl = Direction == PositionDirection.DirectionLong
+            ? (MarkPrice - newEntryPrice) * newQuantity
+            : (newEntryPrice - MarkPrice) * newQuantity;
+        Quantity = newQuantity;
+        EntryPrice = newEntryPrice;
+        UnrealizedPnl = unrealizedPnl;
         Version++;
     }
 

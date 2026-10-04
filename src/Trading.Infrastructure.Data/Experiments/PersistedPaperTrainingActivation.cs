@@ -7,6 +7,7 @@ public sealed class PersistedPaperTrainingActivation
     public int SlotCount { get; set; }
     public string SlotsJson { get; set; } = "[]";
     public string QualificationsJson { get; set; } = "[]";
+    public string? StrategyAssignmentsJson { get; set; }
     public bool DurableClosedCandleSource { get; set; }
     public bool ApprovedResearchGroupsAndGates { get; set; }
     public bool WorkerRiskPolicy { get; set; }

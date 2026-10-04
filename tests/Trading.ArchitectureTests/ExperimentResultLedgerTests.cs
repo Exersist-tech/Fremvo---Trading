@@ -89,6 +89,7 @@ public sealed class ExperimentResultLedgerTests
         var result = ExperimentClosedTradeResultFactory.Create(worker, "Maximum holding limit reached.");
 
         Assert.Equal(3m, result.Quantity);
+        Assert.Equal(305m / 3m, result.AverageBuyFillPrice);
         Assert.Equal(306.5m / 3m, result.AverageEntryPrice);
         Assert.Equal(290m / 3m, result.AverageExitPrice);
         Assert.Equal(-15m, result.GrossProfitAndLoss);
@@ -104,6 +105,27 @@ public sealed class ExperimentResultLedgerTests
     }
 
     [Fact]
+    public void FailedWorkerWithProtectiveCloseHasARealClosedTradeButOpenFailureDoesNot()
+    {
+        var worker = new ExperimentWorker(
+            Guid.NewGuid(), Guid.NewGuid(), "failed-close", "strategy", "BTC/EUR", 1_000m, Now, 2);
+        worker.Start();
+        worker.ApplyPaperTrade(1m, 100m, 1m, "buy", Now);
+        worker.Fail("Worker faulted after entry.");
+        Assert.Throws<InvalidOperationException>(() => ExperimentClosedTradeResultFactory.Create(worker));
+        worker.ApplyPaperTrade(1m, 110m, 1m, "sell", Now.AddMinutes(1));
+
+        var result = ExperimentClosedTradeResultFactory.Create(worker);
+
+        Assert.Equal(8m, result.NetProfitAndLoss);
+        Assert.Equal(2m, result.Fees);
+        Assert.Equal(1, result.BuyFillCount);
+        Assert.Equal(1, result.SellFillCount);
+        Assert.Equal(1_008m, result.EndingCash);
+        Assert.Equal(ExperimentWorkerStatus.Failed, worker.Status);
+    }
+
+    [Fact]
     public async Task ClosedWorkerQueryIsOwnerScopedAndExcludesUnfilledAttempts()
     {
         var database = Guid.NewGuid().ToString("N");
@@ -116,8 +138,17 @@ public sealed class ExperimentResultLedgerTests
         unfilled.Start();
         unfilled.Complete();
         var foreign = ClosedWorker(Guid.NewGuid(), "foreign");
+        var failed = new ExperimentWorker(
+            Guid.NewGuid(), owner, "failed", "strategy", "BTC/EUR", 1_000m, Now, 2);
+        failed.Start();
+        failed.ApplyPaperTrade(1m, 100m, 1m, "buy", Now);
+        failed.Fail("Faulted after entry.");
+        failed.ApplyPaperTrade(1m, 110m, 1m, "sell", Now.AddMinutes(1));
         await repository.SaveAsync(closed);
         foreach (var entry in closed.Ledger)
+            await repository.AddAsync(owner, entry);
+        await repository.SaveAsync(failed);
+        foreach (var entry in failed.Ledger)
             await repository.AddAsync(owner, entry);
         await repository.SaveAsync(unfilled);
         await repository.SaveAsync(foreign);
@@ -126,7 +157,11 @@ public sealed class ExperimentResultLedgerTests
 
         var results = await repository.ListClosedAsync(owner, 0, 25);
 
-        Assert.Equal(closed.Id, Assert.Single(results).Id);
+        Assert.Equal(2, results.Count);
+        Assert.Contains(results, result => result.Id == closed.Id);
+        Assert.Contains(results, result => result.Id == failed.Id);
+        Assert.All(results, result => Assert.True(
+            ExperimentClosedTradeResultFactory.Create(result).SellFillCount > 0));
     }
 
     [Fact]
@@ -142,6 +177,9 @@ public sealed class ExperimentResultLedgerTests
         Assert.DoesNotContain("innerHTML", script, StringComparison.Ordinal);
         Assert.DoesNotContain("button", script, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("research-only", web, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("worker.OpenBuyFillPrice,", web, StringComparison.Ordinal);
+        Assert.Contains("worker.LastBuyFillPrice,", web, StringComparison.Ordinal);
+        Assert.Contains("worker.LastSellFillPrice,", web, StringComparison.Ordinal);
         Assert.DoesNotContain("MapPost(\"/api/experiment-results", web, StringComparison.Ordinal);
         Assert.DoesNotContain("winner", script, StringComparison.OrdinalIgnoreCase);
     }

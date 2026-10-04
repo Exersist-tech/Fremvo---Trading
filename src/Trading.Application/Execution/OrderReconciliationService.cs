@@ -64,19 +64,22 @@ public sealed class OrderReconciliationService
     private readonly IExchangeOrderStatusQuery _statusQuery;
     private readonly IAuditEventWriter _audit;
     private readonly TimeProvider _timeProvider;
+    private readonly ILiveFillPersistenceTransaction _persistence;
 
     public OrderReconciliationService(
         IOrderRepository orders,
         IOrderReconciliationRepository records,
         IExchangeOrderStatusQuery statusQuery,
         IAuditEventWriter audit,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ILiveFillPersistenceTransaction persistence)
     {
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
         _records = records ?? throw new ArgumentNullException(nameof(records));
         _statusQuery = statusQuery ?? throw new ArgumentNullException(nameof(statusQuery));
         _audit = audit ?? throw new ArgumentNullException(nameof(audit));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
     }
 
     /// <summary>
@@ -95,9 +98,6 @@ public sealed class OrderReconciliationService
 
         var now = _timeProvider.GetUtcNow();
 
-        order.MarkUnknown(reason, now);
-        await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
-
         var record = new OrderReconciliationRecord(
             Guid.NewGuid(),
             order.Id,
@@ -106,9 +106,15 @@ public sealed class OrderReconciliationService
             now,
             source);
 
-        await _records.AddAsync(record, cancellationToken).ConfigureAwait(false);
-        await WriteAuditAsync(order, "Trade.ReconciliationOpened", reason, now, cancellationToken)
-            .ConfigureAwait(false);
+        await _persistence.RunAsync(async token =>
+        {
+            var expectedVersion = order.Version;
+            order.MarkUnknown(reason, now);
+            await _orders.UpdateAsync(order, expectedVersion, token).ConfigureAwait(false);
+            await _records.AddAsync(record, token).ConfigureAwait(false);
+            await WriteAuditAsync(order, "Trade.ReconciliationOpened", reason, now, token)
+                .ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
 
         return record;
     }
@@ -147,18 +153,30 @@ public sealed class OrderReconciliationService
 
         if (result.Outcome == OrderStatusQueryOutcome.NotFound)
         {
+            if (order.Mode == TradingMode.Live && order.FilledQuantity > 0m)
+            {
+                const string ConflictingAbsence =
+                    "The exchange reported no order, but live fills were already recorded. Manual reconciliation is required.";
+                await WriteAuditAsync(order, "Trade.ReconciliationUnavailable",
+                    ConflictingAbsence, now, cancellationToken).ConfigureAwait(false);
+                return new ReconciliationOutcome(
+                    order.Id, ReconciliationDisposition.Unresolved, ExchangeOrderStatus.Unknown, ConflictingAbsence);
+            }
+
             const string NotFoundReason =
                 "The exchange confirmed no order exists with this client order id, so it was never accepted.";
 
-            record.Resolve(ExchangeOrderStatus.Rejected, NotFoundReason, now);
-            await _records.UpdateAsync(record, cancellationToken).ConfigureAwait(false);
-
-            order.ResolveReconciliation(
-                OrderState.Rejected, order.FilledQuantity, order.ExchangeOrderId, NotFoundReason, now);
-            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
-
-            await WriteAuditAsync(order, "Trade.ReconciliationResolved", NotFoundReason, now, cancellationToken)
-                .ConfigureAwait(false);
+            await _persistence.RunAsync(async token =>
+            {
+                var expectedVersion = order.Version;
+                record.Resolve(ExchangeOrderStatus.Rejected, NotFoundReason, now);
+                await _records.UpdateAsync(record, token).ConfigureAwait(false);
+                order.ResolveReconciliation(
+                    OrderState.Rejected, order.FilledQuantity, order.ExchangeOrderId, NotFoundReason, now);
+                await _orders.UpdateAsync(order, expectedVersion, token).ConfigureAwait(false);
+                await WriteAuditAsync(order, "Trade.ReconciliationResolved", NotFoundReason, now, token)
+                    .ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
 
             return new ReconciliationOutcome(
                 order.Id, ReconciliationDisposition.SafeToResubmit, ExchangeOrderStatus.Rejected, NotFoundReason);
@@ -167,19 +185,35 @@ public sealed class OrderReconciliationService
         var foundReason =
             $"The exchange reported status {status} with {result.FilledQuantity} filled.";
 
-        record.Resolve(status, foundReason, now);
-        await _records.UpdateAsync(record, cancellationToken).ConfigureAwait(false);
+        if (order.Mode == TradingMode.Live
+            && (result.FilledQuantity != order.FilledQuantity
+                || result.FilledQuantity > order.Quantity
+                || (result.State == ExchangeOrderState.Filled && result.FilledQuantity != order.Quantity)
+                || (result.State == ExchangeOrderState.Rejected && result.FilledQuantity != 0m)))
+        {
+            const string FillEvidenceRequired =
+                "Live exchange fills must be verified and applied to the position ledger before reconciliation can resolve.";
+            await WriteAuditAsync(order, "Trade.ReconciliationAwaitingFills",
+                FillEvidenceRequired, now, cancellationToken).ConfigureAwait(false);
+            return new ReconciliationOutcome(
+                order.Id, ReconciliationDisposition.Unresolved, status, FillEvidenceRequired);
+        }
 
-        order.ResolveReconciliation(
-            MapOrderState(result.State, order),
-            Math.Max(result.FilledQuantity, order.FilledQuantity),
-            result.ExchangeOrderId ?? order.ExchangeOrderId,
-            foundReason,
-            now);
-        await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
-
-        await WriteAuditAsync(order, "Trade.ReconciliationResolved", foundReason, now, cancellationToken)
-            .ConfigureAwait(false);
+        await _persistence.RunAsync(async token =>
+        {
+            var expectedVersion = order.Version;
+            record.Resolve(status, foundReason, now);
+            await _records.UpdateAsync(record, token).ConfigureAwait(false);
+            order.ResolveReconciliation(
+                MapOrderState(result.State, order),
+                Math.Max(result.FilledQuantity, order.FilledQuantity),
+                result.ExchangeOrderId ?? order.ExchangeOrderId,
+                foundReason,
+                now);
+            await _orders.UpdateAsync(order, expectedVersion, token).ConfigureAwait(false);
+            await WriteAuditAsync(order, "Trade.ReconciliationResolved", foundReason, now, token)
+                .ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
 
         var disposition = record.ProvesOrderIsNotLive
             ? ReconciliationDisposition.SafeToResubmit

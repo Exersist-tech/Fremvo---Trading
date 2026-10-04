@@ -33,29 +33,36 @@ public sealed record ExperimentProtectiveExitPosition(
     decimal? StopLossPrice,
     decimal? TakeProfitPrice,
     ExperimentWorker? Worker = null,
-    CandleInterval SignalInterval = CandleInterval.None);
+    CandleInterval SignalInterval = CandleInterval.None,
+    int StrategyVersion = 2,
+    DateTimeOffset? OpeningSignalCloseUtc = null);
 
 public static class ApprovedStrategyHoldingPolicy
 {
-    public static int MaximumSignalCandles(string strategyId) => strategyId switch
+    public static bool TryMaximumSignalCandles(
+        string strategyId, string? parametersJson, out int candles, out string error)
     {
-        "platform.ema-trend-continuation" => 40,
-        "platform.donchian-breakout-ensemble" => 60,
-        "platform.bollinger-mean-reversion" => 40,
-        "platform.rsi-pullback" => 40,
-        "platform.macd-volume" => 50,
-        "platform.volatility-compression-breakout" => 50,
-        "platform.cross-sectional-momentum-rotation" => 30,
-        "platform.relative-strength-pullback-rotation" => 180,
-        "platform.session-conditioned-breakout" => 60,
-        "platform.regime-switching-ensemble" => 50,
-        _ => 0
-    };
+        if (!ApprovedStrategyParameters.TryNormalize(strategyId, parametersJson, out var normalized, out error))
+        {
+            candles = 0;
+            return false;
+        }
+
+        candles = ApprovedStrategyParameters.Read(strategyId, normalized).Int32("maximumHoldingCandles");
+        return true;
+    }
+
+    public static int MaximumSignalCandles(string strategyId, string? parametersJson = null) =>
+        TryMaximumSignalCandles(strategyId, parametersJson, out var candles, out var error)
+            ? candles
+            : throw new InvalidOperationException($"Saved maximum-holding settings require review: {error}");
 
     public static bool IsExpired(ExperimentProtectiveExitPosition position, DateTimeOffset asOfUtc)
     {
         ArgumentNullException.ThrowIfNull(position);
-        var candles = MaximumSignalCandles(position.Worker?.StrategyId ?? string.Empty);
+        var candles = MaximumSignalCandles(
+            position.Worker?.StrategyId ?? string.Empty,
+            position.Worker?.StrategyParameters);
         if (candles == 0 || position.SignalInterval is CandleInterval.None or CandleInterval.FourDays)
             return false;
         var duration = TimeSpan.FromMinutes(checked((int)position.SignalInterval * candles));
@@ -63,53 +70,248 @@ public static class ApprovedStrategyHoldingPolicy
     }
 }
 
-public sealed record ApprovedStrategyInvalidation(bool ShouldExit, string Reason);
+public sealed record ApprovedStrategyInvalidation(bool ShouldExit, string Reason, bool IsBlocked = false);
 
 public static class ApprovedStrategyInvalidationPolicy
 {
+    public static bool RequiresVersionedEvidence(string strategyId, int strategyVersion) =>
+        strategyVersion >= 5 && strategyId == "platform.regime-switching-ensemble"
+        || strategyVersion >= 4 && strategyId is
+            "platform.ema-trend-continuation" or "platform.donchian-breakout-ensemble"
+            or "platform.bollinger-mean-reversion" or "platform.rsi-pullback"
+            or "platform.macd-volume" or "platform.volatility-compression-breakout"
+            or "platform.cross-sectional-momentum-rotation"
+            or "platform.three-swing-channel-divergence";
+
     public static ApprovedStrategyInvalidation Evaluate(
         string strategyId,
-        IReadOnlyList<Candle> signalCandles)
+        IReadOnlyList<Candle> signalCandles,
+        int strategyVersion = 2,
+        string? strategyParameters = null,
+        DateTimeOffset? openingSignalCloseUtc = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
         ArgumentNullException.ThrowIfNull(signalCandles);
-        if (signalCandles.Count < 51)
-            return new(false, "Strategy invalidation requires at least 51 closed signal candles.");
+        StrategyParameterValues? settings = null;
+        if (RequiresVersionedEvidence(strategyId, strategyVersion))
+        {
+            if (string.IsNullOrWhiteSpace(strategyParameters))
+                return new(false, "Saved strategy invalidation settings require review: missing position parameters.", true);
+            if (!ApprovedStrategyParameters.TryNormalize(strategyId, strategyParameters,
+                    out var normalized, out var error))
+                return new(false, $"Saved strategy invalidation settings require review: {error}", true);
+            settings = ApprovedStrategyParameters.Read(strategyId, normalized);
+        }
+        var minimumHistory = strategyId switch
+        {
+            "platform.ema-trend-continuation" => settings?.Int32("signalInvalidationEma") ?? 50,
+            "platform.donchian-breakout-ensemble" => settings?.Int32("exitChannel") + 1 ?? 21,
+            "platform.bollinger-mean-reversion" => settings?.Int32("bollingerPeriod") ?? 20,
+            "platform.rsi-pullback" => Math.Max(settings?.Int32("rsiPeriod") + 1 ?? 15,
+                settings?.Int32("signalEma") ?? 20),
+            "platform.macd-volume" => Math.Max(
+                (settings?.Int32("macdSlow") ?? 26) + (settings?.Int32("macdSignal") ?? 9) + 1,
+                settings?.Int32("signalEma") ?? 50),
+            "platform.volatility-compression-breakout" => settings?.Int32("exitChannel") + 1 ?? 21,
+            "platform.cross-sectional-momentum-rotation" => settings?.Int32("trendEma") ?? 200,
+            "platform.three-swing-channel-divergence" => Math.Max(
+                settings?.Int32("channelPeriod") ?? 50,
+                (settings?.Int32("macdSlow") ?? 26) + (settings?.Int32("macdSignal") ?? 9) + 1),
+            "platform.regime-switching-ensemble" => settings?.Int32("stopSwingLookback") + 1 ?? 51,
+            _ => 51
+        };
+        if (signalCandles.Count < Math.Max(51, minimumHistory))
+            return new(false, $"Strategy invalidation requires at least {Math.Max(51, minimumHistory)} closed signal candles.",
+                settings is not null);
 
         var current = signalCandles[^1];
+        if (settings is not null)
+        {
+            if (openingSignalCloseUtc is not DateTimeOffset openingClose
+                || openingClose.Offset != TimeSpan.Zero)
+                return new(false, "Strategy invalidation requires an attested UTC opening signal close.", true);
+            if (current.CloseTimeUtc <= openingClose)
+                return new(false, "A later closed signal candle is required to invalidate the opening decision.");
+            if (!signalCandles.Any(candle => candle.CloseTimeUtc == openingClose))
+                return new(false, "Strategy invalidation requires the original opening candle in closed history.", true);
+        }
         var prior = signalCandles.Take(signalCandles.Count - 1).ToArray();
         bool invalidated;
         string reason;
         switch (strategyId)
         {
                 case "platform.ema-trend-continuation":
-                    invalidated = current.Close < Ema(signalCandles, 50);
-                    reason = "Signal close crossed below EMA 50.";
+                    var invalidationEma = settings?.Int32("signalInvalidationEma") ?? 50;
+                    if (strategyVersion >= 5)
+                    {
+                        if (settings?.String("emaPlanModel") != "pullbackSwing")
+                            return new(false, "Saved EMA protection settings require owner review.", true);
+                        var openingIndex = Array.FindIndex(signalCandles.ToArray(),
+                            candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                        var swingLookback = settings.Int32("stopSwingLookback");
+                        if (openingIndex < swingLookback - 1)
+                            return new(false, "EMA pullback invalidation requires the full opening swing.", true);
+                        var swingLow = signalCandles.Skip(openingIndex - swingLookback + 1)
+                            .Take(swingLookback).Min(candle => candle.Low);
+                        invalidated = current.Close < swingLow
+                            || current.Close < Ema(signalCandles, invalidationEma);
+                        reason = $"Signal close broke the frozen EMA pullback swing low {swingLow} or EMA {invalidationEma}.";
+                        break;
+                    }
+                    invalidated = current.Close < Ema(signalCandles, invalidationEma);
+                    reason = $"Signal close crossed below EMA {invalidationEma}.";
                     break;
                 case "platform.donchian-breakout-ensemble":
                 case "platform.session-conditioned-breakout":
-                    invalidated = current.Close < prior.TakeLast(20).Min(candle => candle.Low);
-                    reason = "Signal close broke the prior Donchian 20 exit channel.";
+                    var exitChannel = settings?.Int32("exitChannel") ?? 20;
+                    invalidated = current.Close < prior.TakeLast(exitChannel).Min(candle => candle.Low);
+                    reason = $"Signal close broke the prior Donchian {exitChannel} exit channel.";
                     break;
                 case "platform.bollinger-mean-reversion":
-                    invalidated = current.Close >= Bands(signalCandles).Middle;
-                    reason = "Range-reversion price reached the Bollinger middle-band target.";
+                    var bandPeriod = settings?.Int32("bollingerPeriod") ?? 20;
+                    if (strategyVersion >= 5)
+                    {
+                        if (settings?.String("bollingerPlanModel") != "excursionMidBand")
+                            return new(false, "Saved Bollinger protection settings require owner review.", true);
+                        var openingIndex = Array.FindIndex(signalCandles.ToArray(),
+                            candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                        if (openingIndex < 1)
+                            return new(false, "Bollinger excursion invalidation requires the closed pre-entry excursion.", true);
+                        var excursionLow = Math.Min(signalCandles[openingIndex - 1].Low,
+                            signalCandles[openingIndex].Low);
+                        invalidated = current.Close < excursionLow;
+                        reason = $"Signal close broke the frozen Bollinger excursion/re-entry low {excursionLow}.";
+                    }
+                    else
+                    {
+                        invalidated = current.Close >= Bands(signalCandles, bandPeriod).Middle;
+                        reason = $"Range-reversion price reached the Bollinger {bandPeriod} middle-band target.";
+                    }
                     break;
                 case "platform.rsi-pullback":
-                    invalidated = Rsi(signalCandles) >= 70m || current.Close < Ema(signalCandles, 20);
-                    reason = "RSI upper target or signal EMA 20 invalidation was reached.";
+                    var rsiPeriod = settings?.Int32("rsiPeriod") ?? 14;
+                    var signalEma = settings?.Int32("signalEma") ?? 20;
+                    var exitRsi = settings?.Decimal("longExitRsi") ?? 70m;
+                    if (strategyVersion >= 5)
+                    {
+                        if (settings?.String("rsiPlanModel") != "pullbackSwing")
+                            return new(false, "Saved RSI pullback protection settings require owner review.", true);
+                        var openingIndex = Array.FindIndex(signalCandles.ToArray(),
+                            candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                        var swingLookback = settings.Int32("stopSwingLookback");
+                        if (openingIndex < swingLookback - 1)
+                            return new(false, "RSI pullback invalidation requires the full pre-entry swing.", true);
+                        var swingLow = signalCandles.Skip(openingIndex - swingLookback + 1)
+                            .Take(swingLookback).Min(candle => candle.Low);
+                        invalidated = current.Close < swingLow
+                            || Rsi(signalCandles, rsiPeriod) >= exitRsi
+                            || current.Close < Ema(signalCandles, signalEma);
+                        reason = $"Signal close broke the frozen RSI pullback swing low {swingLow}, RSI {rsiPeriod} reached {exitRsi}, or EMA {signalEma} failed.";
+                        break;
+                    }
+                    invalidated = Rsi(signalCandles, rsiPeriod) >= exitRsi
+                        || current.Close < Ema(signalCandles, signalEma);
+                    reason = $"RSI {rsiPeriod} upper target {exitRsi} or signal EMA {signalEma} invalidation was reached.";
                     break;
                 case "platform.macd-volume":
-                    var macd = Macd(signalCandles);
-                    var priorMacd = Macd(prior);
+                    var macdFast = settings?.Int32("macdFast") ?? 12;
+                    var macdSlow = settings?.Int32("macdSlow") ?? 26;
+                    var macdSignal = settings?.Int32("macdSignal") ?? 9;
+                    var trendEma = settings?.Int32("signalEma") ?? 50;
+                    var macd = Macd(signalCandles, macdFast, macdSlow, macdSignal);
+                    var priorMacd = Macd(prior, macdFast, macdSlow, macdSignal);
+                    if (strategyVersion >= 5)
+                    {
+                        if (settings?.String("macdPlanModel") != "crossSwing")
+                            return new(false, "Saved MACD protection settings require owner review.", true);
+                        var openingIndex = Array.FindIndex(signalCandles.ToArray(),
+                            candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                        var swingLookback = settings.Int32("stopSwingLookback");
+                        if (openingIndex < swingLookback - 1)
+                            return new(false, "MACD cross invalidation requires the full opening swing.", true);
+                        var swingLow = signalCandles.Skip(openingIndex - swingLookback + 1)
+                            .Take(swingLookback).Min(candle => candle.Low);
+                        invalidated = current.Close < swingLow
+                            || macd.Line < macd.Signal
+                            || macd.Histogram < priorMacd.Histogram
+                            || current.Close < Ema(signalCandles, trendEma);
+                        reason = $"Signal close broke the frozen MACD opening swing low {swingLow}, MACD {macdFast}/{macdSlow}/{macdSignal} reversed or slowed, or EMA {trendEma} failed.";
+                        break;
+                    }
                     invalidated = macd.Line < macd.Signal
                         || macd.Histogram < priorMacd.Histogram
-                        || current.Close < Ema(signalCandles, 50);
-                    reason = "MACD reverse cross, histogram deterioration, or EMA 50 failure occurred.";
+                        || current.Close < Ema(signalCandles, trendEma);
+                    reason = $"MACD {macdFast}/{macdSlow}/{macdSignal} reverse cross, histogram deterioration, or EMA {trendEma} failure occurred.";
                     break;
                 case "platform.volatility-compression-breakout":
-                    invalidated = current.Close <= prior.TakeLast(20).Max(candle => candle.High);
-                    reason = "Price closed back inside the prior compression boundary.";
+                    if (strategyVersion >= 5 && settings?.String("compressionPlanModel") != "priorRange")
+                        return new(false, "Saved compression protection settings require owner review.", true);
+                    var compressionChannel = settings?.Int32("exitChannel") ?? 20;
+                    if (settings is not null)
+                    {
+                        var openingIndex = Array.FindIndex(signalCandles.ToArray(),
+                            candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                        if (openingIndex < compressionChannel)
+                            return new(false, "Frozen compression boundary requires complete pre-break candles.", true);
+                        var frozenHigh = signalCandles.Skip(openingIndex - compressionChannel)
+                            .Take(compressionChannel).Max(candle => candle.High);
+                        invalidated = current.Close <= frozenHigh;
+                    }
+                    else
+                        invalidated = current.Close <= prior.TakeLast(compressionChannel)
+                            .Max(candle => candle.High);
+                    reason = $"Price closed back inside the {compressionChannel}-candle compression boundary.";
+                    break;
+                case "platform.cross-sectional-momentum-rotation":
+                    if (strategyVersion < 4)
+                        return new(false, "This family uses consensus, rank, or portfolio invalidation.");
+                    if (settings?.String("momentumPlanModel") != "dailySwing")
+                        return new(false, "Saved momentum protection settings require owner review.", true);
+                    var dailyOpeningIndex = Array.FindIndex(signalCandles.ToArray(),
+                        candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                    var dailySwingLookback = settings.Int32("stopSwingLookback");
+                    if (dailyOpeningIndex < dailySwingLookback)
+                        return new(false, "Momentum invalidation requires the full closed pre-entry daily swing.", true);
+                    var dailySwingLow = signalCandles.Skip(dailyOpeningIndex - dailySwingLookback)
+                        .Take(dailySwingLookback).Min(candle => candle.Low);
+                    var dailyTrendEma = settings.Int32("trendEma");
+                    invalidated = current.Close < dailySwingLow
+                        || current.Close < Ema(signalCandles, dailyTrendEma);
+                    reason = $"Daily close broke the frozen momentum swing low {dailySwingLow} or EMA {dailyTrendEma}.";
+                    break;
+                case "platform.three-swing-channel-divergence":
+                    if (strategyVersion < 4)
+                        return new(false, "Previous three-swing positions use their recorded numeric protection.");
+                    if (settings?.String("threeSwingPlanModel") != "confirmedPivot")
+                        return new(false, "Saved three-swing protection settings require owner review.", true);
+                    var swingOpeningIndex = Array.FindIndex(signalCandles.ToArray(),
+                        candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                    var swingChannel = settings.Int32("channelPeriod");
+                    if (swingOpeningIndex < swingChannel - 1)
+                        return new(false, "Three-swing invalidation requires the complete frozen opening channel.", true);
+                    var frozenChannelLow = signalCandles.Skip(swingOpeningIndex - swingChannel + 1)
+                        .Take(swingChannel).Min(candle => candle.Low);
+                    var swingMacd = Macd(signalCandles,
+                        settings.Int32("macdFast"), settings.Int32("macdSlow"),
+                        settings.Int32("macdSignal"));
+                    invalidated = current.Close < frozenChannelLow
+                        || settings.Boolean("exitOnMacdReversal") && swingMacd.Line < swingMacd.Signal;
+                    reason = $"Signal close broke the frozen third-swing channel low {frozenChannelLow} or configured MACD reversed.";
+                    break;
+                case "platform.regime-switching-ensemble":
+                    if (strategyVersion < 5)
+                        return new(false, "Previous ensemble positions use their recorded numeric protection.");
+                    if (settings?.String("regimePlanModel") != "fourHourSwing")
+                        return new(false, "Saved ensemble protection settings require owner review.", true);
+                    var regimeOpeningIndex = Array.FindIndex(signalCandles.ToArray(),
+                        candle => candle.CloseTimeUtc == openingSignalCloseUtc);
+                    var regimeSwingLookback = settings.Int32("stopSwingLookback");
+                    if (regimeOpeningIndex < regimeSwingLookback)
+                        return new(false, "Ensemble invalidation requires the complete pre-entry four-hour swing.", true);
+                    var regimeSwingLow = signalCandles.Skip(regimeOpeningIndex - regimeSwingLookback)
+                        .Take(regimeSwingLookback).Min(candle => candle.Low);
+                    invalidated = current.Close < regimeSwingLow;
+                    reason = $"Signal close broke the frozen ensemble four-hour swing low {regimeSwingLow}.";
                     break;
                 default:
                     return new(false, "This family uses consensus, rank, or portfolio invalidation.");
@@ -120,14 +322,14 @@ public static class ApprovedStrategyInvalidationPolicy
     private static decimal Ema(IReadOnlyList<Candle> candles, int period) =>
         new ExponentialMovingAverageCalculator(period).Calculate(candles).Value!.Value;
 
-    private static decimal Rsi(IReadOnlyList<Candle> candles) =>
-        new RelativeStrengthIndexCalculator(14).Calculate(candles).Value!.Value;
+    private static decimal Rsi(IReadOnlyList<Candle> candles, int period) =>
+        new RelativeStrengthIndexCalculator(period).Calculate(candles).Value!.Value;
 
-    private static BollingerBandsValue Bands(IReadOnlyList<Candle> candles) =>
-        new BollingerBandsCalculator(20, 2m).Calculate(candles).Value!.Value;
+    private static BollingerBandsValue Bands(IReadOnlyList<Candle> candles, int period) =>
+        new BollingerBandsCalculator(period, 2m).Calculate(candles).Value!.Value;
 
-    private static MacdValue Macd(IReadOnlyList<Candle> candles) =>
-        new MovingAverageConvergenceDivergenceCalculator(12, 26, 9).Calculate(candles).Value!.Value;
+    private static MacdValue Macd(IReadOnlyList<Candle> candles, int fast, int slow, int signal) =>
+        new MovingAverageConvergenceDivergenceCalculator(fast, slow, signal).Calculate(candles).Value!.Value;
 }
 
 public interface IExperimentProtectiveExitPositionSource
@@ -156,6 +358,9 @@ public interface IExperimentProtectiveExitLedger
         ExperimentProtectiveExitKey key,
         CancellationToken cancellationToken = default);
 
+    // Null for a separate trigger ledger; a shared paper ledger supplies its already-claimed association.
+    ExperimentPaperExecutionAssociation? GetPaperExecutionClaim(ExperimentProtectiveExitKey key);
+
     Task CompleteAsync(
         ExperimentProtectiveExitKey key,
         ExperimentPaperExecutionStatus status,
@@ -166,6 +371,8 @@ public interface IExperimentProtectiveExitLedger
 public sealed class InMemoryExperimentProtectiveExitLedger : IExperimentProtectiveExitLedger
 {
     private readonly ConcurrentDictionary<ExperimentProtectiveExitKey, (ExperimentPaperExecutionStatus Status, string Detail)> _records = new();
+
+    public ExperimentPaperExecutionAssociation? GetPaperExecutionClaim(ExperimentProtectiveExitKey key) => null;
 
     public Task<ExperimentProtectiveExitClaimResult> ClaimAsync(ExperimentProtectiveExitKey key, CancellationToken cancellationToken = default)
     {
@@ -178,9 +385,13 @@ public sealed class InMemoryExperimentProtectiveExitLedger : IExperimentProtecti
     public Task CompleteAsync(ExperimentProtectiveExitKey key, ExperimentPaperExecutionStatus status, string detail, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!_records.ContainsKey(key))
-            throw new InvalidOperationException("Only a claimed protective exit may be completed.");
-        _records[key] = (status, detail);
+        if (status is not (ExperimentPaperExecutionStatus.Completed
+            or ExperimentPaperExecutionStatus.Blocked or ExperimentPaperExecutionStatus.Unknown))
+            throw new ArgumentOutOfRangeException(nameof(status));
+        if (!_records.TryGetValue(key, out var current)
+            || current.Status != ExperimentPaperExecutionStatus.Claimed
+            || !_records.TryUpdate(key, (status, detail), current))
+            throw new InvalidOperationException("Only an unresolved Claimed protective exit may record its first outcome.");
         return Task.CompletedTask;
     }
 }
@@ -376,12 +587,12 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
                 throw;
             }
 #pragma warning disable CA1031 // A malformed paper position must not stop another isolated worker.
-            catch (Exception)
+            catch (Exception exception)
 #pragma warning restore CA1031
             {
                 // An unreadable or malformed position must not block another worker. The worker
                 // host logs this safe, non-sensitive reason without exposing exception details.
-                results.Add(new(null, false, "Position evaluation faulted safely."));
+                results.Add(new(null, false, $"Position evaluation faulted safely: {exception.GetType().Name}."));
             }
         }
 
@@ -405,8 +616,14 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
         if (!seriesResult.IsAvailable || seriesResult.Series is null)
             return [new(null, false, $"Closed candle evidence is unavailable: {seriesResult.BlockReason}.")];
 
+        var closedCandles = seriesResult.Series.Candles.OrderBy(candidate => candidate.OpenTimeUtc).ToArray();
+        var latest = closedCandles.LastOrDefault();
+        if (latest is null || !latest.CanBeUsedForClosedCandleSignal
+            || latest.CloseTimeUtc > asOfUtc || asOfUtc - latest.CloseTimeUtc > TimeSpan.FromMinutes(1))
+            return [new(null, false, "A fresh closed one-minute paper exit reference is unavailable.")];
+
         var results = new List<ExperimentProtectiveExitEvaluationResult>();
-        foreach (var candle in seriesResult.Series.Candles.OrderBy(candidate => candidate.OpenTimeUtc))
+        foreach (var candle in closedCandles)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!candle.CanBeUsedForClosedCandleSignal || candle.CloseTimeUtc <= position.OpenedAtUtc)
@@ -417,9 +634,9 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
                 continue;
 
             var triggered = trigger.Value;
-            var identity = $"{triggered.Kind}|{position.StopLossPrice}|{position.TakeProfitPrice}";
+            var identity = $"{triggered}|{position.StopLossPrice}|{position.TakeProfitPrice}";
             results.Add(await SubmitAsync(
-                position, candle, triggered.Kind, triggered.ExitPrice, identity, asOfUtc, cancellationToken).ConfigureAwait(false));
+                position, candle, latest, triggered, identity, asOfUtc, cancellationToken).ConfigureAwait(false));
             return results;
         }
 
@@ -427,14 +644,16 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
             position,
             asOfUtc,
             cancellationToken).ConfigureAwait(false);
+        if (invalidation.Decision.IsBlocked)
+            results.Add(new(null, false, invalidation.Decision.Reason));
         if (invalidation.Decision.ShouldExit && invalidation.Candle is not null)
         {
             var identity = $"{ExperimentProtectiveExitKind.StrategyInvalidation}|v2|{invalidation.Decision.Reason}";
             results.Add(await SubmitAsync(
                 position,
                 invalidation.Candle,
+                latest,
                 ExperimentProtectiveExitKind.StrategyInvalidation,
-                invalidation.Candle.Close,
                 identity,
                 asOfUtc,
                 cancellationToken).ConfigureAwait(false));
@@ -448,23 +667,27 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
             results.Add(await SubmitAsync(
                 position,
                 momentum.TriggerCandle,
+                latest,
                 ExperimentProtectiveExitKind.MomentumReversal,
-                momentum.ExitPrice.Value,
                 momentumIdentity,
                 asOfUtc,
                 cancellationToken).ConfigureAwait(false));
             return results;
         }
 
-        var latest = seriesResult.Series.Candles[^1];
-        if (ApprovedStrategyHoldingPolicy.IsExpired(position, latest.CloseTimeUtc))
+        if (!ApprovedStrategyHoldingPolicy.TryMaximumSignalCandles(
+                position.Worker?.StrategyId ?? string.Empty,
+                position.Worker?.StrategyParameters,
+                out _, out var holdingError))
+            results.Add(new(null, false, $"Saved maximum-holding settings require review: {holdingError}"));
+        else if (ApprovedStrategyHoldingPolicy.IsExpired(position, latest.CloseTimeUtc))
         {
             var identity = $"{ExperimentProtectiveExitKind.MaximumHolding}|v2|{position.SignalInterval}";
             results.Add(await SubmitAsync(
                 position,
                 latest,
+                latest,
                 ExperimentProtectiveExitKind.MaximumHolding,
-                latest.Close,
                 identity,
                 asOfUtc,
                 cancellationToken).ConfigureAwait(false));
@@ -494,11 +717,16 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
                 ApprovedConsensusStrategyProfiles.RequiredHistory),
             cancellationToken).ConfigureAwait(false);
         if (!result.IsAvailable || result.Series is null)
-            return (new(false, "Complete strategy invalidation evidence is unavailable."), null);
+            return (new(false, "Complete strategy invalidation evidence is unavailable.",
+                ApprovedStrategyInvalidationPolicy.RequiresVersionedEvidence(
+                    position.Worker.StrategyId, position.StrategyVersion)), null);
         return (
             ApprovedStrategyInvalidationPolicy.Evaluate(
                 position.Worker.StrategyId,
-                result.Series.Candles),
+                result.Series.Candles,
+                position.StrategyVersion,
+                position.Worker.StrategyParameters,
+                position.OpeningSignalCloseUtc),
             result.Series.Candles[^1]);
     }
 
@@ -524,22 +752,24 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
 
     private async Task<ExperimentProtectiveExitEvaluationResult> SubmitAsync(
         ExperimentProtectiveExitPosition position,
-        Candle candle,
+        Candle triggerCandle,
+        Candle executionCandle,
         ExperimentProtectiveExitKind kind,
-        decimal exitPrice,
         string identity,
         DateTimeOffset asOfUtc,
         CancellationToken cancellationToken)
     {
         var key = new ExperimentProtectiveExitKey(
-            position.UserId, position.WorkerId, position.PositionId, identity, candle.CloseTimeUtc);
+            position.UserId, position.WorkerId, position.PositionId, identity, triggerCandle.CloseTimeUtc);
+        if (position.Worker is null || position.Worker.PositionQuantity != position.Quantity)
+            return new(key, false, "Protective exit requires the matching durable worker position.");
         var claim = await _exits.ClaimAsync(key, cancellationToken).ConfigureAwait(false);
         if (claim != ExperimentProtectiveExitClaimResult.Claimed)
             return new(key, false, "Protective exit was already claimed and will not be retried.");
 
         try
         {
-            var decision = CreateDecision(position, candle, kind, identity, asOfUtc);
+            var decision = CreateDecision(position, executionCandle, kind, identity, asOfUtc);
             var written = await _decisions.RecordAsync(position.UserId, decision, cancellationToken).ConfigureAwait(false);
             if (written.Result == ExperimentDecisionWriteResult.Conflict || written.Record is null)
             {
@@ -547,21 +777,25 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
                 return new(key, false, "Decision conflict is terminal and requires reconciliation.");
             }
 
-            var worker = position.Worker ?? CreateWorkerView(position);
             var context = new ExperimentPaperWorkerContext(
-                worker,
+                position.Worker,
                 new ExperimentWorkerPortfolioSnapshot(position.UserId, position.WorkerId, position.Quantity, asOfUtc),
-                new ExperimentPaperCandleSnapshot(position.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
-                    asOfUtc, exitPrice, candle.Volume, candle.QualityFlags.Select(flag => flag.ToString()).ToArray()));
-            var result = await _paper.ProcessAsync(written.Record, context, cancellationToken).ConfigureAwait(false);
+                new ExperimentPaperCandleSnapshot(position.Symbol, executionCandle.Interval, executionCandle.OpenTimeUtc, executionCandle.CloseTimeUtc,
+                    asOfUtc, executionCandle.Close, executionCandle.Volume, executionCandle.QualityFlags.Select(flag => flag.ToString()).ToArray()));
+            var paperClaim = _exits.GetPaperExecutionClaim(key);
+            var result = paperClaim is null
+                ? await _paper.ProcessAsync(written.Record, context, cancellationToken).ConfigureAwait(false)
+                : await _paper.ProcessPreclaimedProtectiveExitAsync(
+                    written.Record, context, paperClaim, cancellationToken).ConfigureAwait(false);
             var status = result.PipelineResult?.RequiresReconciliation == true ? ExperimentPaperExecutionStatus.Unknown
                 : result.PipelineResult?.Executed == true ? ExperimentPaperExecutionStatus.Completed
                 : ExperimentPaperExecutionStatus.Blocked;
-            await _exits.CompleteAsync(
-                key,
-                status,
-                result.Reason ?? result.PipelineResult?.BlockedReason ?? string.Empty,
-                cancellationToken).ConfigureAwait(false);
+            if (paperClaim is null || !result.Submitted)
+                await _exits.CompleteAsync(
+                    key,
+                    paperClaim is not null ? ExperimentPaperExecutionStatus.Unknown : status,
+                    result.Reason ?? result.PipelineResult?.BlockedReason ?? string.Empty,
+                    cancellationToken).ConfigureAwait(false);
             return new(
                 key,
                 result.Submitted && result.PipelineResult?.Executed == true,
@@ -570,7 +804,11 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
         }
         catch
         {
-            await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Pipeline outcome is unknown.", cancellationToken).ConfigureAwait(false);
+            // A completed shared claim may already have been persisted by the paper pipeline.
+            // Never overwrite its first outcome while handling a later failure.
+            if (_exits.GetPaperExecutionClaim(key) is not { } paperClaim
+                || await _paper.IsPreclaimedExecutionPendingAsync(paperClaim, cancellationToken).ConfigureAwait(false))
+                await _exits.CompleteAsync(key, ExperimentPaperExecutionStatus.Unknown, "Pipeline outcome is unknown.", cancellationToken).ConfigureAwait(false);
             throw;
         }
     }
@@ -581,18 +819,18 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
         position.OpenedAtUtc != default && position.OpenedAtUtc.Offset == TimeSpan.Zero &&
         (position.StopLossPrice is > 0m || position.TakeProfitPrice is > 0m);
 
-    private static (ExperimentProtectiveExitKind Kind, decimal ExitPrice)? EvaluateTrigger(ExperimentProtectiveExitPosition position, Candle candle)
+    private static ExperimentProtectiveExitKind? EvaluateTrigger(ExperimentProtectiveExitPosition position, Candle candle)
     {
         var stopTouched = position.StopLossPrice is decimal stop && candle.Low <= stop;
         var targetTouched = position.TakeProfitPrice is decimal target && candle.High >= target;
         if (!stopTouched && !targetTouched)
             return null;
 
-        // OHLC cannot identify the order when both levels occur. Preserve the existing
-        // conservative rule: settle as the stop, and honour a gap at the candle open.
+        // OHLC cannot identify the order when both levels occur. Prefer the stop;
+        // the simulated close itself uses the later fresh one-minute reference.
         if (stopTouched)
-            return (ExperimentProtectiveExitKind.StopLoss, Math.Min(position.StopLossPrice!.Value, candle.Open));
-        return (ExperimentProtectiveExitKind.TakeProfit, Math.Max(position.TakeProfitPrice!.Value, candle.Open));
+            return ExperimentProtectiveExitKind.StopLoss;
+        return ExperimentProtectiveExitKind.TakeProfit;
     }
 
     private static ExperimentDecisionRecord CreateDecision(
@@ -608,14 +846,7 @@ public sealed class ExperimentProtectiveExitOrchestrator : IExperimentProtective
             ExperimentResearchGroup.A, ProtectiveExitStrategy, ProtectiveExitDecisionVersion, positionFingerprint,
             position.Symbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc, asOfUtc);
         return new ExperimentDecisionRecord(key, new ExperimentProposal(ExperimentProposalAction.Close,
-            $"Protective {kind} triggered from a closed durable candle."), positionFingerprint, asOfUtc);
+            $"Protective {kind} triggered from a closed durable candle; the paper reduction uses the latest closed one-minute reference."), positionFingerprint, asOfUtc);
     }
 
-    private static ExperimentWorker CreateWorkerView(ExperimentProtectiveExitPosition position)
-    {
-        var worker = new ExperimentWorker(position.WorkerId, position.UserId, "protective-exit", ProtectiveExitStrategy,
-            position.Symbol, decimal.MaxValue / 100m, position.OpenedAtUtc, 0);
-        worker.Start();
-        return worker;
-    }
 }

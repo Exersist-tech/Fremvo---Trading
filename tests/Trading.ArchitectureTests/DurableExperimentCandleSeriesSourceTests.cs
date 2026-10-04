@@ -144,6 +144,32 @@ public sealed class DurableExperimentCandleSeriesSourceTests
     }
 
     [Fact]
+    public async Task DailyAndFourHourContextRemainUsableUntilTheNextCloseButNotPastIt()
+    {
+        var latestDailyClose = new DateTimeOffset(2026, 9, 20, 0, 0, 0, TimeSpan.Zero);
+        var daily = new Candle("BTC/USD", CandleInterval.OneDay,
+            latestDailyClose.AddDays(-1), latestDailyClose,
+            100m, 101m, 99m, 100m, 1m, true, false);
+        var dailySource = new DurableExperimentCandleSeriesSource(new RecordingRepository(daily));
+        Assert.True((await dailySource.GetClosedSeriesAsync(new(
+            "BTC/USD", CandleInterval.OneDay, latestDailyClose.AddHours(12), 1))).IsAvailable);
+        Assert.Equal(ExperimentCandleSeriesBlockReason.Stale,
+            (await dailySource.GetClosedSeriesAsync(new(
+                "BTC/USD", CandleInterval.OneDay, latestDailyClose.AddDays(1).AddMinutes(6), 1))).BlockReason);
+
+        var fourHourClose = new DateTimeOffset(2026, 9, 20, 8, 0, 0, TimeSpan.Zero);
+        var fourHour = new Candle("BTC/USD", CandleInterval.FourHours,
+            fourHourClose.AddHours(-4), fourHourClose,
+            100m, 101m, 99m, 100m, 1m, true, false);
+        var fourHourSource = new DurableExperimentCandleSeriesSource(new RecordingRepository(fourHour));
+        Assert.True((await fourHourSource.GetClosedSeriesAsync(new(
+            "BTC/USD", CandleInterval.FourHours, fourHourClose.AddHours(3), 1))).IsAvailable);
+        Assert.Equal(ExperimentCandleSeriesBlockReason.Stale,
+            (await fourHourSource.GetClosedSeriesAsync(new(
+                "BTC/USD", CandleInterval.FourHours, fourHourClose.AddHours(4).AddMinutes(6), 1))).BlockReason);
+    }
+
+    [Fact]
     public void SourceHasNoExchangeOrSecretDependency()
     {
         var references = typeof(DurableExperimentCandleSeriesSource).Assembly

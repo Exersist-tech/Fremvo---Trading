@@ -22,6 +22,8 @@ public enum FuturesMarginMode
 /// <summary>
 /// Exchange-neutral, observed state for one linear futures position.
 /// This aggregate is intentionally independent from Spot positions and order execution.
+/// Quantity is the number of contracts; ContractMultiplier is the independently
+/// verified base-asset amount represented by each linear contract.
 /// </summary>
 public sealed class FuturesPosition
 {
@@ -30,6 +32,7 @@ public sealed class FuturesPosition
         string contract,
         FuturesPositionSide side,
         decimal quantity,
+        decimal contractMultiplier,
         decimal entryPrice,
         decimal markPrice,
         decimal margin,
@@ -44,6 +47,7 @@ public sealed class FuturesPosition
             ValidateContract(contract),
             ValidateSide(side),
             ValidatePositive(quantity, nameof(quantity)),
+            ValidatePositive(contractMultiplier, nameof(contractMultiplier)),
             ValidatePositive(entryPrice, nameof(entryPrice)),
             ValidatePositive(markPrice, nameof(markPrice)),
             ValidateNonNegative(margin, nameof(margin)),
@@ -62,6 +66,7 @@ public sealed class FuturesPosition
         string contract,
         FuturesPositionSide side,
         decimal quantity,
+        decimal contractMultiplier,
         decimal entryPrice,
         decimal markPrice,
         decimal margin,
@@ -79,6 +84,7 @@ public sealed class FuturesPosition
         Contract = contract;
         Side = side;
         Quantity = quantity;
+        ContractMultiplier = contractMultiplier;
         EntryPrice = entryPrice;
         MarkPrice = markPrice;
         Margin = margin;
@@ -98,6 +104,8 @@ public sealed class FuturesPosition
     public FuturesPositionSide Side { get; }
 
     public decimal Quantity { get; }
+
+    public decimal ContractMultiplier { get; }
 
     public decimal EntryPrice { get; }
 
@@ -128,8 +136,8 @@ public sealed class FuturesPosition
     public decimal UnrealizedPnl => Quantity == 0m
         ? 0m
         : Side == FuturesPositionSide.LongPosition
-            ? (MarkPrice - EntryPrice) * Quantity
-            : (EntryPrice - MarkPrice) * Quantity;
+            ? (MarkPrice - EntryPrice) * Quantity * ContractMultiplier
+            : (EntryPrice - MarkPrice) * Quantity * ContractMultiplier;
 
     public FuturesPosition ObserveValuation(
         decimal markPrice,
@@ -181,8 +189,8 @@ public sealed class FuturesPosition
         }
 
         var realizedDelta = Side == FuturesPositionSide.LongPosition
-            ? (executionPrice - EntryPrice) * quantityToReduce
-            : (EntryPrice - executionPrice) * quantityToReduce;
+            ? (executionPrice - EntryPrice) * quantityToReduce * ContractMultiplier
+            : (EntryPrice - executionPrice) * quantityToReduce * ContractMultiplier;
         var remainingQuantity = Quantity - quantityToReduce;
 
         return With(
@@ -193,15 +201,18 @@ public sealed class FuturesPosition
             status: remainingQuantity == 0m ? FuturesPositionStatus.Closed : FuturesPositionStatus.Open);
     }
 
-    public FuturesPosition MarkLiquidated(DateTimeOffset observedAtUtc)
+    /// <summary>
+    /// Records a venue-confirmed liquidation and its observed cumulative realized P&amp;L.
+    /// A prior mark or estimated liquidation trigger is not a liquidation fill price.
+    /// </summary>
+    public FuturesPosition MarkLiquidated(decimal observedRealizedPnl, DateTimeOffset observedAtUtc)
     {
         EnsureOpen();
         ValidateNextTimestamp(observedAtUtc);
 
         return With(
             quantity: 0m,
-            markPrice: LiquidationPrice,
-            realizedPnl: RealizedPnl + UnrealizedPnl,
+            realizedPnl: observedRealizedPnl,
             valuedAtUtc: observedAtUtc,
             status: FuturesPositionStatus.Liquidated);
     }
@@ -220,6 +231,7 @@ public sealed class FuturesPosition
             Contract,
             Side,
             quantity ?? Quantity,
+            ContractMultiplier,
             EntryPrice,
             markPrice ?? MarkPrice,
             margin ?? Margin,

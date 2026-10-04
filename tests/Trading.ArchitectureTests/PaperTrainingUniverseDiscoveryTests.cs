@@ -244,7 +244,8 @@ public sealed class PaperTrainingUniverseDiscoveryTests
             active,
             0.0001m,
             0.0001m,
-            0.0001m);
+            0.0001m,
+            10m);
     }
 
     private static Candle[] Daily(
