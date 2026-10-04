@@ -77,7 +77,7 @@ public sealed class PaperStrategyConfigurationEndpointTests
                 .Select(slot => new
                 {
                     slot,
-                    strategyId = slot == 1
+                    strategyId = slot is 1 or 3
                         ? PaperTrainingActivationService.ThreeSwingChannelDivergenceStrategyId
                         : PaperTrainingActivationService.ApprovedSlots[0].StrategyId,
                     strategyParametersJson = "{}"
@@ -97,6 +97,14 @@ public sealed class PaperStrategyConfigurationEndpointTests
                 assignment.GetProperty("strategyId").GetString());
             Assert.Equal(reserved.StrategyId, assignment.GetProperty("currentStrategyId").GetString());
             Assert.Equal(reserved.StrategyVersion, assignment.GetProperty("currentStrategyVersion").GetInt32());
+            using var experiments = await client.GetAsync(new Uri("/api/experiments", UriKind.Relative));
+            Assert.Equal(HttpStatusCode.OK, experiments.StatusCode);
+            using var monitor = JsonDocument.Parse(await experiments.Content.ReadAsStringAsync());
+            var scanning = monitor.RootElement.GetProperty("workers").EnumerateArray()
+                .Single(worker => worker.GetProperty("slot").GetInt32() == 3);
+            Assert.Equal(PaperTrainingActivationService.ThreeSwingChannelDivergenceStrategyId,
+                scanning.GetProperty("strategyId").GetString());
+            Assert.Equal("Scanning", scanning.GetProperty("runtimeStatus").GetString());
         }
         finally
         {

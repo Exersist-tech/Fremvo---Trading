@@ -2205,6 +2205,9 @@ app.MapGet("/api/experiments", async (
                 worker.OpenBuyFillPrice,
                 worker.LastBuyFillPrice,
                 worker.LastSellFillPrice,
+                worker.OpenPositionEntry,
+                worker.ProtectiveStopPrice,
+                worker.EstimatedTargetPrice,
                 worker.PositionCost,
                 worker.CurrentPrice,
                 worker.CurrentPriceAsOfUtc,
@@ -3537,7 +3540,7 @@ app.MapGet("/api/portfolio", async (
 // never be mistaken for a finished one by anything that draws or trades on it.
 // ---------------------------------------------------------------------------
 
-app.MapGet("/api/marketdata/orderbook/stream", async (
+app.MapMethods("/api/marketdata/orderbook/stream", [HttpMethods.Get, HttpMethods.Connect], async (
     HttpContext context,
     string symbol,
     IStreamingOrderBookSource orderBookSource,
@@ -3601,7 +3604,9 @@ app.MapGet("/api/marketdata/orderbook/stream", async (
             var error = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "error",
-                message = $"Kraken order book unavailable: {exception.Message}"
+                message = $"Kraken order book unavailable: {exception.Message}",
+                retryable = !exception.Message.StartsWith(
+                    "Kraken rejected the public order-book subscription", StringComparison.Ordinal)
             }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             await socket.SendAsync(error, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
         }

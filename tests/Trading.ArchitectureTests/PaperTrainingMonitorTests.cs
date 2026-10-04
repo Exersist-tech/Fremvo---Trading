@@ -42,6 +42,40 @@ public sealed class PaperTrainingMonitorTests
     }
 
     [Fact]
+    public async Task ShowsApprovedThreeSwingAssignmentsInVacantSlotsWithTheirOwnSeeds()
+    {
+        var ownerId = Guid.NewGuid();
+        var activations = new InMemoryPaperTrainingActivationRepository();
+        var service = new PaperTrainingActivationService(
+            activations, new InMemoryAuditEventWriter(), TimeProvider.System);
+        var active = await service.StartScannerAsync(
+            ownerId, ownerId, Trading.Domain.Identity.RoleType.User,
+            new(true, true, true, true, true, true));
+        var strategyId = PaperTrainingActivationService.ThreeSwingChannelDivergenceStrategyId;
+        var assignments = active.ConfiguredStrategies.Select(assignment =>
+            assignment.Slot is 3 or 7
+                ? assignment with { StrategyId = strategyId }
+                : assignment).ToArray();
+        await service.ConfigureScannerStrategiesAsync(
+            ownerId, ownerId, Trading.Domain.Identity.RoleType.User, assignments);
+
+        var monitor = await new PaperTrainingMonitorService(
+            activations, new InMemoryExperimentWorkerRepository(),
+            new StubCandleRepository(), new InMemoryExperimentPaperExecutionLedger(),
+            new EmptyPaperPlans()).GetAsync(ownerId);
+
+        Assert.Equal(ExperimentWorker.MaxWorkersPerUser, monitor.Workers.Count);
+        foreach (var slotNumber in new[] { 3, 7 })
+        {
+            var item = Assert.Single(monitor.Workers, worker => worker.Slot == slotNumber);
+            Assert.Equal(strategyId, item.StrategyId);
+            Assert.Equal(PaperTrainingActivationService.ApprovedSlots[slotNumber - 1].Seed, item.Seed);
+            Assert.Equal("Scanning", item.RuntimeStatus);
+            Assert.Null(item.WorkerId);
+        }
+    }
+
+    [Fact]
     public async Task ListsOnlyCurrentOwnerActiveSlotsWithBalancesPositionsAndRecentTrades()
     {
         var ownerId = Guid.NewGuid();
@@ -133,6 +167,8 @@ public sealed class PaperTrainingMonitorTests
             [CandleInterval.OneHour, CandleInterval.FiveMinutes, CandleInterval.OneMinute],
             item.AnalysisIntervals);
         Assert.Equal("Unprotected", item.RuntimeStatus);
+        Assert.Null(item.ProtectiveStopPrice);
+        Assert.Null(item.EstimatedTargetPrice);
         Assert.Contains("matching approved protective plan", item.FailureReason, StringComparison.Ordinal);
         Assert.Equal(953m, item.CashBalance);
         Assert.Equal(0.5m, item.PositionQuantity);
@@ -182,6 +218,8 @@ public sealed class PaperTrainingMonitorTests
             .GetAsync(ownerId);
         var stale = Assert.Single(protectedMonitor.Workers);
         Assert.Equal("ProtectionDataStale", stale.RuntimeStatus);
+        Assert.Equal(90m, stale.ProtectiveStopPrice);
+        Assert.Equal(130m, stale.EstimatedTargetPrice);
         Assert.Contains("one-minute", stale.FailureReason, StringComparison.Ordinal);
 
         var oneMinute = new Candle(slot.Symbol, CandleInterval.OneMinute,
@@ -191,6 +229,15 @@ public sealed class PaperTrainingMonitorTests
             new InMemoryExperimentPaperExecutionLedger(), plans, new FixedTimeProvider(currentPriceAt))
             .GetAsync(ownerId);
         Assert.Equal("Running", Assert.Single(freshMonitor.Workers).RuntimeStatus);
+        Assert.Equal(130m, Assert.Single(freshMonitor.Workers).EstimatedTargetPrice);
+
+        var noTarget = new EmptyPaperPlans([new ExperimentPaperPlanEvidence(key, 90m, null, planAt)]);
+        var noTargetMonitor = await new PaperTrainingMonitorService(activations, workers,
+            new StubCandleRepository(priceCandle, [priceCandle, oneMinute]),
+            new InMemoryExperimentPaperExecutionLedger(), noTarget,
+            new FixedTimeProvider(currentPriceAt)).GetAsync(ownerId);
+        Assert.Equal(90m, Assert.Single(noTargetMonitor.Workers).ProtectiveStopPrice);
+        Assert.Null(Assert.Single(noTargetMonitor.Workers).EstimatedTargetPrice);
 
         var commandId = worker.Ledger.Last().Id;
         var pending = new ExperimentPaperExecutionAssociation(key, "matched-command",
@@ -324,6 +371,8 @@ public sealed class PaperTrainingMonitorTests
         var beforePartialExit = Assert.Single((await monitor.GetAsync(owner)).Workers);
         Assert.Equal(125m, beforePartialExit.OpenBuyFillPrice);
         Assert.Null(beforePartialExit.LastSellFillPrice);
+        Assert.Equal(started.AddMinutes(3), beforePartialExit.OpenPositionEntry?.OccurredAtUtc);
+        Assert.Equal(120m, beforePartialExit.OpenPositionEntry?.ExecutionPrice);
 
         worker.ApplyPaperTrade(0.5m, 140m, 0.5m, "sell", started.AddMinutes(5));
         await workers.SaveAsync(worker);
@@ -333,13 +382,30 @@ public sealed class PaperTrainingMonitorTests
         Assert.Equal(126m, open.AverageEntryPrice);
         Assert.Equal(130m, open.LastBuyFillPrice);
         Assert.Equal(140m, open.LastSellFillPrice);
+        Assert.Equal(started.AddMinutes(3), open.OpenPositionEntry?.OccurredAtUtc);
 
         worker.ApplyPaperTrade(1.5m, 145m, 1m, "sell", started.AddMinutes(6));
         await workers.SaveAsync(worker);
         var flat = Assert.Single((await monitor.GetAsync(owner)).Workers);
         Assert.Null(flat.OpenBuyFillPrice);
+        Assert.Null(flat.OpenPositionEntry);
+        Assert.Null(flat.ProtectiveStopPrice);
+        Assert.Null(flat.EstimatedTargetPrice);
         Assert.Equal(130m, flat.LastBuyFillPrice);
         Assert.Equal(145m, flat.LastSellFillPrice);
+
+        worker.ApplyPaperTrade(2m, 100m, 0m, "buy", started.AddMinutes(7));
+        for (var index = 0; index < 11; index++)
+            worker.ApplyPaperTrade(0.1m, 110m, 0m, "sell", started.AddMinutes(8 + index));
+        await workers.SaveAsync(worker);
+        var later = new PaperTrainingMonitorService(activations, workers,
+            new StubCandleRepository(), new InMemoryExperimentPaperExecutionLedger(),
+            new EmptyPaperPlans(), new FixedTimeProvider(started.AddMinutes(30)));
+        var position = Assert.Single((await later.GetAsync(owner)).Workers);
+        Assert.Equal(started.AddMinutes(7), position.OpenPositionEntry?.OccurredAtUtc);
+        Assert.Equal(100m, position.OpenPositionEntry?.ExecutionPrice);
+        Assert.DoesNotContain(position.RecentTrades,
+            trade => trade.OccurredAtUtc == started.AddMinutes(7));
     }
 
     [Fact]

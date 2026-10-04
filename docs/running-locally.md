@@ -393,7 +393,12 @@ than persisted numeric decision inputs, and off-chart higher-timeframe gates
 remain described by the worker's recorded evidence. The Worker strategies
 page exposes all eleven approved strategy templates and persists bounded rule settings for each, including
 strategies not currently assigned to a worker, alongside the per-slot
-assignments. These settings are stored in the existing owner-scoped
+assignments. Three-swing channel divergence can be assigned to worker slot 3
+like any other approved template; while the slot is awaiting admission, its
+monitor entry shows **Scanning** with that slot's seed, not a simulated fill.
+Reassigning a slot does not replace an existing worker or its open position;
+the selected template applies to its next eligible admission. These settings
+are stored in the existing owner-scoped
 paper-training activation JSON payload; no schema migration or API-secret
 storage is involved. The Worker strategies rule editor explains each control's input, how raising
 or lowering it changes future paper entries or exits, and whether a fixed
@@ -719,6 +724,34 @@ never as a live trade. The status shows the source's timestamp, marks fallback
 prices **not live**, and reports quote refresh failures. In a historically panned
 or price-zoomed view, an up/down arrow on the edge badge means the actual
 price is outside the visible scale; the chart's pan and zoom do not move.
+Kraken's catalogue can use a compact trading identifier such as `0GEUR` while
+publishing `0G/EUR` as the market stream name. Public price requests use the
+catalogue's slash-form name; worker assignments and paper fills keep their
+original trading identifier. Pairs without a valid stream name show unavailable
+rather than repeatedly requesting an invalid symbol.
+Hovering within the candle-price plot adds a separate dashed cursor guide and
+the price under the pointer on the right-hand scale, using the currently
+visible zoomed and panned price axis. The hover badge moves clear of the
+live-price badge when they meet. Hovering the volume area, price scale, or
+indicator panes does not claim a cursor price. The cursor guide is a visual
+readout only; it never supplies prices to workers, orders, or valuation.
+Selecting a worker shows its recorded simulated BUY fills as green up-arrows
+and SELL fills as red down-arrows at their execution prices. Hover directly
+over an arrow for the worker, side, quantity, fill price, pair, and execution
+time. The larger arrows sit slightly below BUY fills and above SELL fills;
+a short connector marks the exact execution level without covering the candle.
+The current open position's first BUY remains available even if it is
+older than the ten recent fills shown in worker evidence. When a fill falls
+outside the loaded candles, a chart-edge arrow is explicitly labeled
+**Before visible candles** or **After latest candle** in its tooltip; the
+edge is not represented as the original execution time on the candle axis.
+These are paper executions, not pre-risk strategy decisions or live fills.
+For a selected worker with an open position and a matching approved paper
+plan, the chart also draws its recorded protective stop and, if one exists,
+its **estimated exit target** as dashed levels with prices. No target is
+inferred when the saved plan has none. The estimated exit is neither a placed
+order nor a guarantee of execution, and it is removed when the position is
+flat or lacks an eligible plan.
 With no valid trade, snapshot, or closed candle there is no trustworthy
 price to draw. The guide is redrawn every second and is never
 used for worker signals, paper fills, live orders, or P&L. The chart refreshes
@@ -775,12 +808,19 @@ ten bid and ask levels. Its same-origin WebSocket stream subscribes to Kraken's
 public v2 book channel and checks each snapshot/update against Kraken's CRC32
 checksum before showing it. It uses no exchange API keys, is read-only, and is
 not an order, fill, or execution-price guarantee. A lost or invalid feed is
-marked disconnected and reconnected with backoff. Closing or changing the
+marked disconnected and reconnected with backoff; an explicitly rejected
+subscription stops reconnecting until a pair is selected again. Displayed
+depth is cleared when synchronization is lost. Closing or changing the
 browser's order-book stream cancels its upstream Kraken subscription without
 waiting for the next market update; this does not affect scanner or worker
 market-data subscriptions. If the browser reports that the relay could not
-connect, first confirm the web host is running at the page's origin; that
-message alone does not establish a Kraken feed failure.
+connect, first confirm the web host is running at the page's origin. The route
+accepts HTTP/1.1 WebSocket `GET` and HTTP/2 extended `CONNECT`; accepting only
+`GET` makes a direct HTTP/1.1 probe work while browsers negotiating HTTP/2
+fail their handshake. That message alone does not establish a Kraken feed
+failure. A separate HTTP 503 from three-swing evidence is a reported public
+candle-source failure, not an order-book handshake or a valid signal; inspect
+its response message and the host's upstream connectivity.
 
 Portfolio displays live Kraken balances and fake-fund paper positions in
 separate, labeled sections. Balance and position tables right-align exact

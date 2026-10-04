@@ -451,6 +451,10 @@
 .chart-legend .legend-exit { color: #f85149; }
 .chart-legend .legend-buy { color: #3fb950; }
 .chart-legend .legend-sell { color: #f85149; }
+.chart-legend .legend-buy::before,
+.chart-legend .legend-sell::before { background: none; border-radius: 0; font-size: 1rem; line-height: 0.55rem; }
+.chart-legend .legend-buy::before { content: "↑"; }
+.chart-legend .legend-sell::before { content: "↓"; }
 .chart-legend .legend-drawing { color: #58a6ff; }
 .chart-legend .legend-decision { color: #58a6ff; }
 .chart-legend .legend-ema20 { color: #58a6ff; }

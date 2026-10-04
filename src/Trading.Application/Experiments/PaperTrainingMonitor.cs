@@ -81,7 +81,10 @@ public sealed record PaperTrainingWorkerMonitorItem(
     PaperTrainingUnresolvedExecution? UnresolvedExecution = null,
     decimal? OpenBuyFillPrice = null,
     decimal? LastBuyFillPrice = null,
-    decimal? LastSellFillPrice = null);
+    decimal? LastSellFillPrice = null,
+    PaperTrainingTradeMonitorItem? OpenPositionEntry = null,
+    decimal? ProtectiveStopPrice = null,
+    decimal? EstimatedTargetPrice = null);
 
 public sealed record PaperTrainingMonitor(
     PaperTrainingActivationState State,
@@ -153,6 +156,7 @@ public sealed class PaperTrainingMonitorService
             .ConfigureAwait(false);
         var unresolvedByWorker = new Dictionary<Guid, ExperimentPaperExecutionAssociation>();
         var unprotectedWorkerIds = new HashSet<Guid>();
+        var activePlansByWorker = new Dictionary<Guid, ExperimentPaperPlanEvidence>();
         foreach (var worker in workers)
         {
             var unresolved = await _executions.GetUnresolvedAsync(ownerId, worker.Id, cancellationToken).ConfigureAwait(false);
@@ -165,10 +169,16 @@ public sealed class PaperTrainingMonitorService
             if (worker.PositionQuantity > 0m)
             {
                 var opened = PaperProtectivePositionEvidence.OpenedAt(worker);
+                var plans = await _plans.ListAsync(ownerId, worker.Id, cancellationToken).ConfigureAwait(false);
+                if (plans.Any(plan => plan.DecisionKey.UserId != ownerId
+                    || plan.DecisionKey.WorkerId != worker.Id))
+                    throw new InvalidOperationException("Paper plan evidence does not belong to the requested owner and worker.");
+                var plan = opened is null ? null : PaperProtectivePositionEvidence.FindPlan(worker, opened.Value, plans);
                 if (worker.Status is not (ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused or ExperimentWorkerStatus.Failed)
-                    || opened is null || PaperProtectivePositionEvidence.FindPlan(worker, opened.Value,
-                    await _plans.ListAsync(ownerId, worker.Id, cancellationToken).ConfigureAwait(false)) is null)
+                    || plan is null)
                     unprotectedWorkerIds.Add(worker.Id);
+                else
+                    activePlansByWorker.Add(worker.Id, plan);
             }
         }
         var commandIdsByWorker = new Dictionary<Guid, IReadOnlyList<Guid>>();
@@ -309,7 +319,8 @@ public sealed class PaperTrainingMonitorService
                     ? checked(worker.PositionQuantity * (latestPrice - worker.AverageEntryPrice))
                     : null;
                 var fillPrices = worker is null
-                    ? (OpenBuy: (decimal?)null, LastBuy: (decimal?)null, LastSell: (decimal?)null)
+                    ? (OpenBuy: (decimal?)null, LastBuy: (decimal?)null, LastSell: (decimal?)null,
+                        Entry: (PaperTrainingTradeMonitorItem?)null)
                     : FillPrices(worker);
 
                 return new PaperTrainingWorkerMonitorItem(
@@ -377,7 +388,14 @@ public sealed class PaperTrainingMonitorService
                             auditActionsByWorker.GetValueOrDefault(worker.Id))),
                     OpenBuyFillPrice: fillPrices.OpenBuy,
                     LastBuyFillPrice: fillPrices.LastBuy,
-                    LastSellFillPrice: fillPrices.LastSell);
+                    LastSellFillPrice: fillPrices.LastSell,
+                    OpenPositionEntry: fillPrices.Entry,
+                    ProtectiveStopPrice: worker is not null
+                        && activePlansByWorker.TryGetValue(worker.Id, out var activePlan)
+                        ? activePlan.ProtectiveStopPrice : null,
+                    EstimatedTargetPrice: worker is not null
+                        && activePlansByWorker.TryGetValue(worker.Id, out var exitPlan)
+                        ? exitPlan.ConservativeTargetPrice : null);
             })
             .Where(item => item.PositionQuantity is > 0m
                 || item.RuntimeStatus == "RequiresReconciliation"
@@ -394,7 +412,7 @@ public sealed class PaperTrainingMonitorService
             .Select(assignment =>
             {
                 var template = PaperTrainingActivationService.ApprovedSlots.Single(slot =>
-                    slot.StrategyId.Equals(assignment.StrategyId, StringComparison.Ordinal));
+                    slot.Slot == assignment.Slot);
                 return new PaperTrainingWorkerMonitorItem(
                     Slot: assignment.Slot,
                     StrategyId: assignment.StrategyId,
@@ -517,17 +535,25 @@ public sealed class PaperTrainingMonitorService
             : new[] { profile.Regime, profile.Signal, profile.Execution }.Distinct().ToArray();
     }
 
-    private static (decimal? OpenBuy, decimal? LastBuy, decimal? LastSell) FillPrices(ExperimentWorker worker)
+    private static (decimal? OpenBuy, decimal? LastBuy, decimal? LastSell,
+        PaperTrainingTradeMonitorItem? Entry) FillPrices(ExperimentWorker worker)
     {
         var quantity = 0m;
         var average = 0m;
         decimal? lastBuy = null;
         decimal? lastSell = null;
+        PaperTrainingTradeMonitorItem? entry = null;
         foreach (var fill in worker.Ledger.OrderBy(entry => entry.OccurredAtUtc).ThenBy(entry => entry.Id))
         {
             if (fill.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
             {
-                if (quantity == 0m) lastSell = null;
+                if (quantity == 0m)
+                {
+                    lastSell = null;
+                    entry = new PaperTrainingTradeMonitorItem(
+                        fill.Direction, fill.Quantity, fill.ExecutionPrice, fill.Fee,
+                        fill.OccurredAtUtc, fill.Symbol);
+                }
                 var nextQuantity = checked(quantity + fill.Quantity);
                 average = checked(average * quantity + fill.ExecutionPrice * fill.Quantity) / nextQuantity;
                 quantity = nextQuantity;
@@ -537,12 +563,16 @@ public sealed class PaperTrainingMonitorService
             {
                 quantity -= fill.Quantity;
                 lastSell = fill.ExecutionPrice;
-                if (quantity == 0m) average = 0m;
+                if (quantity == 0m)
+                {
+                    average = 0m;
+                    entry = null;
+                }
             }
         }
         if (quantity != worker.PositionQuantity)
             throw new InvalidOperationException("Open paper fill prices do not reconcile with the worker position.");
-        return (quantity > 0m ? average : null, lastBuy, lastSell);
+        return (quantity > 0m ? average : null, lastBuy, lastSell, entry);
     }
 
     private async Task<Candle?> GetLatestClosedPriceAsync(
