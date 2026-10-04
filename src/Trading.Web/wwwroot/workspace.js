@@ -2,6 +2,13 @@ const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 let reportingLocale;
 let reportingTimeZone;
 
+export function publicMarketSymbol(pair) {
+  const name = pair?.displayName?.trim() || pair?.symbol?.trim();
+  return typeof name === "string" && /^[A-Z0-9-]+\/[A-Z0-9-]+$/i.test(name) && name.length <= 40
+    ? name.toUpperCase()
+    : null;
+}
+
 const escapeHtml = value => String(value ?? "")
   .replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;")
@@ -926,7 +933,79 @@ export function drawLiveTradeOverlay(context, { symbol, price, lastClosedPrice, 
   context.restore();
 }
 
-function drawCandles(canvas, candles, positions, evidence, markers, drawings, preview, indicators, options, view, worker, liveTrade, liveQuote) {
+export function hoveredChartPrice(crosshair, { left, right, top, bottom, maxPrice, priceRange }) {
+  if (!crosshair || crosshair.verticalOnly || !Number.isFinite(crosshair.x)
+    || !Number.isFinite(crosshair.y) || crosshair.x < left || crosshair.x > right
+    || crosshair.y < top || crosshair.y > bottom || bottom <= top
+    || !Number.isFinite(maxPrice) || !Number.isFinite(priceRange) || priceRange <= 0)
+    return null;
+  const price = maxPrice - (crosshair.y - top) / (bottom - top) * priceRange;
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+export function drawHoveredPriceOverlay(context, { price, levelY, plotLeft, plotRight,
+  priceTop, priceBottom, axisWidth, liveLevelY = null }) {
+  const badgeHeight = 24;
+  const badgeY = Math.min(Math.max(levelY - badgeHeight / 2, priceTop), priceBottom - badgeHeight);
+  let displayY = badgeY;
+  if (Number.isFinite(liveLevelY)) {
+    const liveY = Math.min(Math.max(liveLevelY - 15, priceTop), priceBottom - 30);
+    if (displayY < liveY + 30 && displayY + badgeHeight > liveY)
+      displayY = liveY - badgeHeight >= priceTop ? liveY - badgeHeight : liveY + 30;
+  }
+  context.save();
+  context.strokeStyle = "#a7b1bd";
+  context.lineWidth = 1;
+  context.setLineDash([1, 3]);
+  context.beginPath();
+  context.moveTo(plotLeft, levelY + 0.5);
+  context.lineTo(plotRight, levelY + 0.5);
+  context.stroke();
+  context.setLineDash([]);
+  context.fillStyle = "#39485c";
+  context.fillRect(plotRight, displayY, axisWidth - 4, badgeHeight);
+  context.fillStyle = "#fff";
+  context.textAlign = "center";
+  context.font = "bold 11px Segoe UI, sans-serif";
+  context.fillText(formatNumber(price, 8), plotRight + (axisWidth - 4) / 2,
+    displayY + 16, axisWidth - 8);
+  context.restore();
+}
+
+export function workerFillMarkers(workers) {
+  return workers.flatMap(worker => {
+    const entry = Number(worker.positionQuantity) > 0 ? worker.openPositionEntry : null;
+    const matchesEntry = trade => entry && trade.occurredAtUtc === entry.occurredAtUtc
+      && trade.direction?.toLowerCase() === "buy"
+      && Number(trade.executionPrice) === Number(entry.executionPrice)
+      && Number(trade.quantity) === Number(entry.quantity);
+    const recent = worker.recentTrades ?? [];
+    return [...(entry && !recent.some(matchesEntry) ? [entry] : []), ...recent]
+      .filter(trade => ["buy", "sell"].includes(trade.direction?.toLowerCase()))
+      .map(trade => ({
+        kind: "trade",
+        symbol: trade.symbol ?? worker.symbol,
+        side: trade.direction.toLowerCase(),
+        time: trade.occurredAtUtc,
+        price: trade.executionPrice,
+        quantity: trade.quantity,
+        workerSlot: worker.slot,
+        isOpenEntry: Boolean(matchesEntry(trade))
+      }));
+  });
+}
+
+export function fillMarkerTooltip(marker, placement = null) {
+  const side = marker.side === "buy" ? "BUY" : "SELL";
+  return [
+    `Worker ${marker.workerSlot} · Paper ${side}${marker.isOpenEntry ? " entry" : ""}`,
+    `${marker.symbol} · ${formatTime(marker.time)}`,
+    `Quantity ${formatNumber(marker.quantity, 8)} · Fill ${formatNumber(marker.price, 8)}`,
+    ...(placement ? [`${placement} · actual fill time above`] : [])
+  ];
+}
+
+export function drawCandles(canvas, candles, positions, evidence, markers, drawings, preview, indicators, options, view, worker, liveTrade, liveQuote) {
   const context = canvas.getContext("2d");
   const bounds = canvas.getBoundingClientRect();
   const ratio = Math.max(1, window.devicePixelRatio || 1);
@@ -992,13 +1071,27 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
 
   const visiblePositions = (positions ?? []).filter(position =>
     String(position.symbol).toLowerCase() === String(view.symbol).toLowerCase());
-  const visibleMarkers = (markers ?? []).filter(marker =>
+  const workerPlan = worker?.symbol?.toLowerCase() === view.symbol?.toLowerCase()
+    && Number(worker.positionQuantity) > 0 ? worker : null;
+  const matchingMarkers = (markers ?? []).filter(marker =>
     String(marker.symbol).toLowerCase() === String(view.symbol).toLowerCase()
       && Number.isFinite(Date.parse(marker.time))
       && (marker.kind === "decision"
-        || (Number.isFinite(Number(marker.price)) && Number(marker.price) > 0))
-      && Date.parse(marker.time) >= visibleStartTime
-      && Date.parse(marker.time) <= visibleEndTime);
+        || (Number.isFinite(Number(marker.price)) && Number(marker.price) > 0)));
+  const visibleMarkers = matchingMarkers.filter(marker =>
+    Date.parse(marker.time) >= visibleStartTime && Date.parse(marker.time) <= visibleEndTime);
+  if (worker) {
+    for (const before of [true, false]) {
+      const outside = matchingMarkers.filter(marker => marker.kind === "trade"
+        && (before ? Date.parse(marker.time) < visibleStartTime
+          : Date.parse(marker.time) > visibleEndTime));
+      const edge = outside.find(marker => marker.isOpenEntry)
+        ?? outside.sort((a, b) => before
+          ? Date.parse(b.time) - Date.parse(a.time)
+          : Date.parse(a.time) - Date.parse(b.time))[0];
+      if (edge) visibleMarkers.push(edge);
+    }
+  }
   const visibleDrawings = (drawings ?? []).filter(annotation => {
     const startTime = Date.parse(annotation.start?.time);
     const endTime = Date.parse(annotation.end?.time);
@@ -1044,7 +1137,18 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
       }
     }
   });
-  visibleMarkers.filter(marker => marker.kind !== "decision").forEach(marker => {
+  if (workerPlan) {
+    for (const value of [workerPlan.protectiveStopPrice, workerPlan.estimatedTargetPrice]) {
+      const price = Number(value);
+      if (value != null && Number.isFinite(price) && price > 0) {
+        minPrice = Math.min(minPrice, price);
+        maxPrice = Math.max(maxPrice, price);
+      }
+    }
+  }
+  visibleMarkers.filter(marker => marker.kind !== "decision"
+    && Date.parse(marker.time) >= visibleStartTime
+    && Date.parse(marker.time) <= visibleEndTime).forEach(marker => {
     if (markerCandleIndex(marker.time) >= 0) {
       minPrice = Math.min(minPrice, Number(marker.price));
       maxPrice = Math.max(maxPrice, Number(marker.price));
@@ -1231,6 +1335,12 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
     drawLevel(position.stopLossPrice, "#f85149", "Stop");
     drawLevel(position.takeProfitPrice, "#3fb950", "Target");
   });
+  if (workerPlan) {
+    if (Number(workerPlan.protectiveStopPrice) > 0)
+      drawLevel(workerPlan.protectiveStopPrice, "#f85149", "Plan stop (not order)");
+    if (Number(workerPlan.estimatedTargetPrice) > 0)
+      drawLevel(workerPlan.estimatedTargetPrice, "#3fb950", "Est. exit (not order)");
+  }
   const pivots = evidence?.pivots ?? [];
   for (const pivot of pivots) {
     const candleIndex = markerCandleIndex(pivot.closeTimeUtc);
@@ -1265,35 +1375,66 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
     context.restore();
   }
 
+  const fillHitTargets = [];
   visibleMarkers.forEach(marker => {
     const candleIndex = markerCandleIndex(marker.time);
-    if (candleIndex < 0) return;
-    const x = pad.left + step * candleIndex + step / 2;
+    if (candleIndex < 0 && marker.kind !== "trade") return;
+    const time = Date.parse(marker.time);
+    const placement = time < visibleStartTime ? "Before visible candles"
+      : time > visibleEndTime ? "After latest candle" : candleIndex < 0 ? "Candle data missing" : null;
+    const x = placement === "Before visible candles" ? pad.left + 12
+      : placement === "After latest candle" ? pad.left + plotWidth - 12
+        : candleIndex < 0 ? pad.left + Math.min(plotWidth - 12, Math.max(12,
+            (time - visibleStartTime) / (visibleEndTime - visibleStartTime) * plotWidth))
+          : pad.left + step * candleIndex + step / 2;
     const markerY = y(marker.kind === "decision"
       ? visible[candleIndex].close
       : marker.price);
     const isBuy = marker.side?.toLowerCase() === "buy";
-    const color = marker.kind === "decision"
+    const isFill = marker.kind === "trade";
+    const tipY = isFill
+      ? Math.min(Math.max(markerY + (isBuy ? 8 : -8),
+        pad.top + (isBuy ? 4 : 29)), priceBottom - (isBuy ? 29 : 4))
+      : Math.min(Math.max(markerY, pad.top + 12), priceBottom - 12);
+    context.fillStyle = marker.kind === "decision"
       ? marker.action === "Open" || marker.action === "Add" ? "#58a6ff" : "#e3b341"
-      : marker.kind === "exit" ? "#d29922" : isBuy ? "#26a69a" : "#ef5350";
-    context.fillStyle = color;
+      : marker.kind === "position-entry" ? "#6ea8fe"
+        : isBuy ? "#3fb950" : "#f85149";
+    context.strokeStyle = "#101820";
+    context.lineWidth = 2;
+    context.setLineDash([]);
+    if (isFill && markerY >= pad.top && markerY <= priceBottom
+      && Math.abs(tipY - markerY) <= 8) {
+      context.save();
+      context.strokeStyle = context.fillStyle;
+      context.beginPath();
+      context.moveTo(x, markerY);
+      context.lineTo(x, tipY);
+      context.stroke();
+      context.restore();
+    }
     context.beginPath();
-    if (marker.kind === "decision") {
+    if (marker.kind === "decision" || marker.kind === "position-entry") {
       context.moveTo(x, markerY - 6);
       context.lineTo(x + 6, markerY);
       context.lineTo(x, markerY + 6);
       context.lineTo(x - 6, markerY);
-    } else if (isBuy) {
-      context.moveTo(x, markerY - 6);
-      context.lineTo(x - 5, markerY + 3);
-      context.lineTo(x + 5, markerY + 3);
     } else {
-      context.moveTo(x, markerY + 6);
-      context.lineTo(x - 5, markerY - 3);
-      context.lineTo(x + 5, markerY - 3);
+      context.moveTo(x, tipY);
+      context.lineTo(x - 11, tipY + (isBuy ? 13 : -13));
+      context.lineTo(x - 4, tipY + (isBuy ? 13 : -13));
+      context.lineTo(x - 4, tipY + (isBuy ? 25 : -25));
+      context.lineTo(x + 4, tipY + (isBuy ? 25 : -25));
+      context.lineTo(x + 4, tipY + (isBuy ? 13 : -13));
+      context.lineTo(x + 11, tipY + (isBuy ? 13 : -13));
     }
     context.closePath();
+    context.stroke();
     context.fill();
+    if (marker.kind === "trade")
+      fillHitTargets.push({ marker, x, y: tipY + (isBuy ? 12 : -12),
+        placement: [placement, markerY < pad.top || markerY > priceBottom
+          ? "Price outside visible scale" : null].filter(Boolean).join(" · ") || null });
   });
 
   const candleIndexForTime = timestamp => {
@@ -1380,15 +1521,14 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
       : view.crosshair.screenX - bounds.left;
     const crossX = Math.min(Math.max(crosshairX, pad.left), pad.left + plotWidth);
     const crossY = Math.min(Math.max(view.crosshair.y, pad.top), priceBottom);
+    const hoveredFill = fillHitTargets.findLast(target =>
+      Math.abs(crosshairX - target.x) <= 15
+      && Math.abs(view.crosshair.y - target.y) <= 17);
     context.strokeStyle = "#a7b1bd88";
     context.setLineDash([3, 3]);
     context.beginPath();
     context.moveTo(crossX, pad.top);
     context.lineTo(crossX, priceBottom);
-    if (!view.crosshair.verticalOnly) {
-      context.moveTo(pad.left, crossY);
-      context.lineTo(pad.left + plotWidth, crossY);
-    }
     context.stroke();
     context.setLineDash([]);
     const slotIndex = Math.max(0, Math.floor((crossX - pad.left) / step));
@@ -1401,16 +1541,15 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
       ? `Future ${formatChartTime(new Date(Date.parse(series[series.length - 1].closeTimeUtc) + (slotIndex - visible.length) * intervalMilliseconds).toISOString(), view.interval)}`
       : `${formatChartTime(candle.openTimeUtc, view.interval)} O ${formatNumber(candle.open, 8)} H ${formatNumber(candle.high, 8)} L ${formatNumber(candle.low, 8)} C ${formatNumber(candle.close, 8)} V ${formatNumber(candle.volume, 4)}${Number.isFinite(rsiValue) ? ` RSI ${formatNumber(rsiValue, 2)}` : ""}${Number.isFinite(macdValue) ? ` MACD ${formatNumber(macdValue, 5)}` : ""}`;
     const candleMarkers = visibleMarkers.filter(marker => markerCandleIndex(marker.time) === index);
-    const fillDetails = candleMarkers.map(marker =>
-      marker.kind === "decision"
-        ? `${marker.action} decision · ${marker.strategyId}: ${marker.reason}`
-        : `${(marker.side ?? "").toUpperCase()} ${formatNumber(marker.price, 8)} ${marker.source}`).join(" · ");
+    const fillDetails = candleMarkers.filter(marker => marker.kind === "decision")
+      .map(marker => `${marker.action} decision · ${marker.strategyId}: ${marker.reason}`).join(" · ");
     context.font = "11px Segoe UI, sans-serif";
-    const tooltipWidth = Math.min(plotWidth, Math.max(
-      context.measureText(details).width,
-      fillDetails ? context.measureText(fillDetails).width : 0) + 14);
+    const lines = hoveredFill ? fillMarkerTooltip(hoveredFill.marker, hoveredFill.placement)
+      : [details, ...(fillDetails ? [fillDetails] : [])];
+    const tooltipWidth = Math.min(plotWidth, Math.max(...lines.map(line =>
+      context.measureText(line).width)) + 14);
     const tooltipX = Math.min(Math.max(pad.left, crossX + 10), pad.left + plotWidth - tooltipWidth);
-    const tooltipHeight = fillDetails ? 49 : 19;
+    const tooltipHeight = hoveredFill ? lines.length * 16 + 8 : fillDetails ? 49 : 19;
     const tooltipY = Math.max(pad.top, crossY - tooltipHeight - 5);
     context.save();
     context.beginPath();
@@ -1419,13 +1558,20 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
     context.fillStyle = "#161b22";
     context.fillRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight);
     context.fillStyle = "#e6edf3";
-    context.fillText(details, tooltipX + 6, tooltipY + 13);
-    if (fillDetails) {
-      context.fillStyle = "#58a6ff";
-      context.fillText(fillDetails.slice(0, 128), tooltipX + 6, tooltipY + 28);
-      if (fillDetails.length > 128) {
+    if (hoveredFill) {
+      lines.forEach((line, lineIndex) => {
+        context.fillStyle = lineIndex === 0
+          ? hoveredFill.marker.side === "buy" ? "#7ee787" : "#ff7b72"
+          : "#e6edf3";
+        context.fillText(line, tooltipX + 6, tooltipY + 16 + lineIndex * 16,
+          tooltipWidth - 12);
+      });
+    } else {
+      context.fillText(details, tooltipX + 6, tooltipY + 13);
+      if (fillDetails) {
         context.fillStyle = "#aab6c2";
-        context.fillText(fillDetails.slice(128, 248), tooltipX + 6, tooltipY + 43);
+        context.fillText(fillDetails.slice(0, 240), tooltipX + 6, tooltipY + 28,
+          tooltipWidth - 12);
       }
     }
     context.restore();
@@ -1440,6 +1586,20 @@ function drawCandles(canvas, candles, positions, evidence, markers, drawings, pr
       plotLeft: pad.left, plotRight: pad.left + plotWidth,
       priceTop: pad.top, priceBottom, axisWidth: pad.right
     });
+  }
+  if (view.crosshair) {
+    const hoverX = view.crosshair.screenX === undefined
+      ? view.crosshair.x : view.crosshair.screenX - bounds.left;
+    const price = hoveredChartPrice({ ...view.crosshair, x: hoverX }, {
+      left: pad.left, right: pad.left + plotWidth, top: pad.top, bottom: priceBottom,
+      maxPrice, priceRange
+    });
+    if (price !== null)
+      drawHoveredPriceOverlay(context, {
+        price, levelY: view.crosshair.y, plotLeft: pad.left, plotRight: pad.left + plotWidth,
+        priceTop: pad.top, priceBottom, axisWidth: pad.right,
+        liveLevelY: guide ? y(guide.price) : null
+      });
   }
   return {
     left: pad.left,
@@ -1532,7 +1692,7 @@ async function renderTrade(root) {
           <div class="indicator-pane-header"><strong>MACD 12/26/9</strong><span>Drag to pan · scroll to zoom · drag scale to zoom</span></div>
           <canvas id="macd-chart" aria-label="MACD 12, 26, 9 pane. Drag to pan in time and value; scroll vertically to zoom MACD; drag the right value scale to zoom."></canvas>
         </div>
-        <div class="chart-legend"><span class="legend-price">Position entry</span><span class="legend-buy">Paper buy</span><span class="legend-sell">Paper sell</span><span class="legend-decision">Strategy decision (not fill)</span><span class="legend-signal">Strategy pivots</span><span class="legend-exit">Protective stop / target</span><span class="legend-drawing">User drawing / channel</span><span class="legend-ema20">EMA 20 / prior channel high</span><span class="legend-ema50">EMA 50 / prior channel low</span><span class="legend-bollinger">Bollinger Bands</span><span class="legend-volume">Volume</span></div>
+        <div class="chart-legend"><span class="legend-price">Manual position entry</span><span class="legend-buy">Worker BUY fill</span><span class="legend-sell">Worker SELL fill</span><span class="legend-decision">Strategy decision (not fill)</span><span class="legend-signal">Strategy pivots</span><span class="legend-exit">Protective stop / target</span><span class="legend-drawing">User drawing / channel</span><span class="legend-ema20">EMA 20 / prior channel high</span><span class="legend-ema50">EMA 50 / prior channel low</span><span class="legend-bollinger">Bollinger Bands</span><span class="legend-volume">Volume</span></div>
         <details id="worker-detail" class="workspace-panel-body worker-detail">
           <summary>Selected worker · strategy and execution evidence</summary>
           <div id="worker-detail-body" class="worker-detail-body"></div>
@@ -1604,6 +1764,7 @@ async function renderTrade(root) {
   let interval = "FiveMinutes";
   let side = "Buy";
   let selectedSymbol = "";
+  let selectedPublicSymbol = null;
   let activeTicketTab = "order";
   let filteredPairs = [];
   let activePairIndex = -1;
@@ -1635,6 +1796,7 @@ async function renderTrade(root) {
   let latestQuote = null;
   let quoteRequest = null;
   let quoteError = "";
+  let tradeFeedStatus = "";
   let drawingAnchor = null;
   let drawingEnd = null;
   let drawingPreview = null;
@@ -1665,46 +1827,63 @@ async function renderTrade(root) {
     pendingLiveTrade = null;
     latestQuote = null;
     quoteError = "";
+    tradeFeedStatus = "";
+    if (!selectedPublicSymbol) {
+      tradeFeedStatus = "Public price unavailable · no supported market stream symbol";
+      liveStatus.textContent = tradeFeedStatus;
+      return;
+    }
     liveStatus.textContent = "Trade feed connecting…";
     const url = new URL("/api/marketdata/ticker/stream", window.location.href);
-    url.searchParams.set("symbol", symbol);
+    const publicSymbol = selectedPublicSymbol;
+    url.searchParams.set("symbol", publicSymbol);
     const events = new EventSource(url);
     tickerEvents = events;
+    events.onopen = () => {
+      if (tickerEvents === events) tradeFeedStatus = "";
+    };
     events.onmessage = event => {
       if (tickerEvents !== events) return;
       try {
         const tick = JSON.parse(event.data);
-        if (tick.symbol === symbol) pendingLiveTrade = tick;
+        if (tick.symbol === publicSymbol) pendingLiveTrade = { ...tick, symbol };
       } catch {
-        liveStatus.textContent = "Invalid public trade feed message";
+        tradeFeedStatus = "Invalid public trade feed message";
       }
     };
     events.addEventListener("feed-error", event => {
       if (tickerEvents !== events) return;
       pendingLiveTrade = null;
-      liveStatus.textContent = event.data;
+      tradeFeedStatus = event.data;
       redrawChart();
     });
     events.onerror = () => {
       if (tickerEvents !== events) return;
       pendingLiveTrade = null;
-      liveStatus.textContent = "Public trade feed disconnected · retrying";
+      if (events.readyState === EventSource.CLOSED) {
+        events.close();
+        tradeFeedStatus = "Public trade feed unavailable · select a pair to retry";
+      } else {
+        tradeFeedStatus = "Public trade feed disconnected · retrying";
+      }
       redrawChart();
     };
     void pollQuote(symbol);
   };
   const pollQuote = async symbol => {
-    if (!symbol || quoteRequest) return;
+    if (!symbol || !selectedPublicSymbol || quoteRequest) return;
+    const publicSymbol = selectedPublicSymbol;
     const request = new AbortController();
     quoteRequest = request;
     try {
-      const quote = await api(`/api/marketdata/ticker/quote?symbol=${encodeURIComponent(symbol)}`,
+      const quote = await api(`/api/marketdata/ticker/quote?symbol=${encodeURIComponent(publicSymbol)}`,
         { signal: request.signal });
-      if (quoteRequest !== request || symbol !== currentSymbol()) return;
-      if (quote.symbol !== symbol || !Number.isFinite(Number(quote.price))
+      if (quoteRequest !== request || symbol !== currentSymbol()
+        || publicSymbol !== selectedPublicSymbol) return;
+      if (quote.symbol !== publicSymbol || !Number.isFinite(Number(quote.price))
         || Number(quote.price) <= 0 || !Number.isFinite(Date.parse(quote.asOfUtc)))
         throw new Error("Invalid public quote response");
-      latestQuote = quote;
+      latestQuote = { ...quote, symbol };
       quoteError = "";
       redrawChart();
     } catch (error) {
@@ -1744,22 +1923,30 @@ async function renderTrade(root) {
   const connectOrderBook = symbol => {
     window.clearTimeout(orderBookReconnectTimer);
     orderBookError = "";
+    pendingOrderBook = null;
     if (orderBookSocket) {
       orderBookSocket.onclose = null;
       orderBookSocket.close();
     }
-    const url = new URL("/api/marketdata/orderbook/stream", window.location.href);
-    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("symbol", symbol);
-    const socket = new WebSocket(url);
-    orderBookSocket = socket;
     root.querySelector("#order-book-asks").replaceChildren();
     root.querySelector("#order-book-bids").replaceChildren();
     root.querySelector("#order-book-updated").textContent = "Waiting for synchronized snapshot…";
+    if (!selectedPublicSymbol) {
+      orderBookSocket = null;
+      setOrderBookStatus("Unavailable · no supported market stream symbol", "error");
+      return;
+    }
+    const url = new URL("/api/marketdata/orderbook/stream", window.location.href);
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const publicSymbol = selectedPublicSymbol;
+    url.searchParams.set("symbol", publicSymbol);
+    const socket = new WebSocket(url);
+    let terminalError = false;
+    let synchronizedAt = 0;
+    orderBookSocket = socket;
     setOrderBookStatus("Connecting…");
     socket.addEventListener("open", () => {
       if (orderBookSocket !== socket) return;
-      orderBookRetry = 0;
       orderBookError = "";
       setOrderBookStatus("Connected · syncing");
     });
@@ -1769,15 +1956,27 @@ async function renderTrade(root) {
       try {
         message = JSON.parse(event.data);
       } catch {
-        setOrderBookStatus("Invalid feed message", "error");
+        orderBookError = "Invalid feed message";
+        setOrderBookStatus(orderBookError, "error");
         socket.close();
         return;
       }
       if (message.type === "error") {
         orderBookError = message.message || "Feed synchronization failed";
+        terminalError = message.retryable === false;
+        pendingOrderBook = null;
+        root.querySelector("#order-book-asks").replaceChildren();
+        root.querySelector("#order-book-bids").replaceChildren();
+        root.querySelector("#order-book-updated").textContent = "Order book unavailable; no synchronized depth.";
         setOrderBookStatus(orderBookError, "error");
         return;
       }
+      if (message.symbol !== publicSymbol || message.isSynchronized !== true) {
+        orderBookError = "Unexpected or unsynchronized order-book snapshot";
+        socket.close();
+        return;
+      }
+      if (!synchronizedAt) synchronizedAt = Date.now();
       pendingOrderBook = message;
       if (!orderBookRenderFrame) {
         orderBookRenderFrame = window.requestAnimationFrame(() => {
@@ -1791,10 +1990,23 @@ async function renderTrade(root) {
     });
     socket.addEventListener("close", event => {
       if (!orderBookActive || orderBookSocket !== socket) return;
+      pendingOrderBook = null;
+      root.querySelector("#order-book-asks").replaceChildren();
+      root.querySelector("#order-book-bids").replaceChildren();
+      root.querySelector("#order-book-updated").textContent = "Order book disconnected; no synchronized depth.";
+      if (terminalError) {
+        setOrderBookStatus(`${orderBookError} · select a pair to retry`, "error");
+        return;
+      }
+      if (synchronizedAt && Date.now() - synchronizedAt >= 30_000)
+        orderBookRetry = 0;
       const closeReason = event.reason || `WebSocket closed (${event.code})`;
       setOrderBookStatus(`${orderBookError || closeReason} · reconnecting`, "stale");
       const delay = Math.min(30_000, 1_000 * (2 ** Math.min(orderBookRetry++, 5)));
-      orderBookReconnectTimer = window.setTimeout(() => connectOrderBook(symbol), delay);
+      orderBookReconnectTimer = window.setTimeout(() => {
+        if (symbol === currentSymbol() && publicSymbol === selectedPublicSymbol)
+          connectOrderBook(symbol);
+      }, delay);
     });
     socket.addEventListener("error", () => {
       if (orderBookSocket === socket) {
@@ -1809,22 +2021,14 @@ async function renderTrade(root) {
     const displayedWorkers = selectedWorkerSlot === null
       ? workers
       : workers.filter(worker => worker.slot === selectedWorkerSlot);
-    const workerMarkers = displayedWorkers.flatMap(worker => (worker.recentTrades ?? []).map(trade => ({
-      symbol: trade.symbol ?? worker.symbol,
-      side: trade.direction,
-      kind: trade.direction?.toLowerCase() === "sell" ? "exit" : "trade",
-      time: trade.occurredAtUtc,
-      price: trade.executionPrice,
-      source: `Worker ${worker.slot} · ${worker.strategyId}`
-    })));
-    const positionMarkers = paperPositions.map(position => ({
+    const positionMarkers = selectedWorkerSlot === null ? paperPositions.map(position => ({
     symbol: position.symbol,
     side: position.direction === "Short" ? "sell" : "buy",
     kind: "position-entry",
     time: position.openedAtUtc,
     price: position.entryPrice,
     source: "Open paper position"
-    }));
+    })) : [];
     const selectedWorkerId = displayedWorkers.length === 1 ? displayedWorkers[0].workerId : null;
     const decisionMarkers = decisions
     .filter(decision => selectedWorkerSlot === null || decision.workerId === selectedWorkerId)
@@ -1838,7 +2042,7 @@ async function renderTrade(root) {
       reason: decision.reason,
       source: "Pre-risk strategy decision"
     }));
-    return [...workerMarkers, ...positionMarkers, ...decisionMarkers];
+    return [...workerFillMarkers(displayedWorkers), ...positionMarkers, ...decisionMarkers];
   };
   const redrawChart = () => {
     const selectedWorker = workers.find(worker => worker.slot === selectedWorkerSlot);
@@ -1850,7 +2054,7 @@ async function renderTrade(root) {
     chartGeometry = drawCandles(
       canvas,
       latestCandles,
-      paperPositions,
+      selectedWorkerSlot === null ? paperPositions : [],
       selectedWorkerSlot === null || selectedWorker?.strategyId === "platform.three-swing-channel-divergence"
         ? latestEvidence : null,
       tradeMarkers(),
@@ -2079,6 +2283,8 @@ async function renderTrade(root) {
     ?? currentPairs[0];
   if (preferred) {
     selectedSymbol = preferred.symbol;
+    selectedPublicSymbol = publicMarketSymbol(preferred);
+    orderBookRetry = 0;
     pairSearch.value = preferred.displayName || preferred.symbol;
     connectOrderBook(selectedSymbol);
     connectTradeTicker(selectedSymbol);
@@ -2799,8 +3005,8 @@ async function renderTrade(root) {
     const guide = chartPriceGuide(latestLiveTrade, currentSymbol(), latestCandles, interval,
       Date.now(), feedAvailable, latestQuote);
     liveStatus.textContent = guide
-      ? `${guide.stale ? guide.label : guide.label === "MID BBO" ? "Midquote" : "Last trade"} ${formatNumber(guide.price, 8)} · ${formatTime(guide.asOfUtc)}${guide.stale ? " · not live" : ""}${feedAvailable ? "" : " · trade feed disconnected"}${quoteError ? ` · ${quoteError}` : ""} · display only`
-      : `No selected-pair price available · ${feedAvailable ? "waiting for public trades/quotes" : "trade feed disconnected"}${quoteError ? ` · ${quoteError}` : ""}`;
+      ? `${guide.stale ? guide.label : guide.label === "MID BBO" ? "Midquote" : "Last trade"} ${formatNumber(guide.price, 8)} · ${formatTime(guide.asOfUtc)}${guide.stale ? " · not live" : ""}${tradeFeedStatus ? ` · ${tradeFeedStatus}` : feedAvailable ? "" : " · trade feed disconnected"}${quoteError ? ` · ${quoteError}` : ""} · display only`
+      : `No selected-pair price available · ${tradeFeedStatus || (feedAvailable ? "waiting for public trades/quotes" : "trade feed disconnected")}${quoteError ? ` · ${quoteError}` : ""}`;
     redrawChart();
   }, 1000);
   const quoteRefreshTimer = window.setInterval(() => {
@@ -2879,6 +3085,8 @@ async function renderTrade(root) {
       updateWorkerView();
     }
     selectedSymbol = pair.symbol;
+    selectedPublicSymbol = publicMarketSymbol(pair);
+    orderBookRetry = 0;
     latestEvidence = null;
     latestCandles = [];
     latestIndicators = calculateIndicators([]);

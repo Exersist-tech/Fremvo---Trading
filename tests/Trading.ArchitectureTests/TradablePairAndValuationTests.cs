@@ -37,6 +37,20 @@ public sealed class TradablePairAndValuationTests
     }
 
     [Fact]
+    public void CompactPairRetainsTradingIdentifierAndExposesVenueStreamName()
+    {
+        const string payload = """
+        {"error":[],"result":{"0GEUR":{"altname":"0GEUR","wsname":"0G/EUR","base":"0G","quote":"ZEUR","status":"online","lot_decimals":8,"ordermin":"1","tick_size":"0.001"}}}
+        """;
+
+        var pair = Assert.Single(KrakenAssetPairMapper.Map(payload));
+
+        Assert.Equal("0GEUR", pair.Symbol);
+        Assert.Equal("0G/EUR", pair.DisplayName);
+        Assert.True(pair.IsActive);
+    }
+
+    [Fact]
     public void APairMissingItsOrderFiltersIsSkippedRatherThanDefaulted()
     {
         // A guessed filter would let the platform submit an order the venue
