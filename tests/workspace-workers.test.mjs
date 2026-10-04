@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../src/Trading.Web/wwwroot/workspace.js", import.meta.url), "utf8");
+const styles = await readFile(new URL("../src/Trading.Web/wwwroot/workspace.css", import.meta.url), "utf8");
+const app = await readFile(new URL("../src/Trading.Web/Components/App.razor", import.meta.url), "utf8");
 const { workerDetailMarkup, workersMarkup, scanStatus, closedChannelLevels,
   workerStrategyVisualMarkup, clampAxisCenter, verticalScaleFactor, panAxisCenter,
   invalidStrategySettings, parseSavedStrategySettings, savedWorkerStrategySettings,
@@ -166,33 +168,45 @@ test("running workers have a visible active state distinct from selection", () =
     /worker-active|worker-running/);
 });
 
-test("worker rows show a compact scan time and accessible profit/loss coloring", () => {
+test("worker rows prioritize visible signed profit/loss without repeated scan timestamps", () => {
   const html = workersMarkup([
-    { ...worker, realizedProfitAndLoss: "12.5", unrealizedProfitAndLoss: "-2.25" }
-  ], null, "2026-10-03T07:05:00Z");
-  assert.match(html, /Last scanned/);
+    { ...worker, lastSellFillPrice: "128", realizedProfitAndLoss: "12.5",
+      unrealizedProfitAndLoss: "-2.25" }
+  ]);
+  assert.doesNotMatch(html, /Last scanned|Cost basis|buy fees|FiveMinutes/);
+  assert.match(html, /three swing channel divergence/);
+  assert.match(html, /Open P&amp;L <span class="pnl-negative">-2\.25/);
+  assert.match(html, /Realized P&amp;L <span class="pnl-positive">\+12\.5/);
   assert.match(html, /class="pnl-positive">\+12\.5/);
   assert.match(html, /class="pnl-negative">-2\.25/);
   assert.match(workersMarkup([{ ...worker, positionQuantity: 1,
-    unrealizedProfitAndLoss: "2.25" }]), /Unrealized <span class="pnl-positive">\+2\.25/);
+    unrealizedProfitAndLoss: "2.25" }]), /Open P&amp;L <span class="pnl-positive">\+2\.25/);
   assert.match(workersMarkup([{ ...worker, positionQuantity: 1,
-    unrealizedProfitAndLoss: null }]), /Unrealized <span class="pnl-neutral">—<\/span> \(price unavailable\)/);
-  assert.match(workersMarkup([worker], null, null), /No completed scan/);
+    unrealizedProfitAndLoss: null }]), /Open P&amp;L <span class="pnl-neutral">—<\/span><\/small>\s*<small class="worker-unpriced">Price unavailable/);
+  assert.doesNotMatch(workersMarkup([{ ...worker, workerId: null, symbol: null,
+    positionQuantity: 0, lastBuyFillPrice: null, openBuyFillPrice: null,
+    lastSellFillPrice: null }]), /P&amp;L|Last buy|Price unavailable/);
+  assert.match(styles, /grid-auto-rows: max-content/);
+  assert.match(source, /worker-scan-warning/);
+  assert.match(app, /workspace\.css\?v=.*LastModified\.UtcTicks/);
 });
 
-test("Trade and Overview worker cards distinguish executed BUY/SELL prices from fee-inclusive cost basis", () => {
+test("Trade and Overview worker cards show executed buy prices without fee-inclusive cost basis", () => {
   const html = workersMarkup([{ ...worker, additionCount: 1, openBuyFillPrice: "120.5",
     lastBuyFillPrice: "125", lastSellFillPrice: "128" }]);
-  assert.match(html, /Open BUY fills \(weighted\) <strong>@ 120\.5<\/strong>/);
-  assert.match(html, /Last BUY <strong>@ 125<\/strong>/);
-  assert.match(html, /Last SELL fill <strong>@ 128<\/strong>/);
-  assert.match(html, /Cost basis incl\. buy fees @ 120\.05/);
+  assert.match(html, /Buy @ <strong>120\.5<\/strong>/);
+  assert.doesNotMatch(html, /Last buy|Last sell|cost basis|fee/i);
+  const flat = workersMarkup([{ ...worker, positionQuantity: 0, openBuyFillPrice: null,
+    lastBuyFillPrice: "125", lastSellFillPrice: "128", realizedProfitAndLoss: "-5" }]);
+  assert.match(flat, /Last buy @ <strong>125<\/strong>/);
+  assert.match(flat, /Last sell @ <strong>128<\/strong>/);
+  assert.match(flat, /Realized P&amp;L <span class="pnl-negative">-5/);
+  assert.doesNotMatch(flat, /Open P&amp;L/);
   const noFill = workersMarkup([{ ...worker, openBuyFillPrice: null,
     lastBuyFillPrice: null, lastSellFillPrice: null, tradeCount: 0, positionQuantity: 0 }]);
-  assert.match(noFill, /No executed BUY fill yet/);
-  assert.doesNotMatch(noFill, /Last SELL fill/);
+  assert.doesNotMatch(noFill, /Buy @|Last sell @|P&amp;L/);
   assert.match(workerDetailMarkup(worker, null, []), /Executed prices \(not strategy targets\)/);
-  assert.match(workerDetailMarkup(worker, null, []), /cost basis incl\. buy fees 120\.05/);
+  assert.doesNotMatch(workerDetailMarkup(worker, null, []), /cost basis incl\. buy fees/);
 });
 
 test("History displays recorded BUY and SELL fills for currently assigned workers", () => {
@@ -237,8 +251,8 @@ test("Overview and History distinguish signed gains, losses, and unavailable P&L
   assert.match(closed, /class="pnl-positive">\+9\.75/);
   assert.match(closed, /class="pnl-negative">-3/);
   assert.match(closed, /BUY fill avg<\/th><th>SELL fill avg<\/th>/);
-  assert.match(closed, /Cost basis incl\. BUY fees/);
-  assert.match(closed, /<td>100<\/td><td>110<\/td>\s*<td>101<\/td>/);
+  assert.doesNotMatch(closed, /Cost basis incl\. BUY fees/);
+  assert.match(closed, /<td>100<\/td><td>110<\/td>\s*<td class="pnl-positive">\+9\.75<\/td>/);
 
   const research = researchMarkup([{ strategyId: "strategy", group: "A",
     equity: "100", realizedProfitAndLoss: "1", unrealizedProfitAndLoss: null,
@@ -692,7 +706,7 @@ test("open workers without a current price do not imply reliable unrealized resu
   assert.match(html, /Unrealized results are withheld/);
   assert.match(workerDetailMarkup({ ...worker, positionQuantity: 1,
     unrealizedProfitAndLoss: "2.25", realizedProfitAndLoss: "1.5" },
-    null, []), /realized \+1\.5 · unrealized \+2\.25/);
+    null, []), /realized <span class="pnl-positive">\+1\.5<\/span>\s*· unrealized <span class="pnl-positive">\+2\.25<\/span>/);
 });
 
 test("worker details distinguish scan observations, decisions and paper fills", () => {

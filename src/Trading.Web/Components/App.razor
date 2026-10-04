@@ -1,3 +1,4 @@
+@inject IWebHostEnvironment WebHostEnvironment
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <base href="/" />
     <link rel="stylesheet" href="/app.css" />
-    <link rel="stylesheet" href="/workspace.css" />
+    <link rel="stylesheet" href="@($"/workspace.css?v={WebHostEnvironment.WebRootFileProvider.GetFileInfo("workspace.css").LastModified.UtcTicks}")" />
     <HeadOutlet @rendermode="InteractiveServer" />
     <title>Fremvo Trading Workspace</title>
 </head>

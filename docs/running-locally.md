@@ -311,15 +311,21 @@ Overview and History show positive paper P&L in green with an explicit `+`,
 negative P&L in red with `-`, and missing values without either color.
 History's paper-report values retain their exact native decimal text.
 Worker cards in Trade and Overview show the weighted execution price of BUY
-fills still held in the open position and the last recorded SELL fill when
-there was a partial exit. They show the fee-inclusive cost basis separately:
-it is not the venue BUY execution price. For currently assigned workers, History also shows up to ten recent
-recorded fills per slot with side, quantity, execution price, fee and time.
+fills still held in the open position, followed by signed open P&L when
+fresh closed-candle valuation is available. A flat worker with recorded fills
+shows its last BUY and SELL prices and signed realized P&L. Idle slots do not
+show invented prices or P&L. Scan timestamps are omitted from each worker card;
+the Trade panel warns if the scanner is overdue, and the selected worker's
+folded evidence retains the scan time. Fee-inclusive cost basis is not shown
+on the cards because it is not an execution price. For currently assigned
+workers, History also shows up to ten recent recorded fills per slot with
+side, quantity, execution price, fee and time.
 When a worker is flat and completed or failed, the closed-worker summary
-shows quantity-weighted BUY and SELL fill prices, fee-inclusive cost basis,
-net P&L, and opening/closing times. These are simulated paper fills, not
-strategy targets or live Kraken execution prices. The recent-fill section is
-not a complete historical ledger; request the paper transaction report for
+shows quantity-weighted BUY and SELL fill prices, signed net P&L, and
+opening/closing times. Net P&L still includes trading fees even though the
+headline views omit fee-inclusive cost basis. These are simulated paper fills,
+not strategy targets or live Kraken execution prices. The recent-fill section
+is not a complete historical ledger; request the paper transaction report for
 an owner-scoped interval when complete fill history is needed.
 The History form can also save a private, immutable JSON copy in Blob Storage.
 Set `Reporting:ContainerUri` to the HTTPS URI of a private existing Blob

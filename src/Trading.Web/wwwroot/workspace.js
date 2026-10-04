@@ -70,34 +70,32 @@ const formatSignedExact = value => value === null || value === undefined
   ? "—"
   : `${Number(value) > 0 ? "+" : ""}${escapeHtml(value)}`;
 
-export function workersMarkup(workers, selectedSlot = null, lastScanAtUtc = null, scanOverdue = false) {
+export function workersMarkup(workers, selectedSlot = null) {
   if (!workers?.length) return `<p class="workspace-muted">No worker slots are configured yet.</p>`;
   return workers.map(worker => {
     const activeSymbol = worker.symbol || "No pair reserved";
     const unsafe = ["Unprotected", "RequiresReconciliation", "ProtectionDataStale"].includes(worker.runtimeStatus);
     const active = worker.runtimeStatus === "Running";
-    const realizedClass = pnlClass(worker.realizedProfitAndLoss);
-    const unrealizedClass = pnlClass(worker.unrealizedProfitAndLoss);
+    const hasPosition = Number(worker.positionQuantity) > 0;
+    const hasRealizedResult = worker.lastSellFillPrice != null
+      || worker.realizedProfitAndLoss != null && Number(worker.realizedProfitAndLoss) !== 0;
+    const strategyName = (worker.strategyId ?? "No strategy assigned")
+      .replace(/^platform\./, "").replaceAll("-", " ")
+      .replace(/\b(ema|rsi|macd)\b/gi, acronym => acronym.toUpperCase());
     return `<button type="button" class="worker-row${active ? " worker-active" : ""}${worker.slot === selectedSlot ? " selected" : ""}"
       data-worker-slot="${escapeHtml(worker.slot)}" aria-pressed="${worker.slot === selectedSlot}">
       <div class="worker-meta"><strong>Worker ${escapeHtml(worker.slot)}</strong><span class="pill ${unsafe ? "live-disabled" : active ? "worker-running" : ""}">${escapeHtml(worker.runtimeStatus)}</span></div>
-      <small>${escapeHtml(worker.strategyId)}</small>
-      <small class="worker-scan${scanOverdue ? " worker-scan-overdue" : ""}">${lastScanAtUtc ? `Last scanned ${escapeHtml(formatTime(lastScanAtUtc))}` : "No completed scan"}${scanOverdue ? " · overdue" : ""}</small>
-      <small>${escapeHtml(activeSymbol)}${worker.interval ? ` · ${escapeHtml(worker.interval)}` : ""}</small>
-      ${worker.workerId ? `<small class="worker-fill-prices">
-        ${worker.openBuyFillPrice != null
-          ? `Open BUY fills (weighted) <strong>@ ${formatNumber(worker.openBuyFillPrice, 8)}</strong>`
-          : worker.lastBuyFillPrice != null
-            ? `Last BUY fill <strong>@ ${formatNumber(worker.lastBuyFillPrice, 8)}</strong>`
-            : "No executed BUY fill yet"}
-        ${Number(worker.additionCount) > 0 && worker.lastBuyFillPrice != null
-          ? ` · Last BUY <strong>@ ${formatNumber(worker.lastBuyFillPrice, 8)}</strong>` : ""}
-        ${worker.lastSellFillPrice != null
-          ? ` · Last SELL fill <strong>@ ${formatNumber(worker.lastSellFillPrice, 8)}</strong>` : ""}
-        ${Number(worker.positionQuantity) > 0 && worker.averageEntryPrice != null
-          ? `<span class="secondary-line">Cost basis incl. buy fees @ ${formatNumber(worker.averageEntryPrice, 8)}</span>` : ""}
-      </small>` : ""}
-      <small class="worker-pnl">Realized <span class="${realizedClass}">${formatSignedNumber(worker.realizedProfitAndLoss)}</span> · Unrealized <span class="${unrealizedClass}">${formatSignedNumber(worker.unrealizedProfitAndLoss)}</span>${Number(worker.positionQuantity) > 0 && worker.unrealizedProfitAndLoss == null ? " (price unavailable)" : ""}</small>
+      <small class="worker-strategy" title="${escapeHtml(worker.strategyId ?? "")}">${escapeHtml(strategyName)}</small>
+      <small class="worker-market">${escapeHtml(activeSymbol)}</small>
+      ${hasPosition && worker.openBuyFillPrice != null
+        ? `<small class="worker-price">Buy @ <strong>${formatNumber(worker.openBuyFillPrice, 8)}</strong></small>`
+        : worker.lastBuyFillPrice != null
+          ? `<small class="worker-price">Last buy @ <strong>${formatNumber(worker.lastBuyFillPrice, 8)}</strong></small>` : ""}
+      ${!hasPosition && worker.lastSellFillPrice != null
+        ? `<small class="worker-price">Last sell @ <strong>${formatNumber(worker.lastSellFillPrice, 8)}</strong></small>` : ""}
+      ${hasPosition ? `<small class="worker-pnl">Open P&amp;L <span class="${pnlClass(worker.unrealizedProfitAndLoss)}">${formatSignedNumber(worker.unrealizedProfitAndLoss)}</span></small>` : ""}
+      ${hasRealizedResult ? `<small class="worker-pnl">Realized P&amp;L <span class="${pnlClass(worker.realizedProfitAndLoss)}">${formatSignedNumber(worker.realizedProfitAndLoss)}</span></small>` : ""}
+      ${hasPosition && worker.unrealizedProfitAndLoss == null ? `<small class="worker-unpriced">Price unavailable</small>` : ""}
     </button>`;
   }).join("");
 }
@@ -427,9 +425,10 @@ export function workerDetailMarkup(worker, training, decisions) {
         A missing command or portfolio record does not prove that no paper fill occurred; reconcile the durable command, simulated fill, worker ledger, portfolio and audit before changing any state.</p>`
       : ""}
     <p><strong>Paper state:</strong> starting cash ${formatNumber(worker.startingCash)} · cash ${formatNumber(worker.cashBalance)}
-      · position ${formatNumber(worker.positionQuantity, 8)} · cost basis incl. buy fees ${formatNumber(worker.averageEntryPrice, 8)}
+      · position ${formatNumber(worker.positionQuantity, 8)}
       · latest closed valuation price ${formatNumber(worker.currentPrice, 8)} (${escapeHtml(formatTime(worker.currentPriceAsOfUtc))})
-      · realized ${formatSignedNumber(worker.realizedProfitAndLoss)} · unrealized ${formatSignedNumber(worker.unrealizedProfitAndLoss)}
+      · realized <span class="${pnlClass(worker.realizedProfitAndLoss)}">${formatSignedNumber(worker.realizedProfitAndLoss)}</span>
+      · unrealized <span class="${pnlClass(worker.unrealizedProfitAndLoss)}">${formatSignedNumber(worker.unrealizedProfitAndLoss)}</span>
       · additions ${escapeHtml(worker.additionCount ?? "—")}/${escapeHtml(worker.maximumAdditions ?? "—")}.</p>
     <p><strong>Executed prices (not strategy targets):</strong>
       ${worker.openBuyFillPrice == null ? "No open BUY fill average" : `Open BUY fills weighted @ ${formatNumber(worker.openBuyFillPrice, 8)}`}
@@ -1475,6 +1474,7 @@ async function renderTrade(root) {
     <div class="workspace-grid">
       <section class="workspace-panel worker-panel">
         <div class="workspace-panel-header"><h2>Strategy workers · 10 slots</h2><span id="forward-feed-state" class="pill live-disabled" title="A recent closed public candle is required before paper Start; this does not prove continuity for every pair.">Feed unverified</span></div>
+        <p id="worker-scan-warning" class="worker-scan-warning" role="status" hidden></p>
         <div id="worker-list" class="workspace-panel-body worker-list"><p class="workspace-muted">Loading worker state…</p></div>
         <div class="workspace-panel-body worker-controls">
           <button id="start-scanner" class="primary">Start automatic paper trading</button>
@@ -2048,13 +2048,16 @@ async function renderTrade(root) {
   const updateWorkerView = () => {
     const selected = workers.find(worker => worker.slot === selectedWorkerSlot);
     const scan = scanStatus(training);
+    const scanWarning = root.querySelector("#worker-scan-warning");
+    scanWarning.hidden = !scan.overdue;
+    scanWarning.textContent = scan.overdue ? "Scanner delayed — check scanner status." : "";
+    scanWarning.title = scan.overdue ? scan.text : "";
     const feed = root.querySelector("#forward-feed-state");
     const observed = training?.forwardFeedObservedRecently === true;
     feed.textContent = observed ? "Feed observed" : "Feed unverified";
     feed.classList.toggle("live-disabled", !observed);
     feed.classList.toggle("paper", observed);
-    root.querySelector("#worker-list").innerHTML = workersMarkup(
-      workers, selectedWorkerSlot, training?.lastScanAtUtc, scan.overdue);
+    root.querySelector("#worker-list").innerHTML = workersMarkup(workers, selectedWorkerSlot);
     root.querySelector("#worker-detail-body").innerHTML = workerDetailMarkup(selected, training, decisions);
     root.querySelector("#worker-strategy-visuals").innerHTML = workerStrategyVisualMarkup(selected);
     root.querySelector("#strategy-evidence").hidden = selectedWorkerSlot !== null
@@ -3522,14 +3525,13 @@ export function paperTransactionReportMarkup(report) {
 
 export function closedTradesMarkup(items) {
   if (!items.length) return `<p class="workspace-muted">No closed worker trades are available.</p>`;
-  return `<p class="workspace-muted">Prices are quantity-weighted simulated fills. BUY fill excludes fees; cost basis includes BUY fees. Results include all recorded fees.</p>
+  return `<p class="workspace-muted">Prices are quantity-weighted simulated fills. Net P&amp;L includes trading fees.</p>
     <div class="workspace-table-wrap"><table class="workspace-table closed-trades-table"><thead><tr>
       <th>Worker</th><th>Strategy</th><th>Market</th><th>BUY fill avg</th><th>SELL fill avg</th>
-      <th>Cost basis incl. BUY fees</th><th>Net P&amp;L</th><th>Opened</th><th>Closed</th>
+      <th>Net P&amp;L</th><th>Opened</th><th>Closed</th>
     </tr></thead><tbody>
     ${items.map(item => `<tr><td>${escapeHtml(item.workerId)}</td><td>${escapeHtml(item.strategyId)}</td><td>${escapeHtml(item.symbol)}</td>
       <td>${formatNumber(item.averageBuyFillPrice, 8)}</td><td>${formatNumber(item.averageExitPrice, 8)}</td>
-      <td>${formatNumber(item.averageEntryPrice, 8)}</td>
       <td class="${pnlClass(item.netProfitAndLoss)}">${formatSignedNumber(item.netProfitAndLoss)}</td>
       <td>${formatTime(item.openedAtUtc)}</td><td>${formatTime(item.closedAtUtc)}</td></tr>`).join("")}
   </tbody></table></div>`;
