@@ -1,12 +1,16 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Trading.Application.Pipeline;
+using Trading.Application.UseCases.Portfolio;
+using Trading.Application.Entitlements;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
 using Trading.Domain.Market;
 using Trading.Domain.Orders;
+using Trading.Domain.Positions;
 using Trading.Exchanges.Abstractions;
+using Trading.Exchanges.Abstractions.Execution;
 using Trading.MarketData;
 using Trading.Risk;
 
@@ -106,6 +110,14 @@ public interface ILiveTradingService
         decimal quantity,
         string? clientOrderId,
         CancellationToken cancellationToken = default);
+
+    Task<LiveTradeResult> ClosePositionAsync(
+        Guid userId,
+        Guid exchangeAccountId,
+        Guid positionId,
+        decimal quantity,
+        string? clientOrderId,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -157,6 +169,7 @@ public sealed class LiveTradingService : ILiveTradingService
     /// a more relaxed rule than simulated money.
     /// </summary>
     private static readonly TimeSpan MaxPriceAge = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan MaxAccountBalanceAge = TimeSpan.FromSeconds(30);
 
     private const CandleInterval PricingInterval = CandleInterval.OneMinute;
 
@@ -170,6 +183,7 @@ public sealed class LiveTradingService : ILiveTradingService
     private readonly IHistoricalCandleSource _candles;
     private readonly ITradablePairSource _pairs;
     private readonly IOrderRepository _orders;
+    private readonly IPositionRepository _positions;
     private readonly IExchangeAccountRepository _accounts;
     private readonly IExecutionAdapter _adapter;
     private readonly OrderReconciliationService _reconciliation;
@@ -178,12 +192,18 @@ public sealed class LiveTradingService : ILiveTradingService
     private readonly RiskEngine _riskEngine;
     private readonly LiveTradingOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly ILiveTradingEligibility _eligibility;
+    private readonly ILiveExecutionRouteProvider _routes;
+    private readonly IPortfolioQueryService _portfolio;
+    private readonly ILiveAccountOpenOrderCheck _openOrders;
+    private readonly ISpotExecutionAccountSource _executionAccounts;
     private readonly ILogger<LiveTradingService>? _logger;
 
     public LiveTradingService(
         IHistoricalCandleSource candles,
         ITradablePairSource pairs,
         IOrderRepository orders,
+        IPositionRepository positions,
         IExchangeAccountRepository accounts,
         IExecutionAdapter adapter,
         OrderReconciliationService reconciliation,
@@ -192,11 +212,17 @@ public sealed class LiveTradingService : ILiveTradingService
         RiskEngine riskEngine,
         LiveTradingOptions options,
         TimeProvider timeProvider,
+        ILiveTradingEligibility eligibility,
+        ILiveExecutionRouteProvider routes,
+        IPortfolioQueryService portfolio,
+        ILiveAccountOpenOrderCheck openOrders,
+        ISpotExecutionAccountSource executionAccounts,
         ILogger<LiveTradingService>? logger = null)
     {
         _candles = candles ?? throw new ArgumentNullException(nameof(candles));
         _pairs = pairs ?? throw new ArgumentNullException(nameof(pairs));
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
+        _positions = positions ?? throw new ArgumentNullException(nameof(positions));
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
         _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
         _reconciliation = reconciliation ?? throw new ArgumentNullException(nameof(reconciliation));
@@ -205,17 +231,64 @@ public sealed class LiveTradingService : ILiveTradingService
         _riskEngine = riskEngine ?? throw new ArgumentNullException(nameof(riskEngine));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
+        _routes = routes ?? throw new ArgumentNullException(nameof(routes));
+        _portfolio = portfolio ?? throw new ArgumentNullException(nameof(portfolio));
+        _openOrders = openOrders ?? throw new ArgumentNullException(nameof(openOrders));
+        _executionAccounts = executionAccounts ?? throw new ArgumentNullException(nameof(executionAccounts));
         _logger = logger;
     }
 
-    public async Task<LiveTradeResult> SubmitAsync(
+    public Task<LiveTradeResult> SubmitAsync(
         Guid userId,
         Guid exchangeAccountId,
         string symbol,
         OrderSide side,
         decimal quantity,
         string? clientOrderId,
+        CancellationToken cancellationToken = default) =>
+        SubmitCoreAsync(userId, exchangeAccountId, symbol, side, quantity, clientOrderId,
+            closingPositionId: null, cancellationToken);
+
+    /// <summary>
+    /// Explicitly reduces an existing, account-bound live Spot long. An expired
+    /// owner entitlement does not prevent a verified safety exit.
+    /// </summary>
+    public async Task<LiveTradeResult> ClosePositionAsync(
+        Guid userId,
+        Guid exchangeAccountId,
+        Guid positionId,
+        decimal quantity,
+        string? clientOrderId,
         CancellationToken cancellationToken = default)
+    {
+        if (userId == Guid.Empty)
+            throw new ArgumentException("User id is required.", nameof(userId));
+        if (positionId == Guid.Empty || quantity <= 0m)
+            return LiveTradeResult.Failure(LiveTradeOutcome.Invalid, "A position id and positive close quantity are required.");
+
+        var positions = await _positions.ListOpenAsync(userId, cancellationToken).ConfigureAwait(false);
+        var matches = positions.Where(item => item.Id == positionId && item.UserId == userId
+            && item.Mode == TradingMode.Live && item.ExchangeAccountId == exchangeAccountId
+            && item.Direction == PositionDirection.DirectionLong
+            && item.Status is (PositionStatus.Open or PositionStatus.Closing or PositionStatus.ReducedOnly)).Take(2).ToArray();
+        if (matches.Length != 1 || quantity > matches[0].Quantity)
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "A verified, account-bound live Spot long of sufficient size is required to close.");
+
+        return await SubmitCoreAsync(userId, exchangeAccountId, matches[0].Symbol, OrderSide.Sell,
+            quantity, clientOrderId, positionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<LiveTradeResult> SubmitCoreAsync(
+        Guid userId,
+        Guid exchangeAccountId,
+        string symbol,
+        OrderSide side,
+        decimal quantity,
+        string? clientOrderId,
+        Guid? closingPositionId,
+        CancellationToken cancellationToken)
     {
         if (userId == Guid.Empty)
         {
@@ -228,6 +301,14 @@ public sealed class LiveTradingService : ILiveTradingService
                 LiveTradeOutcome.AccountNotEligible,
                 "This account is not in the operator-approved live-trading rollout cohort.");
         }
+        if (closingPositionId is null
+            && !await _eligibility.IsEligibleAsync(userId, _timeProvider.GetUtcNow(), cancellationToken)
+            .ConfigureAwait(false))
+        {
+            return LiveTradeResult.Failure(
+                LiveTradeOutcome.AccountNotEligible,
+                "An active live-eligible owner plan is required to submit a real order.");
+        }
 
         if (string.IsNullOrWhiteSpace(symbol))
         {
@@ -238,6 +319,8 @@ public sealed class LiveTradingService : ILiveTradingService
         {
             return LiveTradeResult.Failure(LiveTradeOutcome.Invalid, "Quantity must be greater than zero.");
         }
+        if (side is not (OrderSide.Buy or OrderSide.Sell))
+            return LiveTradeResult.Failure(LiveTradeOutcome.Invalid, "A supported Spot order side is required.");
 
         var trimmedSymbol = symbol.Trim();
         var now = _timeProvider.GetUtcNow();
@@ -256,6 +339,13 @@ public sealed class LiveTradingService : ILiveTradingService
             return LiveTradeResult.Failure(
                 LiveTradeOutcome.AccountNotEligible,
                 "No such exchange account is available for live trading.");
+        }
+
+        if (!_routes.HasRouteFor(account.ExchangeKind))
+        {
+            return LiveTradeResult.Failure(
+                LiveTradeOutcome.Blocked,
+                "The operator has disabled the live execution route. No order was sent.");
         }
 
         if (!account.CanReachExchange)
@@ -278,14 +368,38 @@ public sealed class LiveTradingService : ILiveTradingService
                 "Trading is halted, so no order was sent to the exchange.");
         }
 
-        // Live manual orders do not yet carry a position to reduce, so an
-        // exposure-reducing exemption cannot be proven. While close-only or
-        // reduce-only is active the safe reading is to refuse.
-        if (flags.CloseOnlyMode || flags.ReduceOnlyMode)
+        if (closingPositionId is null && (flags.CloseOnlyMode || flags.ReduceOnlyMode))
         {
             return LiveTradeResult.Failure(
                 LiveTradeOutcome.Blocked,
                 "Close-only or reduce-only mode is active, so new live orders are not accepted.");
+        }
+
+        if (side == OrderSide.Sell)
+        {
+            var open = await _positions.ListOpenAsync(userId, cancellationToken).ConfigureAwait(false);
+            var pairPositions = open.Where(position =>
+                position.Mode == TradingMode.Live
+                && string.Equals(position.Symbol, trimmedSymbol, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var owned = pairPositions.Where(position => position.ExchangeAccountId == exchangeAccountId).ToArray();
+            if (pairPositions.Any(position => position.ExchangeAccountId is null)
+                || owned.Length != 1
+                || owned[0].Direction != PositionDirection.DirectionLong
+                || (closingPositionId is not null && owned[0].Id != closingPositionId)
+                || owned[0].Status is not (PositionStatus.Open or PositionStatus.Closing or PositionStatus.ReducedOnly)
+                || quantity > owned[0].Quantity)
+                return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                    "A live Spot sell requires a verified long position of sufficient size on this exact exchange account.");
+
+            var existingOrders = await _orders.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+            if (existingOrders.Any(order => order.Mode == TradingMode.Live
+                && order.ExchangeAccountId == exchangeAccountId
+                && string.Equals(order.Symbol, trimmedSymbol, StringComparison.OrdinalIgnoreCase)
+                && (order.State is OrderState.New or OrderState.Accepted or OrderState.PartiallyFilled
+                    || order.RequiresReconciliation)))
+                return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                    "Reconcile the account's working or unknown live order before selling this position.");
         }
 
         var identifier = string.IsNullOrWhiteSpace(clientOrderId)
@@ -340,19 +454,91 @@ public sealed class LiveTradingService : ILiveTradingService
             return LiveTradeResult.Failure(LiveTradeOutcome.Invalid, filterViolation);
         }
 
-        var notional = limitPrice * quantity;
+        decimal notional;
+        try
+        {
+            notional = limitPrice * quantity;
+        }
+        catch (OverflowException)
+        {
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "The proposed live order notional cannot be represented safely.");
+        }
+        if (notional > _options.MaxOrderNotional)
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "The proposed live order exceeds the platform per-order notional ceiling.");
+
+        var requiredAsset = side == OrderSide.Buy ? pair.QuoteAsset : pair.BaseAsset;
+        var requiredAmount = side == OrderSide.Buy ? notional : quantity;
+        var funds = await _portfolio.ReadAccountAsync(userId, account.Id, cancellationToken).ConfigureAwait(false);
+        if (funds is null || funds.AccountId != account.Id || funds.Error is not null
+            || !HasUnreservedCash(funds, requiredAsset, requiredAmount, _timeProvider.GetUtcNow()))
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "Current unreserved Spot funds could not be verified; no live order was sent.");
+
+        var openPositions = await _positions.ListOpenAsync(userId, cancellationToken).ConfigureAwait(false);
+        var positionRevisions = openPositions.Where(position => position.Mode == TradingMode.Live)
+            .Select(position => (position.Id, position.Version)).ToHashSet();
+        if (openPositions.Any(position => position.Mode == TradingMode.Live
+                && position.ExchangeAccountId is null))
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "Legacy live positions without exchange-account identity require reconciliation before new orders.");
+        var accountPositions = openPositions.Where(position =>
+            position.Mode == TradingMode.Live && position.ExchangeAccountId == account.Id).ToArray();
+        if (closingPositionId is not null
+            && (side != OrderSide.Sell || accountPositions.Length != 1
+                || accountPositions[0].Id != closingPositionId
+                || accountPositions[0].Direction != PositionDirection.DirectionLong
+                || accountPositions[0].Status is not (PositionStatus.Open or PositionStatus.Closing or PositionStatus.ReducedOnly)
+                || quantity > accountPositions[0].Quantity))
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The live Spot close is no longer bound to the selected long position.");
+        if (accountPositions.Any(position => position.Direction != PositionDirection.DirectionLong
+                || !string.Equals(position.Symbol, trimmedSymbol, StringComparison.OrdinalIgnoreCase)))
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "Existing live exposure in another instrument or direction cannot be priced in this order's quote currency.");
+        if (!HasReconciledBaseHoldings(funds, pair.BaseAsset, pair.QuoteAsset, accountPositions))
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "The exchange account contains unverified holdings or its base-asset balance does not match recorded live positions.");
+
+        var accountOrders = await _orders.ListAsync(userId, cancellationToken).ConfigureAwait(false);
+        if (accountOrders.Any(order => order.Mode == TradingMode.Live
+                && order.ExchangeAccountId == account.Id
+                && (!order.IsTerminal || order.RequiresReconciliation)))
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The account has an unresolved live order. Reconcile it before another order is submitted.");
+
+        if (await _openOrders.ReadAsync(userId, account.Id, account.ExchangeKind, cancellationToken)
+            .ConfigureAwait(false) != SpotOpenOrderState.Empty)
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The selected account's exchange open orders could not be verified empty. Reconcile external orders before submitting.");
+
+        decimal currentExposure;
+        decimal proposedPositionQuantity;
+        try
+        {
+            currentExposure = accountPositions.Sum(position => position.Quantity * limitPrice);
+            proposedPositionQuantity = side == OrderSide.Buy
+                ? accountPositions.Sum(position => position.Quantity) + quantity
+                : quantity;
+        }
+        catch (OverflowException)
+        {
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "The recorded live exposure or proposed position quantity cannot be represented safely.");
+        }
 
         var riskLimits = _options.PlatformRiskLimits;
         var risk = riskLimits is null
             ? new RiskEvaluationResult(false, "Mandatory platform risk limits are unavailable.")
             : _riskEngine.Evaluate(
                 proposedExposure: notional,
-                currentExposure: 0m,
+                currentExposure: currentExposure,
                 dailyPnL: 0m,
                 openOrders: 0,
-                openPositions: 0,
+                openPositions: accountPositions.Length,
                 maxPositionSize: riskLimits.EffectiveMaxPositionSize,
-                maxNotional: Math.Min(_options.MaxOrderNotional, riskLimits.EffectiveMaxExposure),
+                maxNotional: riskLimits.EffectiveMaxExposure,
                 dataIsStale: false,
                 accountIsHalted: false,
                 strategyIsHalted: false,
@@ -370,7 +556,8 @@ public sealed class LiveTradingService : ILiveTradingService
                         account.ProvingNotionalCeiling,
                         _options.ProvingSymbols)
                     : null,
-                proposedQuantity: quantity);
+                proposedQuantity: proposedPositionQuantity,
+                exposureIsIncreasing: side == OrderSide.Buy);
 
         if (!risk.IsAllowed)
         {
@@ -394,7 +581,118 @@ public sealed class LiveTradingService : ILiveTradingService
         // Stored before the exchange is contacted. If the process dies mid
         // submission, the order exists locally with an id the exchange also
         // knows, so it can be found rather than lost.
-        await _orders.AddAsync(order, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _orders.AddAsync(order, cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkingLiveOrderConflictException)
+        {
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "Another live order reserved this account first. Reconcile it before submitting again.");
+        }
+        catch (DuplicateClientOrderIdException)
+        {
+            return LiveTradeResult.Failure(LiveTradeOutcome.Duplicate,
+                "An order with this client order id already exists. It was not submitted again.");
+        }
+
+        if (closingPositionId is null
+            && !await _eligibility.IsEligibleAsync(userId, _timeProvider.GetUtcNow(), cancellationToken)
+            .ConfigureAwait(false))
+        {
+            order.MarkRejected("The live-eligible owner plan expired or was revoked before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "The live-eligible owner plan changed before exchange submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.AccountNotEligible,
+                "An active live-eligible owner plan is required to send this order.", order);
+        }
+        if (!_routes.HasRouteFor(account.ExchangeKind))
+        {
+            order.MarkRejected("The live execution route was withdrawn before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "The operator withdrew the live execution route before exchange submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The operator has disabled the live execution route. No order was sent.", order);
+        }
+        var currentAccount = await _accounts.GetByIdAsync(account.Id, cancellationToken).ConfigureAwait(false);
+        if (currentAccount is null || currentAccount.UserId != userId
+            || currentAccount.ExchangeKind != account.ExchangeKind || !currentAccount.CanReachExchange)
+        {
+            order.MarkRejected("Live account or trading halt state changed before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "Live account or trading halt state changed before exchange submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The selected live account or trading mode no longer permits this order.", order);
+        }
+        var freshFunds = await _portfolio.ReadAccountAsync(userId, account.Id, cancellationToken).ConfigureAwait(false);
+        var currentPositions = await _positions.ListOpenAsync(userId, cancellationToken).ConfigureAwait(false);
+        var currentRevisions = currentPositions.Where(position => position.Mode == TradingMode.Live)
+            .Select(position => (position.Id, position.Version)).ToHashSet();
+        if (freshFunds is null || freshFunds.AccountId != account.Id || freshFunds.Error is not null
+            || !HasUnreservedCash(freshFunds, requiredAsset, requiredAmount, _timeProvider.GetUtcNow())
+            || !positionRevisions.SetEquals(currentRevisions)
+            || (closingPositionId is not null && !currentPositions.Any(position =>
+                position.Id == closingPositionId && position.UserId == userId
+                && position.Mode == TradingMode.Live && position.ExchangeAccountId == account.Id
+                && position.Direction == PositionDirection.DirectionLong
+                && position.Status is (PositionStatus.Open or PositionStatus.Closing or PositionStatus.ReducedOnly)
+                && position.Quantity >= quantity))
+            || !HasReconciledBaseHoldings(freshFunds, pair.BaseAsset, pair.QuoteAsset, accountPositions))
+        {
+            order.MarkRejected("Live account funds or position evidence changed before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "Live account funds or position evidence changed before exchange submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.RiskBlocked,
+                "Current unreserved Spot funds and unchanged positions are required before submitting an order.", order);
+        }
+
+        if (await _openOrders.ReadAsync(userId, account.Id, account.ExchangeKind, cancellationToken)
+            .ConfigureAwait(false) != SpotOpenOrderState.Empty)
+        {
+            order.MarkRejected("Exchange open orders could not be verified empty before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "Exchange open-order evidence changed or became unavailable before submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "The selected account's exchange open orders could not be verified empty. No order was sent.", order);
+        }
+
+        var executionAccount = await _executionAccounts.ResolveAsync(account.Id, cancellationToken)
+            .ConfigureAwait(false);
+        if (executionAccount is null || executionAccount.AccountId != account.Id
+            || executionAccount.UserId != userId || executionAccount.Exchange != account.ExchangeKind
+            || executionAccount.Stage != currentAccount.Stage || executionAccount.Stage == TradingStage.Paper)
+        {
+            order.MarkRejected("Selected account credentials are no longer eligible for live execution.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "Selected account credentials could not be reverified before submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.AccountNotEligible,
+                "The selected account credentials could not be verified. No order was sent.", order);
+        }
+        var currentFlags = await _haltState.GetAsync(context, trimmedSymbol, ManualLiveStrategyId, cancellationToken)
+            .ConfigureAwait(false);
+        if (currentFlags.IsAnyHalt
+            || (closingPositionId is null && (currentFlags.CloseOnlyMode || currentFlags.ReduceOnlyMode)))
+        {
+            order.MarkRejected("Trading halt state changed before submission.");
+            await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
+            await AuditAsync(userId, "LiveOrderRejected", order,
+                "Trading halt state changed before exchange submission.",
+                context.CorrelationId, cancellationToken).ConfigureAwait(false);
+            return LiveTradeResult.Failure(LiveTradeOutcome.Blocked,
+                "Trading is halted or restricted. No order was sent.", order);
+        }
 
         var command = new ExecutionCommand(
             Guid.NewGuid(),
@@ -515,6 +813,51 @@ public sealed class LiveTradingService : ILiveTradingService
 
         return pairs.FirstOrDefault(pair =>
             pair.IsActive && string.Equals(pair.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool HasUnreservedCash(
+        PortfolioAccountReading reading, string venueAsset, decimal requiredAmount, DateTimeOffset nowUtc)
+    {
+        if (reading.RetrievedAtUtc is not { } observedAt || observedAt.Offset != TimeSpan.Zero
+            || observedAt > nowUtc || nowUtc - observedAt > MaxAccountBalanceAge)
+            return false;
+
+        var balances = reading.Balances.Where(balance =>
+            string.Equals(balance.VenueAsset, venueAsset, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return balances.Length == 1
+            && balances[0].Available is { } available
+            && balances[0].Held is { } held
+            && held >= 0m && balances[0].Total >= held
+            && available >= requiredAmount
+            && balances[0].Total - held >= requiredAmount;
+    }
+
+    private static bool HasReconciledBaseHoldings(
+        PortfolioAccountReading reading, string venueBaseAsset, string venueQuoteAsset,
+        IReadOnlyCollection<Position> positions)
+    {
+        decimal recordedQuantity;
+        try
+        {
+            recordedQuantity = positions.Sum(position => position.Quantity);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        if (reading.Balances.Any(balance =>
+                balance.Total < 0m
+                || (!string.Equals(balance.VenueAsset, venueBaseAsset, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(balance.VenueAsset, venueQuoteAsset, StringComparison.OrdinalIgnoreCase)
+                    && balance.Total != 0m)))
+            return false;
+
+        var balances = reading.Balances.Where(balance =>
+            string.Equals(balance.VenueAsset, venueBaseAsset, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return balances.Length == 0
+            ? recordedQuantity == 0m
+            : balances.Length == 1 && balances[0].Total == recordedQuantity;
     }
 
     private static string? ValidateExchangeFilters(

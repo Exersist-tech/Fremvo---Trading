@@ -2,6 +2,22 @@ namespace Trading.MarketData;
 
 public static class CandleQualityEvaluator
 {
+    public static string ChangedMarketDataFields(Candle stored, Candle incoming)
+    {
+        ArgumentNullException.ThrowIfNull(stored);
+        ArgumentNullException.ThrowIfNull(incoming);
+        var changed = new List<string>();
+        if (stored.Open != incoming.Open) changed.Add(nameof(Candle.Open));
+        if (stored.High != incoming.High) changed.Add(nameof(Candle.High));
+        if (stored.Low != incoming.Low) changed.Add(nameof(Candle.Low));
+        if (stored.Close != incoming.Close) changed.Add(nameof(Candle.Close));
+        if (stored.Volume != incoming.Volume) changed.Add(nameof(Candle.Volume));
+        if (stored.CloseTimeUtc != incoming.CloseTimeUtc) changed.Add(nameof(Candle.CloseTimeUtc));
+        if (stored.IsClosed != incoming.IsClosed) changed.Add(nameof(Candle.IsClosed));
+        if (stored.IsDerived != incoming.IsDerived) changed.Add(nameof(Candle.IsDerived));
+        return string.Join(",", changed);
+    }
+
     public static IReadOnlyCollection<DataQualityIssue> Evaluate(
         Candle candle,
         Candle? previousCandle,

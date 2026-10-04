@@ -1,4 +1,5 @@
 using Trading.Application.Execution;
+using Trading.Application.Entitlements;
 using Trading.Application.UseCases.Audit;
 using Trading.Application.UseCases.Exchange;
 using Trading.Domain.Audit;
@@ -19,7 +20,8 @@ public sealed class ExchangeAccountPromotionTests
 
     private static (ExchangeAccountStageService Service, ExchangeAccount Account, InMemoryOrderRepository Orders) Build(
         bool withLiveRoute,
-        bool entitled = true)
+        bool entitled = true,
+        bool planEligible = true)
     {
         var accounts = new FakeAccounts();
         var orders = new InMemoryOrderRepository();
@@ -43,6 +45,7 @@ public sealed class ExchangeAccountPromotionTests
             routes,
             new SilentAuditWriter(),
             new FrozenClock(Now),
+            new TestLiveEligibility(planEligible),
             new LiveTradingOptions
             {
                 AllowedUserIds = entitled ? [UserId] : Array.Empty<Guid>()
@@ -86,6 +89,23 @@ public sealed class ExchangeAccountPromotionTests
 
         Assert.Equal(TradingStageChangeOutcome.LiveTradingNotEntitled, result.Outcome);
         Assert.Equal(TradingStage.Paper, account.Stage);
+    }
+
+    [Fact]
+    public async Task CohortMembershipWithoutAnActiveLivePlanCannotPromoteTheAccount()
+    {
+        var (service, account, _) = Build(withLiveRoute: true, planEligible: false);
+
+        var result = await service.PromoteAsync(UserId, account.Id, TradingStage.Proving);
+
+        Assert.Equal(TradingStageChangeOutcome.LiveTradingNotEntitled, result.Outcome);
+        Assert.Equal(TradingStage.Paper, account.Stage);
+    }
+
+    private sealed class TestLiveEligibility(bool eligible) : ILiveTradingEligibility
+    {
+        public Task<bool> IsEligibleAsync(Guid ownerId, DateTimeOffset asOfUtc,
+            CancellationToken cancellationToken = default) => Task.FromResult(eligible);
     }
 
     [Fact]

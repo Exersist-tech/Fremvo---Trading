@@ -473,6 +473,41 @@ public sealed class ExecutionResult
     public string? FailureReason { get; }
 }
 
+public sealed class PaperExecutionEvidence
+{
+    public PaperExecutionEvidence(
+        Guid executionCommandId,
+        ExecutionOutcome outcome,
+        decimal filledQuantity,
+        decimal averageFillPrice,
+        decimal fees,
+        DateTimeOffset executedAtUtc)
+    {
+        if (executionCommandId == Guid.Empty)
+            throw new ArgumentException("Execution command id is required.", nameof(executionCommandId));
+        if (!Enum.IsDefined(outcome))
+            throw new ArgumentOutOfRangeException(nameof(outcome));
+        if (filledQuantity < 0m || averageFillPrice < 0m || fees < 0m
+            || (outcome == ExecutionOutcome.Filled && (filledQuantity <= 0m || averageFillPrice <= 0m)))
+            throw new ArgumentException("Paper execution amounts must match the recorded outcome.");
+        if (executedAtUtc.Offset != TimeSpan.Zero)
+            throw new ArgumentException("Paper execution time must be UTC.", nameof(executedAtUtc));
+        ExecutionCommandId = executionCommandId;
+        Outcome = outcome;
+        FilledQuantity = filledQuantity;
+        AverageFillPrice = averageFillPrice;
+        Fees = fees;
+        ExecutedAtUtc = executedAtUtc;
+    }
+
+    public Guid ExecutionCommandId { get; }
+    public ExecutionOutcome Outcome { get; }
+    public decimal FilledQuantity { get; }
+    public decimal AverageFillPrice { get; }
+    public decimal Fees { get; }
+    public DateTimeOffset ExecutedAtUtc { get; }
+}
+
 public sealed class PaperExecutionLedgerEntry
 {
     public PaperExecutionLedgerEntry(
@@ -544,9 +579,37 @@ public sealed class PaperExecutionLedgerEntry
 
 public sealed class PaperExecutionAdapter : IExecutionAdapter
 {
+    public const decimal DefaultEstimatedTakerFeeRate = 0.008m;
     private readonly List<PaperExecutionLedgerEntry> _ledger = new();
+    private readonly Dictionary<Guid, PaperExecutionLedgerEntry> _fillsByCommandId = new();
+    private readonly object _ledgerSync = new();
+    private readonly TimeProvider _timeProvider;
+    private readonly decimal _estimatedTakerFeeRate;
 
-    public IReadOnlyCollection<PaperExecutionLedgerEntry> Ledger => _ledger.AsReadOnly();
+    public PaperExecutionAdapter(TimeProvider? timeProvider = null, decimal estimatedTakerFeeRate = DefaultEstimatedTakerFeeRate)
+    {
+        if (estimatedTakerFeeRate < 0m || estimatedTakerFeeRate > 1m)
+            throw new ArgumentOutOfRangeException(nameof(estimatedTakerFeeRate));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _estimatedTakerFeeRate = estimatedTakerFeeRate;
+    }
+
+    public decimal EstimatedTakerFeeRate => _estimatedTakerFeeRate;
+
+    public IReadOnlyCollection<PaperExecutionLedgerEntry> Ledger
+    {
+        get
+        {
+            lock (_ledgerSync)
+                return _ledger.ToArray();
+        }
+    }
+
+    public PaperExecutionLedgerEntry? FindFill(Guid executionCommandId)
+    {
+        lock (_ledgerSync)
+            return _fillsByCommandId.GetValueOrDefault(executionCommandId);
+    }
 
     public Task<ExecutionResult> ExecuteAsync(ExecutionCommand command, CancellationToken cancellationToken = default)
     {
@@ -563,11 +626,11 @@ public sealed class PaperExecutionAdapter : IExecutionAdapter
                 0m,
                 0m,
                 0m,
-                DateTimeOffset.UtcNow,
+                _timeProvider.GetUtcNow(),
                 "This adapter is paper-only and cannot execute live trading commands."));
         }
 
-        var fees = command.Quantity * command.Price * 0.0005m;
+        var fees = command.Quantity * command.Price * _estimatedTakerFeeRate;
         var result = new ExecutionResult(
             command.Id,
             true,
@@ -575,9 +638,9 @@ public sealed class PaperExecutionAdapter : IExecutionAdapter
             command.Quantity,
             command.Price,
             fees,
-            DateTimeOffset.UtcNow);
+            _timeProvider.GetUtcNow());
 
-        _ledger.Add(new PaperExecutionLedgerEntry(
+        var entry = new PaperExecutionLedgerEntry(
             Guid.NewGuid(),
             command.Id,
             command.Symbol,
@@ -585,7 +648,17 @@ public sealed class PaperExecutionAdapter : IExecutionAdapter
             command.Quantity,
             command.Price,
             fees,
-            result.ExecutedAtUtc));
+            result.ExecutedAtUtc);
+        lock (_ledgerSync)
+        {
+            if (_fillsByCommandId.ContainsKey(command.Id))
+                return Task.FromResult(new ExecutionResult(
+                    command.Id, false, "Rejected", 0m, 0m, 0m,
+                    _timeProvider.GetUtcNow(),
+                    "Paper command was already filled; reconcile its existing result rather than executing it again."));
+            _ledger.Add(entry);
+            _fillsByCommandId.Add(command.Id, entry);
+        }
 
         return Task.FromResult(result);
     }

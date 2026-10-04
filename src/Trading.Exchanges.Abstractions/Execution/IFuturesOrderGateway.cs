@@ -26,6 +26,8 @@ public enum FuturesOrderType
 /// Futures are a separate capability from spot. In particular, reduce-only is
 /// explicit and defaults to false rather than being inferred from the side.
 /// A gateway may impose a stricter safety policy on non-reduce-only requests.
+/// Validation-only support is venue-specific: a gateway must reject such a
+/// request locally if the venue does not document a non-submitting order route.
 /// </remarks>
 public sealed class FuturesOrderRequest
 {

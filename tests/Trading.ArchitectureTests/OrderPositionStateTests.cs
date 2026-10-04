@@ -51,4 +51,22 @@ public sealed class OrderPositionStateTests
         position.Reduce(1m);
         Assert.Equal(PositionStatus.Flat, position.Status);
     }
+
+    [Fact]
+    public void AdditionalObservedFillAdjustsQuantityAndWeightedCostWithoutUsingLimitPrice()
+    {
+        var position = new Position(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "BTCUSD",
+            PositionDirection.DirectionLong, 2m, 100m, 110m, DateTimeOffset.UtcNow);
+
+        position.Increase(1m, 106m);
+
+        Assert.Equal(3m, position.Quantity);
+        Assert.Equal(102m, position.EntryPrice);
+        Assert.Equal(24m, position.UnrealizedPnl);
+        Assert.Equal(1, position.Version);
+        Assert.Throws<ArgumentOutOfRangeException>(() => position.Increase(1m, 0m));
+        position.Reduce(3m);
+        Assert.Throws<InvalidOperationException>(() => position.Increase(1m, 106m));
+    }
 }

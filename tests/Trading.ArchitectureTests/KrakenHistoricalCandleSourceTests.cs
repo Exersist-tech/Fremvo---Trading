@@ -301,6 +301,27 @@ public sealed class KrakenHistoricalCandleSourceTests
 
         Assert.Contains("pair=XBTUSD", handler.LastRequest!.RequestUri!.Query, StringComparison.Ordinal);
         Assert.All(candles, candle => Assert.Equal("XBT/USD", candle.Symbol));
+
+        var v2Candles = await source.FetchAsync(
+            "BTC/USD", CandleInterval.OneMinute, DateTimeOffset.UnixEpoch);
+        Assert.Contains("pair=XBTUSD", handler.LastRequest!.RequestUri!.Query, StringComparison.Ordinal);
+        Assert.All(v2Candles, candle => Assert.Equal("BTC/USD", candle.Symbol));
+    }
+
+    [Fact]
+    public async Task FetchResolvesDogecoinV2AliasWithoutChangingTheRequestedSymbol()
+    {
+        using var handler = new StubHandler(TwoBarPayload.Replace(
+            "XXBTZUSD", "XDGEUR", StringComparison.Ordinal));
+        using var client = new HttpClient(handler) { BaseAddress = new Uri("https://api.kraken.com") };
+        var pair = new TradablePair(
+            "XDGEUR", "XDG/EUR", "XXDG", "ZEUR", true, 1m, 0.0001m, 0.000001m);
+        var source = new KrakenHistoricalCandleSource(client, new SuppliedPairSource([pair]));
+
+        var candles = await source.FetchAsync("DOGE/EUR", CandleInterval.OneMinute, DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("pair=XDGEUR", handler.LastRequest!.RequestUri!.Query, StringComparison.Ordinal);
+        Assert.All(candles, candle => Assert.Equal("DOGE/EUR", candle.Symbol));
     }
 
     [Fact]

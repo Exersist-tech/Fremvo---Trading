@@ -30,7 +30,8 @@ namespace Trading.ArchitectureTests
         {
             var invitation = new Invitation(
                 Guid.NewGuid(),
-                "WELCOME-01",
+                InvitationCodeDigest.Compute("WELCOME-01"),
+                "new@example.test",
                 Guid.NewGuid(),
                 1,
                 0,

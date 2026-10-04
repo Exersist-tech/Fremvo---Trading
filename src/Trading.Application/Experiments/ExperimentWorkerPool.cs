@@ -263,7 +263,7 @@ public sealed class InMemoryExperimentWorkerRepository : IExperimentWorkerReposi
             throw new ArgumentOutOfRangeException(nameof(page));
         IReadOnlyCollection<ExperimentWorker> result = _byUser.TryGetValue(userId, out var workers)
             ? workers.Values
-                .Where(worker => worker.Status == ExperimentWorkerStatus.Completed
+                .Where(worker => worker.Status is (ExperimentWorkerStatus.Completed or ExperimentWorkerStatus.Failed)
                     && worker.PositionQuantity == 0m
                     && worker.Ledger.Any(entry => entry.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
                     && worker.Ledger.Any(entry => entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase)))

@@ -1,3 +1,4 @@
+using Trading.Application.Execution;
 using Trading.Application.Pipeline;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
@@ -49,7 +50,7 @@ public sealed class TradePipelineTests
         }
     }
 
-    private sealed class UnknownStatusAdapter : IExecutionAdapter
+    private sealed class UnknownStatusAdapter(string status = "Unknown") : IExecutionAdapter
     {
         public int Calls { get; private set; }
 
@@ -59,8 +60,18 @@ public sealed class TradePipelineTests
             Calls++;
 
             return Task.FromResult(new ExecutionResult(
-                command.Id, false, "Unknown", 0m, 0m, 0m, DateTimeOffset.UtcNow, "Timed out"));
+                command.Id, false, status, 0m, 0m, 0m, DateTimeOffset.UtcNow, "Timed out",
+                ExecutionOutcome.Unknown));
         }
+    }
+
+    private sealed class FixedOutcomeAdapter(
+        ExecutionOutcome outcome, bool success, decimal quantity, decimal price) : IExecutionAdapter
+    {
+        public Task<ExecutionResult> ExecuteAsync(
+            ExecutionCommand command, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExecutionResult(command.Id, success, outcome.ToString(),
+                quantity, price, 0m, DateTimeOffset.UtcNow, outcome: outcome));
     }
 
     private sealed class Harness
@@ -77,6 +88,8 @@ public sealed class TradePipelineTests
 
         public InMemoryPortfolioUpdateRepository PortfolioUpdates { get; } = new();
 
+        public InMemoryOrderReconciliationRepository Reconciliations { get; } = new();
+
         public RecordingAuditWriter Audit { get; } = new();
 
         public InMemoryTradingHaltState Halts { get; } = new();
@@ -86,7 +99,7 @@ public sealed class TradePipelineTests
         public TradePipeline Build(TradePipelineOptions? options = null, TimeProvider? timeProvider = null) =>
             new(MarketEvents, Decisions, Intents, RiskEvaluations, Commands, PortfolioUpdates,
                 Audit, new RiskEngine(timeProvider: timeProvider), Halts, Idempotency, options,
-                timeProvider: timeProvider);
+                reconciliations: Reconciliations, timeProvider: timeProvider);
     }
 
     private static MarketEvent Event(bool isClosed = true, IReadOnlyCollection<string>? flags = null) =>
@@ -343,12 +356,14 @@ public sealed class TradePipelineTests
         Assert.Empty(await harness.Intents.ListForUserAsync(UserId));
     }
 
-    [Fact]
-    public async Task UnknownExchangeStatusRequiresReconciliationAndIsNotRetried()
+    [Theory]
+    [InlineData("Unknown")]
+    [InlineData("TimedOut")]
+    public async Task UnknownExchangeOutcomeRequiresReconciliationRegardlessOfStatusLabel(string status)
     {
         var harness = new Harness();
         var pipeline = harness.Build();
-        var adapter = new UnknownStatusAdapter();
+        var adapter = new UnknownStatusAdapter(status);
 
         var result = await pipeline.ProcessAsync(
             Event(), Context(), new FixedStrategy(SignalDirection.Buy), Portfolio(), adapter);
@@ -358,6 +373,30 @@ public sealed class TradePipelineTests
         Assert.Equal(1, adapter.Calls);
         Assert.Empty(await harness.PortfolioUpdates.ListForUserAsync(UserId));
         Assert.Contains(harness.Audit.Events, e => e.Action == "Trade.ExecutionUnknown");
+    }
+
+    [Theory]
+    [InlineData(ExecutionOutcome.Accepted, true, 0, 0, "Trade.ExecutionAccepted")]
+    [InlineData(ExecutionOutcome.Filled, false, 1, 100, "Trade.ExecutionInconsistent")]
+    [InlineData(ExecutionOutcome.Filled, true, 0, 0, "Trade.ExecutionInconsistent")]
+    [InlineData(ExecutionOutcome.Rejected, true, 0, 0, "Trade.ExecutionInconsistent")]
+    public async Task UnfilledOrInconsistentExecutionCannotUpdatePortfolio(
+        ExecutionOutcome outcome, bool success, int quantity, int price, string auditAction)
+    {
+        var harness = new Harness();
+        var pipeline = harness.Build();
+        var result = await pipeline.ProcessAsync(
+            Event(), Context(), new FixedStrategy(SignalDirection.Buy), Portfolio(),
+            new FixedOutcomeAdapter(outcome, success, quantity, price));
+
+        Assert.False(result.Executed);
+        Assert.True(result.RequiresReconciliation);
+        Assert.Empty(await harness.PortfolioUpdates.ListForUserAsync(UserId));
+        Assert.Single(await harness.Commands.ListForUserAsync(UserId));
+        Assert.Contains(harness.Audit.Events, audit => audit.Action == auditAction);
+        var reconciliation = Assert.Single(await harness.Reconciliations.ListUnresolvedAsync(default));
+        Assert.Equal(outcome == ExecutionOutcome.Accepted
+            ? ExchangeOrderStatus.New : ExchangeOrderStatus.Unknown, reconciliation.ObservedStatus);
     }
 
     [Fact]

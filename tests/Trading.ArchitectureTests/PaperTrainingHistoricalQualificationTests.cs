@@ -9,7 +9,7 @@ public sealed class PaperTrainingHistoricalQualificationTests
     [Fact]
     public async Task SingleTimeframeQualificationFailsClosedForExactMultiRoleStrategies()
     {
-        var toUtc = DateTimeOffset.UtcNow.AddHours(-1);
+        var toUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-2), TimeSpan.Zero);
         var fromUtc = toUtc.AddHours(-40);
         var candles = Enumerable.Range(0, 40)
             .Select(index =>
@@ -44,14 +44,14 @@ public sealed class PaperTrainingHistoricalQualificationTests
         var result = Assert.Single(results);
         Assert.False(result.Accepted);
         Assert.Equal(0, result.CompletedTrades);
-        Assert.Contains("failed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("single-interval replay", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(64, result.DatasetFingerprint.Length);
     }
 
     [Fact]
     public async Task RefusesUnsafeOrInsufficientHistoricalEvidence()
     {
-        var toUtc = DateTimeOffset.UtcNow.AddHours(-1);
+        var toUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-2), TimeSpan.Zero);
         var fromUtc = toUtc.AddHours(-2);
         var source = new SuppliedHistoricalSource(
         [
@@ -76,7 +76,7 @@ public sealed class PaperTrainingHistoricalQualificationTests
     [Fact]
     public async Task LoadsHistoricalCandlesOnceForMultipleStrategiesOnTheSameSymbol()
     {
-        var toUtc = DateTimeOffset.UtcNow.AddHours(-1);
+        var toUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-2), TimeSpan.Zero);
         var fromUtc = toUtc.AddHours(-40);
         var source = new CountingHistoricalSource(Enumerable.Range(0, 40)
             .Select(index => new Candle(
@@ -113,7 +113,7 @@ public sealed class PaperTrainingHistoricalQualificationTests
     [Fact]
     public async Task RejectsCandlesThatDoNotMatchTheCandidateInterval()
     {
-        var toUtc = DateTimeOffset.UtcNow.AddHours(-1);
+        var toUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-2), TimeSpan.Zero);
         var fromUtc = toUtc.AddHours(-30);
         var candles = Enumerable.Range(0, 30)
             .Select(index => new Candle(
@@ -147,6 +147,77 @@ public sealed class PaperTrainingHistoricalQualificationTests
         Assert.False(result.Accepted);
         Assert.Contains("wrong symbol, interval, duration", result.Reason, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("incomplete")]
+    [InlineData("unsafe")]
+    [InlineData("zero price")]
+    [InlineData("unclosed at cutoff")]
+    public async Task RejectsBadCandlesInsideTheRangeWithoutFilteringThemOut(string defect)
+    {
+        var fromUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-7), TimeSpan.Zero);
+        var candles = ValidCandles(fromUtc);
+        var affectedIndex = defect == "unclosed at cutoff" ? candles.Length - 1 : 12;
+        var original = candles[affectedIndex];
+        var previousFingerprint = Trading.Backtesting.HistoricalCandleFingerprint.Compute(candles);
+        var replacement = new Candle(original.Symbol, original.Interval,
+            original.OpenTimeUtc,
+            defect == "unclosed at cutoff" ? original.CloseTimeUtc.AddHours(1) : original.CloseTimeUtc,
+            defect == "zero price" ? 0m : original.Open,
+            original.High, original.Low, original.Close, original.Volume,
+            defect != "incomplete", false,
+            defect == "unsafe" ? [DataQualityIssue.Stale] : null);
+        candles[affectedIndex] = replacement;
+        var service = new PaperTrainingHistoricalQualification(
+            new SuppliedHistoricalSource(candles),
+            ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+
+        var result = Assert.Single(await service.RunAsync(new(
+            [PaperTrainingActivationService.ApprovedSlots[0]],
+            CandleInterval.OneHour,
+            fromUtc,
+            fromUtc.AddHours(candles.Length),
+            PaperTrainingQualificationGate.PlatformDefault)));
+
+        Assert.False(result.Accepted);
+        Assert.Equal(0, result.CompletedTrades);
+        Assert.Contains("unsafe value", result.Reason, StringComparison.Ordinal);
+        Assert.NotEqual(previousFingerprint, result.DatasetFingerprint);
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("out of order")]
+    public async Task RejectsChronologyErrorsInsteadOfSortingThemIntoValidEvidence(string defect)
+    {
+        var fromUtc = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(-7), TimeSpan.Zero);
+        var candles = ValidCandles(fromUtc);
+        if (defect == "duplicate")
+            candles[12] = candles[11];
+        else
+            (candles[12], candles[13]) = (candles[13], candles[12]);
+        var service = new PaperTrainingHistoricalQualification(
+            new SuppliedHistoricalSource(candles),
+            ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
+
+        var result = Assert.Single(await service.RunAsync(new(
+            [PaperTrainingActivationService.ApprovedSlots[0]],
+            CandleInterval.OneHour,
+            fromUtc,
+            fromUtc.AddHours(candles.Length),
+            PaperTrainingQualificationGate.PlatformDefault)));
+
+        Assert.False(result.Accepted);
+        Assert.Contains("out-of-order", result.Reason, StringComparison.Ordinal);
+    }
+
+    private static Candle[] ValidCandles(DateTimeOffset fromUtc) =>
+        Enumerable.Range(0, 40)
+            .Select(index => new Candle(
+                "XRP/EUR", CandleInterval.OneHour,
+                fromUtc.AddHours(index), fromUtc.AddHours(index + 1),
+                100m, 101m, 99m, 100m, 1_000m, true, false))
+            .ToArray();
 
     private sealed class SuppliedHistoricalSource(IReadOnlyList<Candle> candles) : IHistoricalCandleSource
     {

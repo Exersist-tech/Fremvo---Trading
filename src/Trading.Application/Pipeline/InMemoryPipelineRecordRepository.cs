@@ -97,5 +97,8 @@ public sealed class InMemoryRiskEvaluationRepository
 public sealed class InMemoryExecutionCommandRepository
     : InMemoryPipelineRecordRepository<ExecutionCommand>, IExecutionCommandRepository;
 
+public sealed class InMemoryPaperExecutionResultRepository
+    : InMemoryPipelineRecordRepository<PaperExecutionEvidence>, IPaperExecutionResultRepository;
+
 public sealed class InMemoryPortfolioUpdateRepository
     : InMemoryPipelineRecordRepository<PortfolioUpdate>, IPortfolioUpdateRepository;

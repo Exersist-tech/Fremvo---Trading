@@ -1,4 +1,5 @@
 using Trading.Application.Execution;
+using Trading.Application.Entitlements;
 using Trading.Application.UseCases.Audit;
 using Trading.Domain.Audit;
 using Trading.Domain.Execution;
@@ -87,6 +88,7 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
     private readonly IAuditEventWriter _auditWriter;
     private readonly TimeProvider _timeProvider;
     private readonly Execution.LiveTradingOptions _liveTradingOptions;
+    private readonly ILiveTradingEligibility _eligibility;
 
     public ExchangeAccountStageService(
         IExchangeAccountRepository accounts,
@@ -94,6 +96,7 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
         ILiveExecutionRouteProvider routes,
         IAuditEventWriter auditWriter,
         TimeProvider timeProvider,
+        ILiveTradingEligibility eligibility,
         Execution.LiveTradingOptions? liveTradingOptions = null)
     {
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
@@ -101,6 +104,7 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _eligibility = eligibility ?? throw new ArgumentNullException(nameof(eligibility));
         _liveTradingOptions = liveTradingOptions ?? new Execution.LiveTradingOptions();
     }
 
@@ -153,6 +157,14 @@ public sealed class ExchangeAccountStageService : IExchangeAccountStageService
                 TradingStageChangeOutcome.LiveTradingNotEntitled,
                 account.Stage,
                 "This account is not in the operator-approved live-trading rollout cohort.");
+        }
+        if (!await _eligibility.IsEligibleAsync(userId, _timeProvider.GetUtcNow(), cancellationToken)
+            .ConfigureAwait(false))
+        {
+            return new TradingStageChangeResult(
+                TradingStageChangeOutcome.LiveTradingNotEntitled,
+                account.Stage,
+                "An active live-eligible owner plan is required before account promotion.");
         }
 
         if (target == TradingStage.Live)

@@ -14,11 +14,9 @@ public interface IExchangeBalanceGateway
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>A read-only account balance returned by an exchange.</summary>
-public sealed record ExchangeBalance(string Asset, decimal Total, decimal Available = 0m)
-{
-    public decimal Held => Total - Available;
-}
+/// <summary>A read-only account balance. Availability and trade holds are unknown unless the venue reports them.</summary>
+public sealed record ExchangeBalance(
+    string Asset, decimal Total, decimal? Available = null, decimal? Held = null, string? VenueAsset = null);
 
 /// <summary>A point-in-time balance reading; it is never a cached valuation.</summary>
 public sealed record ExchangeBalanceSnapshot(

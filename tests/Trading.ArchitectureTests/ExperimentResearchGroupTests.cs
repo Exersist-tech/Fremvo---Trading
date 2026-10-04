@@ -122,9 +122,11 @@ public sealed class ExperimentResearchGroupTests
         var provenance = Provenance(approved: true);
         var beforeProfit = ExperimentResearchGroupConfiguration.Create(userId, 2, workers, provenance);
 
+        workers[0].UpdateStrategyParameters("""{"changed":true}""");
         workers[0].ApplyPaperTrade(1m, 100m, 0m, "buy");
         var afterProfit = ExperimentResearchGroupConfiguration.Create(userId, 2, workers, provenance);
-        workers[0].UpdateStrategyParameters("""{"changed":true}""");
+        Assert.Throws<InvalidOperationException>(() =>
+            workers[0].UpdateStrategyParameters("""{"changed-again":true}"""));
 
         var result = await pool.RunConfiguredAsync(userId, afterProfit, new RecordingRunner());
 
@@ -134,6 +136,9 @@ public sealed class ExperimentResearchGroupTests
         Assert.Single(result.Results);
         Assert.Equal(workers[1].Id, result.Results[0].WorkerId);
         Assert.Single(workers[0].Ledger);
+        workers[0].ApplyPaperTrade(1m, 100m, 0m, "sell");
+        workers[0].UpdateStrategyParameters("""{"new-position":true}""");
+        Assert.Equal("""{"new-position":true}""", workers[0].StrategyParameters);
     }
 
     [Fact]

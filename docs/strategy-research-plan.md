@@ -1,12 +1,53 @@
 # Strategy Research Plan
 
-The paper runtime implements these ten approved strategy families and their
-five-check consensus thresholds. This remains a research specification, not a
-claim of profitability or live-trading approval.
+The original catalogue below specified ten research families. The current
+worker toolbox also includes three-swing channel/RSI divergence: **eleven**
+families in total, with ten concurrent worker slots. The original ten-family
+contracts in sections 4-5 remain their historical research baseline, not
+evidence that the current worker versions or a new Futures/live variant have
+been qualified. This is a research specification, not a claim of profitability
+or live-trading approval.
+
+## Current worker-rule audit (not performance results)
+
+Every entry below describes a falsifiable mechanism, not a prediction that
+its signals are profitable. Paper Spot admits only bullish signals through
+independent risk and data gates. A bearish research observation cannot
+silently become a Futures short. For all eleven, require a separate
+chronological replay with a subsequent tradable entry price, venue filters,
+spread, fees, slippage, rejected/partial orders, and point-in-time membership
+where applicable. Compare each candidate against a simpler trigger-only
+baseline, then independent validation, untouched holdout, walk-forward, and
+forward paper trading; do not tune on holdout data.
+
+| Family | Necessary entry premise and timing | Current paper protection and unverified alternatives |
+|---|---|---|
+| EMA continuation | Closed higher-timeframe EMA trend, earlier bounded signal pullback, then closed resumption and participation; a vote cannot replace pullback or resumption. | New version-5 paper plans freeze a buffered pullback-swing stop and gross risk-multiple target; saved EMA and frozen-swing invalidation run separately. Compare with simpler trailing exits net of costs. |
+| Donchian breakout | Break the **prior** short channel in the higher-timeframe trend with volume and bounded ATR extension; nested longer channels are correlated, not independent votes. | Version-5 new paper stops use the prior signal-channel low minus a saved ATR buffer and an estimated target at a saved gross risk multiple; version-4-or-later invalidation uses a separately saved prior-low exit channel. Trailing alternatives, realistic next-price fills and net reward after costs still need evaluation. |
+| Bollinger reversion | A prior closed excursion and RSI extreme in a range, followed by a *later* closed band re-entry; all five gates are required. | New version-5 paper stops sit below the excursion low with an ATR buffer and target the frozen middle band; range-failure invalidation uses the frozen low. Compare alternatives after measured costs. |
+| RSI pullback | Higher-timeframe trend and structure, bounded earlier RSI cool-down, then a closed RSI turn and price resumption with volume. | New version-5 paper stops sit below the configured pullback swing with a buffered, gross risk-multiple target; saved RSI/EMA and frozen-swing invalidation run independently. Confirm any net advantage over price-only pullbacks. |
+| MACD/volume acceleration | Closed MACD cross in higher-timeframe trend with directional histogram, price and participation; the cross cannot be voted away. | New version-5 paper plans freeze a buffered crossing-swing stop and gross risk-multiple target; MACD/EMA and frozen-swing invalidation run independently. Compare reverse crosses and simpler baseline after costs. |
+| Volatility-compression breakout | Prior range compression, persistence, closed prior-channel break, volume and trend; version 4 compares each persistence observation only to its **earlier** 100+ percentile observations. Existing reserved versions remain unchanged. | New version-5 paper stops lie below the prior channel low with an ATR buffer and gross risk-multiple target; frozen pre-break high invalidation remains. Compare breakout versus retest and trail after costs. |
+| Cross-sectional momentum rotation | Same-quote, completed daily eligible-universe ranks with volatility penalizing *higher* volatility, trend and liquidity; rebalance only on a new daily boundary. | New version-4 paper plans freeze a buffered prior daily-swing stop and gross risk-multiple target; trend and frozen-swing invalidation remain independent. Compare buffered rank exits, turnover and cash after costs. |
+| Relative-strength pullback rotation | Require positive XBT/EUR-relative excess and daily excess-return breadth, completed 4h EMA/RSI pullback, then a **later** closed 1h confirmation pinned to the admitted slot (version 5). | Version-5 paper stop is below the configured 4h swing low plus ATR buffer, with a prior-channel-high estimated target; gross reward/risk can veto. Benchmark/rank loss and 1h failed resumption remain unverified exit hypotheses. Older open positions retain their recorded levels. |
+| Session-conditioned breakout | Prior channel break during an IANA/DST-aware session with volume, **observed** session costs and an independently validated no-session baseline. Missing cost/baseline evidence currently prevents entry. | Verify pre-session structure, late-entry cutoff and end-of-session handling; do not remove the two mandatory evidence gates to force trades. |
+| Regime-switching ensemble | Completed daily universe breadth and non-crisis regime select a *specific* viable component; version 5 pins a version-4 component's identity and decision fingerprint for replay. | Version-5 paper protection is an independent buffered four-hour swing stop and gross risk-multiple target, **not** the component's own stop; frozen-swing invalidation applies. Component-specific exits and switching costs remain unverified. |
+| Three-swing channel divergence | Confirm three distinct pivots within the multi-timeframe channel, RSI divergence, closed reversal and MACD direction according to the saved mandatory toggles; no unfinished candle. | New version-4 paper plans freeze a stop beneath the confirmed third swing/reversal low plus buffer and a gross risk-multiple target; channel/MACD invalidation applies. Compare no-MACD and simple reversal baselines after costs. |
+
+Ten families have versioned structural Spot **paper** plans for new
+admissions; session-conditioned breakout remains non-entering without measured
+cost and independent-baseline evidence. Older reserved positions keep their
+pinned version and numeric protection. The scanner pins the closed signal,
+while the first later safe, closed one-minute candle supplies a **simulated**
+paper reference price, not an executable quote. Neither the public Kraken
+720-bar OHLC limit nor
+synthetic test fixtures can establish net historical performance. Automated
+live trading, leveraged trading and Futures shorts remain disabled pending
+separate evidence and protective-order safety gates.
 
 ## 0. Honest framing
 
-These are **ten falsifiable research templates for backtesting and paper
+These are **eleven falsifiable research templates for backtesting and paper
 trading**, not trading recommendations and not strategies expected to be
 profitable. Published evidence is mixed and strongly regime-dependent: one
 2025 Bitcoin study reported favourable hourly Bollinger mean reversion
@@ -34,10 +75,10 @@ These are distinct concepts and must not be conflated:
 - **Regime timeframe** — the slower timeframe that decides whether the
   strategy may trade at all.
 - **Signal timeframe** — the timeframe producing entry and exit decisions.
-- **Execution timeframe** — the closed-candle interval on which an admitted
-  entry is modeled. In this initial design it always equals the signal
-  timeframe. A future faster execution profile is a new strategy version and
-  must never be confused with the separate 1-minute position manager.
+- **Execution timeframe** — the separately approved closed-candle role used
+  by the evaluator; it can differ from the signal timeframe. It is **not**
+  the simulated fill price: that comes from a later safe one-minute candle.
+  Neither should be confused with the one-minute position manager.
 
 Rules:
 
@@ -802,6 +843,107 @@ walk-forward windows; **one** untouched holdout evaluation; forward paper
 trading; realistic fee assumptions; spread and slippage stress; latency
 stress; missing-data stress; parameter-neighbourhood stability;
 instrument-level attribution; regime-level attribution.
+
+For offline source inspection, `KrakenOhlcvtArchiveReader.ReadAsync` accepts
+one Kraken OHLCVT CSV per pair/native interval (optional
+`time,open,high,low,close,volume,trades` header). It parses decimal prices
+and Unix-second opens in UTC, requires positive OHLC/volume/trade counts,
+aligned strictly increasing completed bars, and rejects future, duplicate,
+misordered, invalid or over-100,000-row input. Kraken omits intervals with
+no trades: the reader reports explicit gaps and returns separate contiguous
+runs instead of manufacturing zero-volume bars. Only a run can be fingerprinted
+as a `HistoricalDataset` for the existing backtest validator. The reader does not fetch archives or authenticate their origin. The
+operator-only `Trading.Tools.History` command writes each verified contiguous
+run as a create-only Azure Blob before its immutable SQL manifest becomes
+discoverable; missing/tampered payloads fail explicitly on read or retry.
+Neither the command nor the reader records point-in-time eligibility or
+measured spread or runs a strategy. Those prerequisites remain mandatory for
+research qualification.
+
+A separate operator-only `Trading.Tools.History replay` mode now loads pinned
+immutable archive manifests and payloads and reuses the continuous scanner's
+saved-plan veto and approved multi-timeframe evaluator at each closed signal
+boundary. It records the eight direct families' five-check decisions with
+independent 320-candle role cutoffs, not fills or historical trade outcomes.
+The three universe-dependent families fail closed in this *range replay*
+without point-in-time membership; the other eight still need contemporaneous feed provenance,
+later executable prices, actual worker/exits replay, and measured costs.
+This is not a backtest performance or strategy-approval result.
+
+Successful live paper scans now append the *observed* selected-candidate
+universe, approved selection policy, liquidity metrics and venue filters to
+an owner-scoped fingerprinted audit event in the same save as the activation
+update. Each selected member also carries the exact 320-closed-daily-candle
+fingerprint when the scanner loaded that window; otherwise its missing
+evidence is explicit and cannot be silently replaced in replay. The recorded
+observation time is after candidate discovery and timeframe loading, **after**
+the signal boundary. New version-2 snapshots also pin each loaded member's
+regime/signal/execution window fingerprints and all approved strategy versions
+and normalized settings, including whether a family was actually evaluated.
+Invalid settings are explicitly non-replayable rather than stored raw in the
+audit row; version-1 snapshots cannot acquire the missing context
+retrospectively. The snapshot survives bounded UI-observation retention but is not
+a retroactive source for earlier dates or a verified complete exchange
+catalogue. The read-only `verify-universe` command now checks one selected
+immutable daily archive per observed member, bounding manifests before Blob
+reads and matching each verified 320-closed-candle window to its recorded
+fingerprint at the signal boundary. It outputs the observation time and
+matching manifest identities, not a replayed rotation decision. Archives may
+have been imported after the scan; parity does not prove source authenticity
+or what was historically available. Worker/exits and cost-aware evidence
+remain prerequisites for any qualification.
+The operator-only `verify-series` command now checks one pinned version-2
+member/timeframe against one bounded, immutable manifest and its fully
+validated Blob payload. It cuts off future candles and compares the scanner's
+320-candle fingerprint. This is a per-input attestation, **not** an
+all-role completeness proof or a three-family signal replay.
+`verify-context` additionally requires one immutable archive for every
+timeframe actually recorded at one version-2 scan; its 200,000-candle
+aggregate bound and complete-set check run before any Blob download. Its
+success does not establish that missing, unrecorded inputs were available
+or that a family was evaluated, and still does not run the scanner
+evaluator or reconstruct orders.
+The new `replay-scan` mode uses the *same approved candidate evaluator* as
+the live paper scanner for one recorded boundary and selected member of
+the three universe-dependent families. It requires the version-2
+snapshot's exact current registry versions, valid pinned settings, full
+daily ranking universe, required candidate roles, and all recorded
+archive windows. Each role is independently cut off at its last closed
+boundary; later archive bars cannot influence an earlier decision.
+An unrecorded role, a different settings version, or an unevaluated family
+cannot silently become a favorable decision. This reconstructs a
+single signal/veto under observed-membership assumptions, **not** a
+past venue catalogue, the full scanner admission/worker lifecycle, a
+cost-aware backtest, historical performance or strategy approval.
+
+The older `PaperTrainingHistoricalQualification` only models a single
+interval, not the active multi-timeframe worker profile or saved owner
+parameters. It now refuses incomplete, misordered, misaligned, unsafe, or
+post-cutoff candles instead of sorting or discarding them, fingerprints the
+complete quality-bearing candle evidence, and explicitly reports when
+multi-timeframe rules cannot be assessed. Any favorable single-interval
+round trips are **provisional paper exploration**, never accepted
+qualification; the current-pair discovery cannot establish point-in-time
+membership or verified costs. This legacy simulation must be replaced by a
+faithful, versioned scanner/worker replay before selecting on validation or
+opening an untouched holdout for a promotion decision.
+
+The generic single-template `BacktestEngine` now offers explicit
+`BacktestFillTiming.NextCandleOpen`. A completed signal cannot fill on its own
+bar: only the following contiguous candle's open is used as a simulated
+reference, and fee/slippage/venue filters apply to that later price. An
+unfillable final signal is recorded as rejected; open positions remain marked
+to the final close, not fictitiously exited. New configurations default to
+this timing; the explicitly selected `SignalCloseLegacy` mode (also used by
+the obsolete compatibility constructor) retains earlier result comparisons
+and **must not** be used to qualify a strategy. Results record the fill
+timing; older records without that evidence display "Not recorded".
+Even the next-open mode assumes an immediate,
+fully filled Spot trade at an OHLC open, without a measured bid/ask, latency,
+partial fill or the eleven scanner/worker evaluators. It is a timing
+regression tool, not faithful replay, demonstrated net performance, or live
+approval. Historical source ingestion and executable-cost observations are
+still required before comparing strategy variants.
 
 The backtesting design must prevent: look-ahead bias; survivorship bias;
 use of currently listed symbols for historical universes; optimization

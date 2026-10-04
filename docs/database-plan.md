@@ -1,7 +1,8 @@
 # Database Plan (Azure SQL)
 
-No migrations exist yet; this describes the target schema and its phased
-introduction, mapped to `docs/implementation-plan.md`. All monetary/quantity
+This is the original phased target; EF migrations now exist under
+`src/Trading.Infrastructure.Data/Migrations`, and the actual model and
+migrations take precedence over this early plan. All monetary/quantity
 columns are `decimal(p,s)` (never `float`/`real`). All timestamps are
 `datetime2` stored in UTC. Every table has an audited `CreatedAtUtc`;
 mutable tables also have `RowVersion` (concurrency token).
@@ -11,8 +12,9 @@ mutable tables also have `RowVersion` (concurrency token).
 - `Users` (Id, Email [unique], DisplayName, Locale, TimeZoneId,
   ReportingCurrency, Status, MfaEnabled, CreatedAtUtc, RowVersion)
 - `Roles`, `UserRoles` (Id, UserId FK, Role)
-- `Invitations` (Id, Code [unique], IssuedByUserId, MaxUses, UsedCount,
-  ExpiresAtUtc, Status)
+- `Invitations` (Id, Code [unique SHA-256 digest of a random bearer code],
+  RecipientEmail, IssuedByUserId, MaxUses, UsedCount, ExpiresAtUtc, IsActive).
+  The raw code is returned only at issuance and cannot be recovered from SQL.
 - `AuditEvents` (Id, ActorUserId nullable, Action, TargetType, TargetId,
   CorrelationId, OccurredAtUtc, DetailsJson [no secrets], IPAddressHash
   nullable)
@@ -283,6 +285,13 @@ admission instead of being reassigned.
   ReportingCurrency, CountryProfileCode nullable)
 - `TransactionReports` (Id, UserId FK, PeriodStartUtc, PeriodEndUtc,
   Format, BlobStorageUri, GeneratedAtUtc)
+
+The initial **paper-only** JSON export uses the existing immutable owner-scoped
+`AuditEvents` rows as an export index (report ID, UTC interval, reporting
+currency, size and SHA-256 content hash), avoiding a new table and schema
+adoption for this bounded feature. The `TransactionReports` table above
+remains a future design for broader report types and lifecycle policies;
+never store report payloads or a public Blob URL in audit records.
 
 ## 12. General conventions
 

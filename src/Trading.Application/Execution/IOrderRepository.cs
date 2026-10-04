@@ -47,6 +47,8 @@ public interface IOrderRepository
     Task AddAsync(Order order, CancellationToken cancellationToken);
 
     Task UpdateAsync(Order order, CancellationToken cancellationToken);
+
+    Task UpdateAsync(Order order, int expectedVersion, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -68,6 +70,18 @@ public sealed class DuplicateClientOrderIdException : Exception
     public string ClientOrderId { get; }
 }
 
+/// <summary>Another unresolved live order already reserves this exchange account.</summary>
+public sealed class WorkingLiveOrderConflictException : Exception
+{
+    public WorkingLiveOrderConflictException()
+        : base("The exchange account already has a live order requiring reconciliation.") { }
+
+    public WorkingLiveOrderConflictException(string message) : base(message) { }
+
+    public WorkingLiveOrderConflictException(string message, Exception innerException)
+        : base(message, innerException) { }
+}
+
 public interface IPositionRepository
 {
     Task<Position?> GetAsync(Guid userId, Guid positionId, CancellationToken cancellationToken);
@@ -76,7 +90,16 @@ public interface IPositionRepository
 
     Task AddAsync(Position position, CancellationToken cancellationToken);
 
-    Task UpdateAsync(Position position, CancellationToken cancellationToken);
+    Task UpdateAsync(Position position, int expectedVersion, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Commits the observed live position, cumulative order state, and audit event
+/// together. A crash between those writes must not apply the same fill twice.
+/// </summary>
+public interface ILiveFillPersistenceTransaction
+{
+    Task RunAsync(Func<CancellationToken, Task> operation, CancellationToken cancellationToken);
 }
 
 public interface IOrderReconciliationRepository

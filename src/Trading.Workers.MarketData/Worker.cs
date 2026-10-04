@@ -2,6 +2,9 @@ using Microsoft.Extensions.Options;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using Trading.Application.Experiments;
+using Trading.Domain.Market;
+using Trading.Infrastructure.Data;
+using Trading.Infrastructure.Data.Experiments;
 using Trading.MarketData;
 
 namespace Trading.Workers.MarketData;
@@ -13,12 +16,17 @@ public sealed class Worker : BackgroundService
     private readonly PaperTrainingCandleBackfillService _backfill;
     private readonly IOptions<MarketDataStreamingOptions> _options;
     private readonly ILogger<Worker> _logger;
+    private DateTimeOffset? _lastForwardProofAtUtc;
     private static readonly Action<ILogger, Exception?> s_logDisabled =
         LoggerMessage.Define(LogLevel.Information, new EventId(1, nameof(Worker)),
             "Public candle streaming is disabled or has no configured subscriptions.");
-    private static readonly Action<ILogger, TimeSpan, int, Exception?> s_logReconnect =
-        LoggerMessage.Define<TimeSpan, int>(LogLevel.Warning, new EventId(2, nameof(Worker)),
-            "Public candle stream disconnected; retrying in {Delay}. Attempt={Attempt}");
+    private static readonly Action<ILogger, TimeSpan, int, string, Exception?> s_logReconnect =
+        LoggerMessage.Define<TimeSpan, int, string>(LogLevel.Warning, new EventId(2, nameof(Worker)),
+            "Market-data worker loop failed safely; retrying in {Delay}. Attempt={Attempt} ErrorType={ErrorType}.");
+    private static readonly Action<ILogger, string, CandleInterval, DateTimeOffset, Exception?> s_logForwardProof =
+        LoggerMessage.Define<string, CandleInterval, DateTimeOffset>(
+            LogLevel.Information, new EventId(3, "PaperForwardCandlePersisted"),
+            "Paper forward closed candle persisted. Symbol={Symbol} Interval={Interval} CloseUtc={CloseUtc}.");
 
     public Worker(
         IStreamingCandleSource source,
@@ -76,7 +84,31 @@ public sealed class Worker : BackgroundService
                     {
                         using var scope = _scopeFactory.CreateScope();
                         var processor = scope.ServiceProvider.GetRequiredService<CandleIngestionProcessor>();
-                        await processor.ProcessAsync(candle, connection.Token).ConfigureAwait(false);
+                        var write = await processor.ProcessAsync(candle, connection.Token).ConfigureAwait(false);
+                        if (write != CandleWriteResult.Conflict
+                            && candle.Interval is CandleInterval.OneMinute or CandleInterval.FiveMinutes
+                            && candle.CanBeUsedForClosedCandleSignal && !candle.IsDerived)
+                        {
+                            var stored = await scope.ServiceProvider.GetRequiredService<ICandleRepository>()
+                                .GetLatestAsync(candle.Symbol, candle.Interval, connection.Token).ConfigureAwait(false);
+                            var now = scope.ServiceProvider.GetRequiredService<TimeProvider>().GetUtcNow();
+                            if (stored is not null
+                                && stored.OpenTimeUtc == candle.OpenTimeUtc
+                                && stored.CloseTimeUtc == candle.CloseTimeUtc
+                                && stored.CanBeUsedForClosedCandleSignal && !stored.IsDerived
+                                && stored.QualityFlags.Count == 0
+                                && stored.CloseTimeUtc <= now
+                                && now - stored.CloseTimeUtc <= TimeSpan.FromMinutes(10)
+                                && (_lastForwardProofAtUtc is null
+                                    || now - _lastForwardProofAtUtc >= TimeSpan.FromMinutes(1)))
+                            {
+                                await new EfPaperHostHeartbeatRepository(
+                                    scope.ServiceProvider.GetRequiredService<TradingDbContext>())
+                                    .RecordForwardCandleAsync(stored, now, connection.Token).ConfigureAwait(false);
+                                _lastForwardProofAtUtc = now;
+                                s_logForwardProof(_logger, stored.Symbol, stored.Interval, stored.CloseTimeUtc, null);
+                            }
+                        }
                     }
 
                     throw new MarketDataSourceException("The public candle stream ended unexpectedly.");
@@ -105,7 +137,7 @@ public sealed class Worker : BackgroundService
             {
                 failures++;
                 var delay = GetReconnectDelay(failures, options.MaximumReconnectDelaySeconds);
-                s_logReconnect(_logger, delay, failures, exception);
+                s_logReconnect(_logger, delay, failures, exception.GetType().Name, null);
                 await Task.Delay(delay, stoppingToken).ConfigureAwait(false);
             }
         }
@@ -175,6 +207,7 @@ public sealed class Worker : BackgroundService
                     await connection.CancelAsync().ConfigureAwait(false);
                     return null;
                 }
+                await _backfill.EnsureAsync(refreshed, connection.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (connection.IsCancellationRequested || stoppingToken.IsCancellationRequested)

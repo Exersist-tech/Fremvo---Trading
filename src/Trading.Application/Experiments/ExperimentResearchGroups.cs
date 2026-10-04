@@ -4,6 +4,7 @@ using System.Text;
 using Trading.Backtesting;
 using Trading.Domain.Experiments;
 using Trading.Domain.Strategies;
+using Trading.Risk;
 using Trading.Strategies.Approvals;
 
 namespace Trading.Application.Experiments;
@@ -66,7 +67,11 @@ public sealed class ExperimentResearchProvenance
         HistoricalDataset dataset,
         ExperimentClassifierReference classifier,
         ResearchEvidenceProvenance evidenceProvenance,
-        RejectionGateEvaluation gateEvaluation)
+        RejectionGateEvaluation gateEvaluation,
+        PaperRegimeComponentSelection? selectedComponent = null,
+        IReadOnlyList<string>? rankingUniverseSymbols = null,
+        DateTimeOffset? admissionCloseUtc = null,
+        PaperExchangeFilters? pairFilters = null)
     {
         ArgumentNullException.ThrowIfNull(approval);
         ArgumentNullException.ThrowIfNull(dataset);
@@ -82,6 +87,10 @@ public sealed class ExperimentResearchProvenance
         Classifier = classifier;
         EvidenceProvenance = evidenceProvenance;
         GateEvaluation = gateEvaluation;
+        SelectedComponent = selectedComponent;
+        RankingUniverseSymbols = rankingUniverseSymbols;
+        AdmissionCloseUtc = admissionCloseUtc;
+        PairFilters = pairFilters;
     }
 
     public StrategyApproval Approval { get; }
@@ -90,6 +99,10 @@ public sealed class ExperimentResearchProvenance
     public ExperimentClassifierReference Classifier { get; }
     public ResearchEvidenceProvenance EvidenceProvenance { get; }
     public RejectionGateEvaluation GateEvaluation { get; }
+    public PaperRegimeComponentSelection? SelectedComponent { get; }
+    public IReadOnlyList<string>? RankingUniverseSymbols { get; }
+    public DateTimeOffset? AdmissionCloseUtc { get; }
+    public PaperExchangeFilters? PairFilters { get; }
 
     internal bool Supports(ExperimentWorker worker)
     {

@@ -4,14 +4,14 @@ namespace Trading.Application.UseCases.Identity;
 
 public interface IInvitationService
 {
-    Invitation CreateInvitation(Guid issuerUserId, string code, int maxUses, DateTimeOffset expiresAtUtc);
+    Invitation CreateInvitation(Guid issuerUserId, string code, string recipientEmail, int maxUses, DateTimeOffset expiresAtUtc);
 
-    Invitation RedeemInvitation(Invitation invitation, DateTimeOffset nowUtc);
+    Invitation RedeemInvitation(Invitation invitation, string recipientEmail, DateTimeOffset nowUtc);
 }
 
 public sealed class InvitationService : IInvitationService
 {
-    public Invitation CreateInvitation(Guid issuerUserId, string code, int maxUses, DateTimeOffset expiresAtUtc)
+    public Invitation CreateInvitation(Guid issuerUserId, string code, string recipientEmail, int maxUses, DateTimeOffset expiresAtUtc)
     {
         if (issuerUserId == Guid.Empty)
         {
@@ -35,7 +35,8 @@ public sealed class InvitationService : IInvitationService
 
         return new Invitation(
             Guid.NewGuid(),
-            code.Trim(),
+            InvitationCodeDigest.Compute(code),
+            recipientEmail,
             issuerUserId,
             maxUses,
             0,
@@ -43,15 +44,15 @@ public sealed class InvitationService : IInvitationService
             true);
     }
 
-    public Invitation RedeemInvitation(Invitation invitation, DateTimeOffset nowUtc)
+    public Invitation RedeemInvitation(Invitation invitation, string recipientEmail, DateTimeOffset nowUtc)
     {
         ArgumentNullException.ThrowIfNull(invitation);
 
-        if (!invitation.IsUsableAt(nowUtc))
+        if (!invitation.IsUsableAt(nowUtc) || !invitation.IsIssuedTo(recipientEmail))
         {
             throw new InvalidOperationException("Invitation is not valid for redemption at the current time.");
         }
 
-        return invitation.Consume();
+        return invitation.Consume(nowUtc);
     }
 }

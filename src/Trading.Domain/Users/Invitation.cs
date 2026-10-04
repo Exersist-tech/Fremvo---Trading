@@ -2,9 +2,13 @@ namespace Trading.Domain.Users;
 
 public sealed class Invitation
 {
+    // EF must hydrate pre-migration invitations with a null recipient so they can be rejected.
+    private Invitation() => Code = null!;
+
     public Invitation(
         Guid id,
         string code,
+        string inviteeEmail,
         Guid issuedByUserId,
         int maxUses,
         int usedCount,
@@ -16,9 +20,17 @@ public sealed class Invitation
             throw new ArgumentException("Invitation id is required.", nameof(id));
         }
 
-        if (string.IsNullOrWhiteSpace(code))
+        if (code is not { Length: 64 }
+            || code.Any(character => character is not (>= '0' and <= '9' or >= 'A' and <= 'F')))
         {
-            throw new ArgumentException("Invitation code is required.", nameof(code));
+            throw new ArgumentException("An uppercase SHA-256 invitation code digest is required.", nameof(code));
+        }
+
+        if (string.IsNullOrWhiteSpace(inviteeEmail) || inviteeEmail.Length > 256
+            || !System.Net.Mail.MailAddress.TryCreate(inviteeEmail.Trim(), out var recipient)
+            || !string.Equals(recipient.Address, inviteeEmail.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A valid recipient email is required.", nameof(inviteeEmail));
         }
 
         if (issuedByUserId == Guid.Empty)
@@ -41,13 +53,14 @@ public sealed class Invitation
             throw new ArgumentOutOfRangeException(nameof(usedCount), "Used count cannot exceed maximum uses.");
         }
 
-        if (expiresAtUtc == default)
+        if (expiresAtUtc == default || expiresAtUtc.Offset != TimeSpan.Zero)
         {
-            throw new ArgumentException("Expiration is required.", nameof(expiresAtUtc));
+            throw new ArgumentException("A UTC expiration is required.", nameof(expiresAtUtc));
         }
 
         Id = id;
-        Code = code.Trim();
+        Code = code;
+        RecipientEmail = inviteeEmail.Trim();
         IssuedByUserId = issuedByUserId;
         MaxUses = maxUses;
         UsedCount = usedCount;
@@ -57,7 +70,11 @@ public sealed class Invitation
 
     public Guid Id { get; }
 
+    /// <summary>SHA-256 digest of the high-entropy one-time code, never the bearer value.</summary>
     public string Code { get; }
+
+    // Null is reserved for invitations created before recipient binding was introduced.
+    public string? RecipientEmail { get; }
 
     public Guid IssuedByUserId { get; }
 
@@ -71,15 +88,23 @@ public sealed class Invitation
 
     public bool IsExpiredAt(DateTimeOffset nowUtc) => nowUtc >= ExpiresAtUtc;
 
-    public bool IsUsableAt(DateTimeOffset nowUtc) => IsActive && !IsExpiredAt(nowUtc) && UsedCount < MaxUses;
+    public bool IsUsableAt(DateTimeOffset nowUtc) =>
+        IsActive && !IsExpiredAt(nowUtc) && UsedCount < MaxUses && !string.IsNullOrWhiteSpace(RecipientEmail);
 
-    public Invitation Consume()
+    public bool IsIssuedTo(string? email) =>
+        !string.IsNullOrWhiteSpace(RecipientEmail)
+        && !string.IsNullOrWhiteSpace(email)
+        && string.Equals(RecipientEmail, email.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    public Invitation Consume(DateTimeOffset nowUtc)
     {
-        if (!IsUsableAt(DateTime.UtcNow))
+        if (nowUtc.Offset != TimeSpan.Zero)
+            throw new ArgumentException("Redemption time must be UTC.", nameof(nowUtc));
+        if (!IsUsableAt(nowUtc))
         {
             throw new InvalidOperationException("Invitation is not usable.");
         }
 
-        return new Invitation(Id, Code, IssuedByUserId, MaxUses, UsedCount + 1, ExpiresAtUtc, IsActive);
+        return new Invitation(Id, Code, RecipientEmail!, IssuedByUserId, MaxUses, UsedCount + 1, ExpiresAtUtc, IsActive);
     }
 }

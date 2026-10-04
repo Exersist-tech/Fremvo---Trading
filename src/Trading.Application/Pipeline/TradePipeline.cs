@@ -125,8 +125,8 @@ public sealed class TradePipelineResult
     public PortfolioUpdate? PortfolioUpdate { get; }
 
     /// <summary>
-    /// True when the exchange outcome is unknown. The order must be reconciled before any
-    /// resubmission; it must never be blindly retried.
+    /// True when a fill is not established or adapter evidence conflicts. Reconcile the order
+    /// before updating the portfolio or resubmitting; never blindly retry it.
     /// </summary>
     public bool RequiresReconciliation { get; }
     public Guid? ExecutionCommandId { get; }
@@ -155,6 +155,7 @@ public sealed class TradePipeline
     private readonly ITradeIntentRepository _intents;
     private readonly IRiskEvaluationRepository _riskEvaluations;
     private readonly IExecutionCommandRepository _commands;
+    private readonly IPaperExecutionResultRepository? _paperResults;
     private readonly IPortfolioUpdateRepository _portfolioUpdates;
     private readonly IAuditEventWriter _auditWriter;
     private readonly RiskEngine _riskEngine;
@@ -177,7 +178,8 @@ public sealed class TradePipeline
         OrderIdempotencyGuard idempotencyGuard,
         TradePipelineOptions? options = null,
         IOrderReconciliationRepository? reconciliations = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IPaperExecutionResultRepository? paperResults = null)
     {
         ArgumentNullException.ThrowIfNull(marketEvents);
         ArgumentNullException.ThrowIfNull(decisions);
@@ -195,6 +197,7 @@ public sealed class TradePipeline
         _intents = intents;
         _riskEvaluations = riskEvaluations;
         _commands = commands;
+        _paperResults = paperResults;
         _portfolioUpdates = portfolioUpdates;
         _auditWriter = auditWriter;
         _riskEngine = riskEngine;
@@ -305,6 +308,8 @@ public sealed class TradePipeline
         var riskLimits = BuildEffectiveRiskLimits(_options.PlatformRiskLimits);
         var riskResult = riskLimits is null
             ? new RiskEvaluationResult(false, "Mandatory platform risk limits are unavailable.")
+            : intent.Direction == TradeDirection.Buy && portfolio.CashBalance < proposedExposure
+                ? new RiskEvaluationResult(false, "Available cash cannot cover the proposed buy.")
             : _riskEngine.Evaluate(
                 proposedExposure: proposedExposure,
                 currentExposure: portfolio.CurrentExposure,
@@ -367,17 +372,42 @@ public sealed class TradePipeline
             new PipelineRecord<ExecutionCommand>(Guid.NewGuid(), context, PipelineStage.ExecutionCommand, command, now),
             cancellationToken).ConfigureAwait(false);
 
+        if (_paperResults is not null && context.Mode == TradingMode.Paper
+            && (executionAdapter is not PaperExecutionAdapter || !command.IsPaperOnly))
+            throw new InvalidOperationException("Only a simulated paper adapter may persist paper execution evidence.");
         var execution = await executionAdapter.ExecuteAsync(command, cancellationToken).ConfigureAwait(false);
-
-        // An unknown outcome must be reconciled, never blindly retried.
-        if (IsUnknownOutcome(execution))
+        if (execution.ExecutionCommandId != command.Id)
+            throw new InvalidOperationException("Execution result does not belong to the submitted command.");
+        if (_paperResults is not null && context.Mode == TradingMode.Paper)
         {
-            const string UnknownReason =
-                "Exchange status unknown; reconciliation required before any resubmission.";
+            await _paperResults.AddAsync(
+                new PipelineRecord<PaperExecutionEvidence>(Guid.NewGuid(), context, PipelineStage.Execution,
+                    new PaperExecutionEvidence(command.Id, execution.Outcome, execution.FilledQuantity,
+                        execution.AverageFillPrice, execution.Fees, execution.ExecutedAtUtc), now),
+                cancellationToken).ConfigureAwait(false);
+        }
 
-            // The record is what makes the freeze durable and visible. Without
-            // it the unknown outcome would exist only as a returned value that
-            // a caller could ignore.
+        var inconsistent = execution.Outcome switch
+        {
+            ExecutionOutcome.Accepted => !execution.Success || execution.FilledQuantity != 0m
+                || execution.AverageFillPrice != 0m || execution.Fees != 0m,
+            ExecutionOutcome.Rejected => execution.Success || execution.FilledQuantity != 0m
+                || execution.AverageFillPrice != 0m || execution.Fees != 0m,
+            ExecutionOutcome.Filled => !execution.Success || execution.FilledQuantity <= 0m
+                || execution.FilledQuantity > command.Quantity || execution.AverageFillPrice <= 0m,
+            ExecutionOutcome.Unknown => false,
+            _ => true
+        };
+        // Acceptance is not a fill. Conflicting adapter evidence is no safer than an unknown order.
+        if (execution.RequiresReconciliation || execution.Outcome == ExecutionOutcome.Accepted || inconsistent)
+        {
+            var accepted = execution.Outcome == ExecutionOutcome.Accepted && !inconsistent;
+            var reason = inconsistent
+                ? "Execution outcome and reported fill conflict; reconcile before any resubmission."
+                : accepted
+                    ? "Order accepted but not filled; reconcile its status before updating the portfolio or resubmitting."
+                    : "Exchange status unknown; reconciliation required before any resubmission.";
+
             if (_reconciliations is not null)
             {
                 await _reconciliations.AddAsync(
@@ -385,18 +415,19 @@ public sealed class TradePipeline
                         Guid.NewGuid(),
                         command.Id,
                         exchangeOrderId: null,
-                        ExchangeOrderStatus.Unknown,
+                        accepted ? ExchangeOrderStatus.New : ExchangeOrderStatus.Unknown,
                         now,
                         source: $"pipeline:{context.Mode}"),
                     cancellationToken).ConfigureAwait(false);
             }
 
             await WriteAuditAsync(
-                context, "Trade.ExecutionUnknown", intent.Id.ToString(),
-                UnknownReason,
+                context, inconsistent ? "Trade.ExecutionInconsistent"
+                    : accepted ? "Trade.ExecutionAccepted" : "Trade.ExecutionUnknown",
+                intent.Id.ToString(), reason,
                 cancellationToken).ConfigureAwait(false);
 
-            return TradePipelineResult.NeedsReconciliation(UnknownReason, command.Id);
+            return TradePipelineResult.NeedsReconciliation(reason, command.Id);
         }
 
         if (!execution.Success)
@@ -418,10 +449,11 @@ public sealed class TradePipeline
 
         if (cashAfter < 0m)
         {
-            return await BlockAsync(
-                context, PipelineStage.Execution,
-                "Execution would drive the cash balance negative.",
-                cancellationToken).ConfigureAwait(false);
+            const string reason = "Execution filled but the portfolio cash update is invalid; reconcile before any resubmission.";
+            await WriteAuditAsync(
+                context, "Trade.PortfolioReconciliationRequired", command.Id.ToString(),
+                reason, cancellationToken).ConfigureAwait(false);
+            return TradePipelineResult.NeedsReconciliation(reason, command.Id);
         }
 
         var portfolioUpdate = new PortfolioUpdate(
@@ -449,9 +481,6 @@ public sealed class TradePipeline
 
         return TradePipelineResult.Completed(portfolioUpdate, command.Id);
     }
-
-    private static bool IsUnknownOutcome(ExecutionResult execution) =>
-        string.Equals(execution.Status, "Unknown", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildClientOrderId(PipelineContext context, TradeIntent intent) =>
         $"{(context.Mode == TradingMode.Paper ? "paper" : "live")}-{intent.Id:N}";

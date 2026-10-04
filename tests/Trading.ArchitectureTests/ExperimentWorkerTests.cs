@@ -86,6 +86,41 @@ public sealed class ExperimentWorkerTests
     }
 
     [Fact]
+    public void RepeatedPaperCommandLedgerIdCannotMutateWorkerTwice()
+    {
+        var now = new DateTimeOffset(2026, 10, 3, 12, 0, 0, TimeSpan.Zero);
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "Paper worker",
+            "strategy-1", "BTC/USD", 1_000m, now, 1);
+        worker.Start();
+        var commandId = Guid.NewGuid();
+        worker.ApplyPaperTrade(1m, 100m, 0.8m, "buy", now, commandId);
+        var cash = worker.CashBalance;
+
+        Assert.Throws<InvalidOperationException>(() =>
+            worker.ApplyPaperTrade(1m, 100m, 0.8m, "buy", now, commandId));
+        Assert.Throws<InvalidOperationException>(() =>
+            worker.ApplyPaperTrade(1m, 100m, 0.8m, "buy", now, Guid.Empty));
+        Assert.Equal(cash, worker.CashBalance);
+        Assert.Equal(1m, worker.PositionQuantity);
+        Assert.Equal(commandId, Assert.Single(worker.Ledger).Id);
+    }
+
+    [Fact]
+    public void DuplicateDurableLedgerRowsCannotReplayAsTwoTrades()
+    {
+        var now = new DateTimeOffset(2026, 10, 3, 12, 0, 0, TimeSpan.Zero);
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "Paper worker",
+            "platform.ema-trend-continuation", "BTC/USD", 1_000m, now, 1);
+        var row = new PaperTradingLedgerEntry(Guid.NewGuid(), worker.Id, worker.MarketSymbol,
+            1m, 100m, 0.8m, now, "buy");
+
+        Assert.Throws<InvalidOperationException>(() => ExperimentWorker.Replay(
+            worker.Id, worker.UserId, worker.Name, worker.StrategyId, worker.MarketSymbol,
+            worker.StartingCash, now, worker.RandomSeed, worker.StrategyParameters,
+            worker.PositionControls, ExperimentWorkerStatus.Running, null, [row, row]));
+    }
+
+    [Fact]
     public void AWorkerNeverBorrowsCashToBuy()
     {
         var worker = new ExperimentWorker(

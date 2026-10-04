@@ -27,6 +27,26 @@ public sealed class PortfolioQueryServiceTests
     }
 
     [Fact]
+    public async Task SelectedAccountReadNeverFetchesAnotherOwnersCredential()
+    {
+        var owner = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var owned = ConnectedAccount(owner, "Owned");
+        var foreign = ConnectedAccount(other, "Foreign");
+        var accounts = new FakeAccounts(owned, foreign);
+        var secrets = new InMemorySecretStore();
+        await StoreCredentialsAsync(secrets, [owned]);
+        var gateway = new FixedGateway();
+        var service = new PortfolioQueryService(accounts, secrets, [gateway]);
+
+        Assert.Null(await service.ReadAccountAsync(owner, foreign.Id));
+        Assert.Equal(0, gateway.Calls);
+        var result = await service.ReadAccountAsync(owner, owned.Id);
+        Assert.Equal(owned.Id, result?.AccountId);
+        Assert.Equal(1, gateway.Calls);
+    }
+
+    [Fact]
     public async Task ReadDoesNotReturnStaleBalancesWhenTheExchangeFails()
     {
         var user = Guid.NewGuid();
@@ -80,10 +100,15 @@ public sealed class PortfolioQueryServiceTests
     {
         public ExchangeKind Exchange => ExchangeKind.Kraken;
 
+        public int Calls { get; private set; }
+
         public Task<ExchangeBalanceSnapshot> ReadBalancesAsync(
-            ExchangeCredential credential, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new ExchangeBalanceSnapshot(DateTimeOffset.UtcNow,
+            ExchangeCredential credential, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(new ExchangeBalanceSnapshot(DateTimeOffset.UtcNow,
                 [new ExchangeBalance("BTC", 1.25m, 1.25m)]));
+        }
     }
 
     private sealed class ThrowingGateway : IExchangeBalanceGateway

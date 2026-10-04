@@ -22,16 +22,16 @@ namespace Trading.Web.Development;
 /// <para>
 /// It grants nothing that weakens the security model. Sign-in still goes
 /// through the normal authentication path, authorization still comes from
-/// the user's role claim, and the administrator account is created with
-/// multi-factor authentication already enabled because the domain forbids
-/// administrator privilege without it. No trading capability is enabled:
+/// the user's role claim. The administrator has the domain's MFA flag for
+/// local UI exploration, not a verified second factor; non-development
+/// administrator sessions are blocked. No trading capability is enabled:
 /// live trading remains off, and the demo users hold no exchange
 /// credentials.
 /// </para>
 /// <para>
-/// <c>EnsureCreatedAsync</c> is used because no migrations exist yet. It is
-/// a local bootstrap only and is not a substitute for the migration work
-/// each phase still owes.
+/// <c>EnsureCreatedAsync</c> remains a disposable local bootstrap; it does
+/// not record EF migration history and must never be used to provision a
+/// deployed database.
 /// </para>
 /// </remarks>
 internal static class DevelopmentDataSeeder
@@ -44,11 +44,11 @@ internal static class DevelopmentDataSeeder
 
     internal static readonly Guid TraderId = new("6a9bc9b5-9c48-45f9-934d-2cef61fe37ce");
 
-    private static readonly Action<ILogger, string, string, string, Exception?> s_seeded =
-        LoggerMessage.Define<string, string, string>(
+    private static readonly Action<ILogger, string, string, Exception?> s_seeded =
+        LoggerMessage.Define<string, string>(
             LogLevel.Information,
             new EventId(1, nameof(SeedAsync)),
-            "Development demo data seeded. Administrator {Administrator}, trader {Trader}, invitation code {InvitationCode}.");
+            "Development demo data seeded. Administrator {Administrator}, trader {Trader}.");
 
     private static readonly Action<ILogger, string, Exception?> s_rebuilding =
         LoggerMessage.Define<string>(
@@ -77,6 +77,7 @@ internal static class DevelopmentDataSeeder
     internal const string DemoPassword = "DemoPassword123!";
 
     internal const string InvitationCode = "FREMVO-DEMO-INVITE";
+    internal const string InvitationEmail = "new@fremvo.local";
 
     public static async Task SeedAsync(WebApplication app, CancellationToken cancellationToken = default)
     {
@@ -107,7 +108,7 @@ internal static class DevelopmentDataSeeder
         // "Invalid object name", far from the cause. Because this is local demo
         // data only, an incomplete development database is rebuilt instead.
         //
-        // This is a direct consequence of having no migrations yet and is not a
+        // This reset is strictly for disposable development data and is not a
         // pattern any deployed environment may use.
         var missingTables = await FindMissingSchemaAsync(dbContext, cancellationToken).ConfigureAwait(false);
         if (missingTables.Count > 0)
@@ -160,16 +161,17 @@ internal static class DevelopmentDataSeeder
         // be exercised without first signing in as an administrator.
         dbContext.Invitations.Add(new Invitation(
             Guid.NewGuid(),
-            InvitationCode,
+            InvitationCodeDigest.Compute(InvitationCode),
+            InvitationEmail,
             administrator.Id,
-            maxUses: 25,
+            maxUses: 1,
             usedCount: 0,
             expiresAtUtc: DateTimeOffset.UtcNow.AddYears(1),
             isActive: true));
 
         await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        s_seeded(app.Logger, AdministratorEmail, TraderEmail, InvitationCode, null);
+        s_seeded(app.Logger, AdministratorEmail, TraderEmail, null);
     }
 
     /// <summary>

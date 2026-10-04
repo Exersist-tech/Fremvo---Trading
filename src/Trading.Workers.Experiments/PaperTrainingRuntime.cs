@@ -11,8 +11,21 @@ using Trading.Strategies;
 using Trading.Strategies.Approvals;
 using Trading.Infrastructure.Data.Experiments;
 using Trading.Backtesting;
+using Trading.Application.UseCases.Audit;
+using Trading.Domain.Audit;
+using Trading.Infrastructure.Data.Audit;
 
 namespace Trading.Workers.Experiments;
+
+public sealed class ScopedPaperTrainingAuditWriter(IServiceScopeFactory scopes) : IAuditEventWriter
+{
+    public async Task WriteAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+    {
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<EfAuditEventWriter>()
+            .WriteAsync(auditEvent, cancellationToken).ConfigureAwait(false);
+    }
+}
 
 public sealed class ScopedDurableCandleSource : IExperimentCandleSeriesSource
 {
@@ -125,6 +138,19 @@ public sealed class ScopedPaperExecutionLedger : IExperimentPaperExecutionLedger
             using var scope = _scopes.CreateScope();
             await scope.ServiceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>().CompleteAsync(userId, association, cancellationToken).ConfigureAwait(false);
         }
+        public async Task<bool> HasUnresolvedAsync(Guid userId, Guid workerId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>()
+                .HasUnresolvedAsync(userId, workerId, cancellationToken).ConfigureAwait(false);
+        }
+        public async Task<ExperimentPaperExecutionAssociation?> GetUnresolvedAsync(
+            Guid userId, Guid workerId, CancellationToken cancellationToken = default)
+        {
+            using var scope = _scopes.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<EfExperimentPaperExecutionLedger>()
+                .GetUnresolvedAsync(userId, workerId, cancellationToken).ConfigureAwait(false);
+        }
 }
 
 public sealed class ScopedPaperPlanEvidenceRepository : IExperimentPaperPlanEvidenceRepository
@@ -164,49 +190,28 @@ public sealed class DurablePaperTrainingProtectiveExitPositionSource : IExperime
         foreach (var worker in await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (worker.UserId != userId || worker.Status != ExperimentWorkerStatus.Running || worker.PositionQuantity <= 0m)
+            if (worker.UserId != userId || worker.PositionQuantity <= 0m
+                || worker.Status is not (ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused or ExperimentWorkerStatus.Failed))
                 continue;
 
-            var openedAt = CurrentPositionOpenedAt(worker);
+            var openedAt = PaperProtectivePositionEvidence.OpenedAt(worker);
             if (openedAt is null)
                 continue;
-            var plan = (await _plans.ListAsync(userId, worker.Id, cancellationToken).ConfigureAwait(false))
-                .Where(candidate => candidate.DecisionKey.Symbol.Equals(worker.MarketSymbol, StringComparison.OrdinalIgnoreCase)
-                    && candidate.DecisionKey.AsOfUtc <= openedAt.Value
-                    && candidate.ProtectiveStopPrice > 0m)
-                .OrderByDescending(candidate => candidate.DecisionKey.AsOfUtc)
-                .ThenByDescending(candidate => candidate.RecordedAtUtc)
-                .FirstOrDefault();
+            var plan = PaperProtectivePositionEvidence.FindPlan(worker, openedAt.Value,
+                await _plans.ListAsync(userId, worker.Id, cancellationToken).ConfigureAwait(false));
             if (plan is null)
                 continue;
 
+            var holdingInterval = worker.StrategyId == "platform.relative-strength-pullback-rotation"
+                && plan.DecisionKey.StrategyVersion >= 5
+                ? ApprovedConsensusStrategyProfiles.For(worker.StrategyId).Single().Signal
+                : plan.DecisionKey.Interval;
             positions.Add(new ExperimentProtectiveExitPosition(userId, worker.Id, PositionId(plan.DecisionKey),
                 worker.MarketSymbol, worker.PositionQuantity, worker.AverageEntryPrice, openedAt.Value,
-                plan.ProtectiveStopPrice, plan.ConservativeTargetPrice, worker, plan.DecisionKey.Interval));
+                plan.ProtectiveStopPrice, plan.ConservativeTargetPrice, worker, holdingInterval,
+                plan.DecisionKey.StrategyVersion, plan.DecisionKey.CloseTimeUtc));
         }
         return positions;
-    }
-
-    private static DateTimeOffset? CurrentPositionOpenedAt(ExperimentWorker worker)
-    {
-        var quantity = 0m;
-        DateTimeOffset? opened = null;
-        foreach (var entry in worker.Ledger.OrderBy(value => value.OccurredAtUtc).ThenBy(value => value.Id))
-        {
-            if (entry.Direction.Equals("buy", StringComparison.OrdinalIgnoreCase))
-            {
-                if (quantity == 0m)
-                    opened = entry.OccurredAtUtc;
-                quantity += entry.Quantity;
-            }
-            else if (entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase))
-            {
-                quantity -= entry.Quantity;
-                if (quantity == 0m)
-                    opened = null;
-            }
-        }
-        return quantity == worker.PositionQuantity && quantity > 0m ? opened : null;
     }
 
     private static Guid PositionId(ExperimentDecisionKey key)
@@ -226,9 +231,17 @@ public sealed class DurablePaperTrainingProtectiveExitLedger : IExperimentProtec
     public DurablePaperTrainingProtectiveExitLedger(IExperimentPaperExecutionLedger ledger) =>
         _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
 
+    public ExperimentPaperExecutionAssociation? GetPaperExecutionClaim(ExperimentProtectiveExitKey key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return Association(key, ExperimentPaperExecutionStatus.Claimed, null);
+    }
+
     public async Task<ExperimentProtectiveExitClaimResult> ClaimAsync(ExperimentProtectiveExitKey key, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(key);
+        if (await _ledger.HasUnresolvedAsync(key.UserId, key.WorkerId, cancellationToken).ConfigureAwait(false))
+            return ExperimentProtectiveExitClaimResult.Existing;
         var association = Association(key, ExperimentPaperExecutionStatus.Claimed, null);
         var result = await _ledger.ClaimAsync(key.UserId, association, cancellationToken).ConfigureAwait(false);
         return result.Result switch
@@ -300,6 +313,14 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
         if (runnableSlots.Length == 0)
             return null;
 
+        var now = _time.GetUtcNow();
+        if (runnableSlots.Any(slot =>
+        {
+            var duration = TimeSpan.FromMinutes((int)slot.Interval);
+            return now.UtcTicks % duration.Ticks == 0;
+        }))
+            return null;
+
         var workers = await _workers.ListAsync(userId, cancellationToken).ConfigureAwait(false);
         var sessionSuffix = activation.ChangedAtUtc.ToString("yyyyMMddHHmmssfffffff", System.Globalization.CultureInfo.InvariantCulture);
         foreach (var slot in runnableSlots)
@@ -312,6 +333,7 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             var createdWorker = new ExperimentWorker(
                 Guid.NewGuid(), userId, name, slot.StrategyId, slot.Symbol,
                 slot.StartingCash, _time.GetUtcNow(), slot.Seed);
+            createdWorker.UpdateStrategyParameters(slot.StrategyParameters);
             createdWorker.Start();
             await _workers.SaveAsync(createdWorker, cancellationToken).ConfigureAwait(false);
         }
@@ -321,13 +343,12 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             .ToHashSet(StringComparer.Ordinal);
         workers = workers.Where(worker => selectedNames.Contains(worker.Name)).ToArray();
 
-        var now = _time.GetUtcNow();
         var slotsByName = runnableSlots.ToDictionary(
             slot => WorkerName(slot, sessionSuffix),
             StringComparer.Ordinal);
         var provenances = workers.ToDictionary(
             worker => worker.Id,
-            worker => CreateProvenance(worker, slotsByName[worker.Name].Interval, now));
+            worker => CreateProvenance(worker, slotsByName[worker.Name], now));
         return ExperimentResearchGroupConfiguration.Create(userId, 1, workers, provenances);
     }
 
@@ -338,10 +359,12 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
 
     private ExperimentResearchProvenance CreateProvenance(
         ExperimentWorker worker,
-        CandleInterval interval,
+        PaperTrainingWorkerSlot slot,
         DateTimeOffset now)
     {
-        var definition = _registry.Definitions.Single(x => x.FamilyId == worker.StrategyId);
+        var interval = slot.Interval;
+        var strategyVersion = slot.StrategyVersion;
+        var definition = _registry.ResolveDefinition(worker.StrategyId, strategyVersion);
         var intervalDuration = TimeSpan.FromMinutes((int)interval);
         var timeframeProfile = ApprovedConsensusStrategyProfiles.Resolve(worker.StrategyId, interval);
         var approval = StrategyApproval.CreateDraft(Guid.NewGuid(),
@@ -375,7 +398,8 @@ public sealed class PaperTrainingConfigurationSource : IExperimentResearchGroupC
             new StrategyRejectionGateEvaluationInput(approval, approval.Requirements?.TimeframeConfiguration, TradingProductType.Spot, StrategyApprovalMode.Paper, evidence, now));
         return new ExperimentResearchProvenance(approval,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(worker.StrategyParameters.Trim()))),
-            dataset, new ExperimentClassifierReference("platform-regime", 1, Fingerprint), evidence.Provenance, gates);
+            dataset, new ExperimentClassifierReference("platform-regime", 1, Fingerprint), evidence.Provenance, gates,
+            slot.SelectedComponent, slot.RankingUniverseSymbols, slot.AdmissionCloseUtc, slot.PairFilters);
     }
 
     private static string IntervalCode(CandleInterval interval) => interval switch
@@ -410,8 +434,11 @@ public sealed class PaperTrainingObservationRunner : IExperimentWorkerRunner
             .AnalyzeAcrossPaperTimeframesAsync(worker, configuration, assignment, now, cancellationToken)
             .ConfigureAwait(false);
         if (observation.Evidence is null) return;
+        var asOfUtc = observation.Evidence.AsOfUtc;
         await _decisions.DecideAsync(worker, configuration, assignment, observation,
-            new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, worker.PositionQuantity, now),
-            new ExperimentClosedCandleIdentity(observation.Evidence.Symbol, observation.Evidence.Interval, observation.Evidence.OpenTimeUtc, observation.Evidence.CloseTimeUtc, now), cancellationToken).ConfigureAwait(false);
+            new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, worker.PositionQuantity, asOfUtc),
+            new ExperimentClosedCandleIdentity(observation.Evidence.Symbol, observation.Evidence.Interval,
+                observation.Evidence.OpenTimeUtc, observation.Evidence.CloseTimeUtc, asOfUtc),
+            cancellationToken).ConfigureAwait(false);
     }
 }

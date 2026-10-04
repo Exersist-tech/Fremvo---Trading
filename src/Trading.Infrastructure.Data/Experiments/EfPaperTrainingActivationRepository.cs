@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using Trading.Application.Experiments;
+using Trading.Domain.Experiments;
 
 namespace Trading.Infrastructure.Data.Experiments;
 
@@ -28,9 +29,19 @@ public sealed class EfPaperTrainingActivationRepository :
     {
         ArgumentNullException.ThrowIfNull(activation);
         if (activation.OwnerId == Guid.Empty) return false;
+        if (activation.PendingUniverseSnapshot is { } snapshot
+            && (snapshot.OwnerId != activation.OwnerId
+                || !activation.QualificationResults.Any(result =>
+                    result.StrategyId == "platform.scanner"
+                    && result.DatasetFingerprint == $"scan-run-{snapshot.SignalBoundaryUtc:O}"
+                    && result.ScanMetrics?.EligiblePairs == snapshot.Members.Count)))
+            throw new InvalidOperationException("Universe evidence must match its owner and successfully completed scan.");
 
         if (expectedState is null)
         {
+            if (activation.PendingUniverseSnapshot is not null)
+                await new EfPaperScanUniverseSnapshotRepository(_context)
+                    .EnqueueIfNewAsync(activation.PendingUniverseSnapshot, cancellationToken).ConfigureAwait(false);
             _context.PaperTrainingActivations.Add(ToEntity(activation));
             try
             {
@@ -48,7 +59,13 @@ public sealed class EfPaperTrainingActivationRepository :
             value => value.OwnerUserId == activation.OwnerId && value.State == (int)expectedState.Value,
             cancellationToken).ConfigureAwait(false);
         if (existing is null) return false;
+        if (activation.PersistenceRevision is not { } revision
+            || !string.Equals(revision, Convert.ToBase64String(existing.RowVersion), StringComparison.Ordinal))
+            return false;
 
+        if (activation.PendingUniverseSnapshot is not null)
+            await new EfPaperScanUniverseSnapshotRepository(_context)
+                .EnqueueIfNewAsync(activation.PendingUniverseSnapshot, cancellationToken).ConfigureAwait(false);
         Copy(activation, existing);
         try
         {
@@ -67,20 +84,65 @@ public sealed class EfPaperTrainingActivationRepository :
             .Where(value => value.State == (int)PaperTrainingActivationState.Active)
             .Select(value => value.OwnerUserId).ToArrayAsync(cancellationToken).ConfigureAwait(false);
 
+    public async Task<IReadOnlyCollection<Guid>> GetProtectedOwnerIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var owners = await GetActiveOwnerIdsAsync(cancellationToken).ConfigureAwait(false);
+        var stopped = await _context.PaperTrainingActivations.AsNoTracking()
+            .Where(value => (value.State == (int)PaperTrainingActivationState.Disabled
+                    || value.State == (int)PaperTrainingActivationState.EmergencyStopped)
+                && value.SlotCount > 0)
+            .Select(value => value.OwnerUserId)
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+        var protectedOwners = new List<Guid>(owners);
+        var workers = new EfExperimentWorkerRepository(_context);
+        foreach (var owner in stopped)
+        {
+            if ((await workers.ListAsync(owner, cancellationToken).ConfigureAwait(false))
+                .Any(worker => worker.PositionQuantity > 0m
+                    && worker.Status is (ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused or ExperimentWorkerStatus.Failed)))
+                protectedOwners.Add(owner);
+        }
+        return protectedOwners;
+    }
+
     public async Task<IReadOnlyCollection<PaperTrainingMarketSubscription>> GetActiveSubscriptionsAsync(
         CancellationToken cancellationToken = default)
     {
         var serialized = await _context.PaperTrainingActivations.AsNoTracking()
-            .Where(value => value.State == (int)PaperTrainingActivationState.Active)
-            .Select(value => value.SlotsJson)
+            .Where(value => value.State == (int)PaperTrainingActivationState.Active
+                || (value.State == (int)PaperTrainingActivationState.Disabled
+                    || value.State == (int)PaperTrainingActivationState.EmergencyStopped)
+                && value.SlotCount > 0)
+            .Select(value => new { value.OwnerUserId, value.State, value.SlotsJson })
             .ToArrayAsync(cancellationToken).ConfigureAwait(false);
-        return serialized
-            .SelectMany(Deserialize<PaperTrainingWorkerSlot>)
-            .Where(slot => !string.IsNullOrWhiteSpace(slot.Symbol))
-            .SelectMany(slot => ApprovedConsensusStrategyProfiles
-                .RequiredIntervals(slot.StrategyId, slot.Interval)
-                .Select(
-                interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)))
+        var subscriptions = new List<PaperTrainingMarketSubscription>();
+        var workers = new EfExperimentWorkerRepository(_context);
+        foreach (var activation in serialized)
+        {
+            var slots = Deserialize<PaperTrainingWorkerSlot>(activation.SlotsJson);
+            if (activation.State is (int)PaperTrainingActivationState.Disabled
+                or (int)PaperTrainingActivationState.EmergencyStopped)
+            {
+                var open = (await workers.ListAsync(activation.OwnerUserId, cancellationToken)
+                    .ConfigureAwait(false))
+                    .Where(worker => worker.PositionQuantity > 0m
+                        && worker.Status is (ExperimentWorkerStatus.Running or ExperimentWorkerStatus.Paused or ExperimentWorkerStatus.Failed))
+                    .ToArray();
+                slots = slots.Where(slot => open.Any(worker =>
+                    worker.StrategyId == slot.StrategyId
+                    && worker.MarketSymbol.Equals(slot.Symbol, StringComparison.OrdinalIgnoreCase)))
+                    .ToArray();
+            }
+            foreach (var slot in slots.Where(slot => !string.IsNullOrWhiteSpace(slot.Symbol)))
+            {
+                subscriptions.AddRange(ApprovedConsensusStrategyProfiles
+                    .RequiredIntervals(slot.StrategyId, slot.Interval)
+                    .Append(Trading.Domain.Market.CandleInterval.OneMinute)
+                    .Distinct()
+                    .Select(interval => new PaperTrainingMarketSubscription(slot.Symbol, interval)));
+            }
+        }
+        return subscriptions
             .Distinct()
             .OrderBy(subscription => subscription.Symbol, StringComparer.OrdinalIgnoreCase)
             .ThenBy(subscription => subscription.Interval)
@@ -101,12 +163,16 @@ public sealed class EfPaperTrainingActivationRepository :
                 ? result with { Interval = Trading.Domain.Market.CandleInterval.OneHour }
                 : result)
             .ToArray();
-        return new(
+        var (assignments, strategyParameters) = DeserializeStrategyConfiguration(value.StrategyAssignmentsJson);
+        return new PaperTrainingActivation(
             value.OwnerUserId, (PaperTrainingActivationState)value.State, slots,
             new(value.DurableClosedCandleSource, value.ApprovedResearchGroupsAndGates, value.WorkerRiskPolicy,
                 value.PaperFillPolicy, value.OutputLedger, value.ProtectiveScheduler),
             value.ChangedAtUtc, value.ChangedBy,
-            qualifications);
+            qualifications,
+            assignments.Length == 0 ? null : assignments,
+            strategyParameters)
+        { PersistenceRevision = Convert.ToBase64String(value.RowVersion) };
     }
 
     private static PersistedPaperTrainingActivation ToEntity(PaperTrainingActivation value)
@@ -122,6 +188,11 @@ public sealed class EfPaperTrainingActivationRepository :
         destination.SlotCount = source.Slots.Count;
         destination.SlotsJson = JsonSerializer.Serialize(source.Slots);
         destination.QualificationsJson = JsonSerializer.Serialize(source.QualificationResults);
+        destination.StrategyAssignmentsJson = source.StrategyAssignments is null
+            ? null
+            : JsonSerializer.Serialize(new StrategyConfigurationPayload(
+                source.ConfiguredStrategies.ToArray(),
+                source.ConfiguredStrategyParameters));
         destination.DurableClosedCandleSource = source.Prerequisites.DurableClosedCandleSource;
         destination.ApprovedResearchGroupsAndGates = source.Prerequisites.ApprovedResearchGroupsAndGates;
         destination.WorkerRiskPolicy = source.Prerequisites.WorkerRiskPolicy;
@@ -145,4 +216,36 @@ public sealed class EfPaperTrainingActivationRepository :
             throw new InvalidOperationException("Stored paper-training configuration is invalid.", exception);
         }
     }
+
+    private static (PaperTrainingStrategyAssignment[] Assignments, IReadOnlyDictionary<string, string>? Parameters)
+        DeserializeStrategyConfiguration(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return ([], null);
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind == JsonValueKind.Array)
+                return (JsonSerializer.Deserialize<PaperTrainingStrategyAssignment[]>(json) ?? [], null);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                throw new JsonException("The stored strategy configuration must be an object or legacy array.");
+
+            var assignments = document.RootElement.TryGetProperty(nameof(StrategyConfigurationPayload.Assignments), out var assignmentsJson)
+                ? assignmentsJson.Deserialize<PaperTrainingStrategyAssignment[]>() ?? []
+                : [];
+            var parameters = document.RootElement.TryGetProperty(nameof(StrategyConfigurationPayload.Parameters), out var parametersJson)
+                ? parametersJson.Deserialize<Dictionary<string, string>>()
+                : null;
+            return (assignments, parameters);
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException("Stored paper-training strategy configuration is invalid.", exception);
+        }
+    }
+
+    private sealed record StrategyConfigurationPayload(
+        PaperTrainingStrategyAssignment[] Assignments,
+        IReadOnlyDictionary<string, string> Parameters);
 }

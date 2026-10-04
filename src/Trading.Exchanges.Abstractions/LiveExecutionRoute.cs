@@ -12,11 +12,10 @@ namespace Trading.Exchanges.Abstractions;
 /// exchanges can this deployment trade on for real".
 /// </para>
 /// <para>
-/// There is deliberately no implementation today. A live route requires the
-/// Kraken order gateway, its recorded-response replay harness, and the
-/// reconciliation error taxonomy, none of which exist yet. Until one is
-/// written and registered, promotion out of paper is refused by the platform
-/// rather than merely hidden in the user interface.
+/// The Kraken Spot implementation is registered only when the operator
+/// enables it. The gateway remains available for reconciliation when the
+/// route is disabled; promotion and new live submissions require the route
+/// itself to be registered.
 /// </para>
 /// </remarks>
 public interface ILiveExecutionRoute

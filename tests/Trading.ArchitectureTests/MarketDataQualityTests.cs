@@ -8,6 +8,19 @@ public sealed class MarketDataQualityTests
     private static readonly DateTimeOffset s_now = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void ConflictDiagnosticsNameDifferentFieldsWithoutLoggingMarketValues()
+    {
+        var open = s_now.AddMinutes(-1);
+        var stored = new Candle("BTC/USD", CandleInterval.OneMinute, open, s_now,
+            100m, 101m, 99m, 100.5m, 10m, true, false);
+        var changed = new Candle("BTC/USD", CandleInterval.OneMinute, open, s_now,
+            100m, 101m, 99m, 100.75m, 11m, true, false);
+
+        Assert.Equal("Close,Volume", CandleQualityEvaluator.ChangedMarketDataFields(stored, changed));
+        Assert.Equal(string.Empty, CandleQualityEvaluator.ChangedMarketDataFields(stored, stored));
+    }
+
+    [Fact]
     public void CandleQualityEvaluatorFlagsIncompleteAndDerivedCandles()
     {
         var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);

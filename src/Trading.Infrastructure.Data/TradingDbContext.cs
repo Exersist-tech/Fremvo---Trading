@@ -4,6 +4,7 @@ using Trading.Domain.Execution;
 using Trading.Domain.Orders;
 using Trading.Domain.Positions;
 using Trading.Domain.Users;
+using Trading.Domain.Entitlements;
 using Trading.Infrastructure.Data.Backtesting;
 using Trading.Exchanges.Abstractions;
 using Trading.Infrastructure.Data.MarketData;
@@ -20,10 +21,13 @@ public sealed class TradingDbContext : DbContext
     }
 
     public DbSet<User> Users => Set<User>();
+    public DbSet<Plan> Plans => Set<Plan>();
+    public DbSet<Entitlement> Entitlements => Set<Entitlement>();
 
     public DbSet<Invitation> Invitations => Set<Invitation>();
 
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
+    public DbSet<AdministratorMfaRedemption> AdministratorMfaRedemptions => Set<AdministratorMfaRedemption>();
 
     public DbSet<ExchangeAccount> ExchangeAccounts => Set<ExchangeAccount>();
 
@@ -62,6 +66,41 @@ public sealed class TradingDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         ArgumentNullException.ThrowIfNull(modelBuilder);
+
+        modelBuilder.Entity<Plan>(entity =>
+        {
+            entity.ToTable("Plans");
+            entity.HasKey(plan => plan.Id);
+            entity.Property(plan => plan.Code).HasMaxLength(40).IsRequired();
+            entity.Property(plan => plan.Name).HasMaxLength(120).IsRequired();
+            entity.Property(plan => plan.MaxExperimentWorkers).IsRequired();
+            entity.Property(plan => plan.LiveTradingEligible).IsRequired();
+            entity.Property(plan => plan.FuturesEligible).IsRequired();
+            entity.HasIndex(plan => plan.Code).IsUnique();
+        });
+
+        modelBuilder.Entity<Entitlement>(entity =>
+        {
+            entity.ToTable("Entitlements");
+            entity.HasKey(value => value.Id);
+            entity.Property(value => value.Status).HasConversion<int>();
+            entity.Property(value => value.AssignedAtUtc).IsRequired();
+            entity.Property(value => value.TrialExpiresAtUtc);
+            entity.HasOne<User>().WithMany().HasForeignKey(value => value.UserId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<Plan>().WithMany().HasForeignKey(value => value.PlanId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(value => new { value.UserId, value.Status })
+                .IsUnique().HasFilter("[Status] = 0");
+        });
+
+        modelBuilder.Entity<AdministratorMfaRedemption>(entity =>
+        {
+            entity.ToTable("AdministratorMfaRedemptions");
+            entity.HasKey(value => new { value.UserId, value.TimeStep });
+            entity.Property(value => value.UsedAtUtc).IsRequired();
+            entity.HasOne<User>().WithMany().HasForeignKey(value => value.UserId).OnDelete(DeleteBehavior.Restrict);
+        });
 
         modelBuilder.Entity<User>(entity =>
         {
@@ -121,6 +160,9 @@ public sealed class TradingDbContext : DbContext
             entity.Property(invitation => invitation.Code)
                 .HasMaxLength(64)
                 .IsRequired();
+
+            entity.Property(invitation => invitation.RecipientEmail)
+                .HasMaxLength(256);
 
             entity.HasIndex(invitation => invitation.Code)
                 .IsUnique();
@@ -185,6 +227,7 @@ public sealed class TradingDbContext : DbContext
             entity.Property(value => value.SlotCount).IsRequired();
             entity.Property(value => value.SlotsJson).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(value => value.QualificationsJson).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(value => value.StrategyAssignmentsJson).HasColumnType("nvarchar(max)");
             entity.Property(value => value.ChangedAtUtc).IsRequired();
             entity.Property(value => value.ChangedBy).IsRequired();
             entity.Property(value => value.RowVersion).IsRowVersion();
@@ -397,7 +440,9 @@ public sealed class TradingDbContext : DbContext
             entity.Property(position => position.UserId).IsRequired();
             entity.Property(position => position.StrategyId).IsRequired();
             entity.Property(position => position.Mode).HasConversion<string>().HasMaxLength(16).IsRequired();
+            entity.Property(position => position.ExchangeAccountId).IsRequired(false);
             entity.HasIndex(position => new { position.UserId, position.Mode });
+            entity.HasIndex(position => new { position.UserId, position.Mode, position.ExchangeAccountId, position.Symbol });
 
             entity.Property(position => position.Symbol)
                 .HasMaxLength(32)
@@ -552,7 +597,7 @@ public sealed class TradingDbContext : DbContext
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
-        RejectHistoricalDatasetChanges();
+        RejectImmutableEvidenceChanges();
         return base.SaveChanges(acceptAllChangesOnSuccess);
     }
 
@@ -560,13 +605,16 @@ public sealed class TradingDbContext : DbContext
         bool acceptAllChangesOnSuccess,
         CancellationToken cancellationToken = default)
     {
-        RejectHistoricalDatasetChanges();
+        RejectImmutableEvidenceChanges();
         return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
     }
 
-    private void RejectHistoricalDatasetChanges()
+    private void RejectImmutableEvidenceChanges()
     {
         ChangeTracker.DetectChanges();
+        if (ChangeTracker.Entries<AuditEvent>()
+            .Any(entry => entry.State is EntityState.Modified or EntityState.Deleted))
+            throw new InvalidOperationException("Audit events are immutable and cannot be changed or deleted.");
         if (ChangeTracker.Entries<PersistedHistoricalDataset>()
             .Any(entry => entry.State is EntityState.Modified or EntityState.Deleted))
         {

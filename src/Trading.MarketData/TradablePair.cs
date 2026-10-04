@@ -27,7 +27,8 @@ public sealed class TradablePair
         bool isActive,
         decimal minimumQuantity,
         decimal quantityStep,
-        decimal priceTick)
+        decimal priceTick,
+        decimal? minimumNotional = null)
     {
         if (string.IsNullOrWhiteSpace(symbol))
         {
@@ -66,6 +67,10 @@ public sealed class TradablePair
         {
             throw new ArgumentOutOfRangeException(nameof(priceTick), "Price tick must be positive.");
         }
+        if (minimumNotional is <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minimumNotional), "A known minimum notional must be positive.");
+        }
 
         Symbol = symbol.Trim();
         DisplayName = displayName.Trim();
@@ -75,6 +80,7 @@ public sealed class TradablePair
         MinimumQuantity = minimumQuantity;
         QuantityStep = quantityStep;
         PriceTick = priceTick;
+        MinimumNotional = minimumNotional;
     }
 
     /// <summary>The identifier the venue accepts in a request.</summary>
@@ -102,6 +108,9 @@ public sealed class TradablePair
 
     /// <summary>Order price must be a whole multiple of this.</summary>
     public decimal PriceTick { get; }
+
+    /// <summary>Null when the venue did not publish a quote-currency order minimum.</summary>
+    public decimal? MinimumNotional { get; }
 }
 
 /// <summary>

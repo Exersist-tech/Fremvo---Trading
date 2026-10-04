@@ -42,7 +42,8 @@ public sealed record PaperRiskSizingInput(
     PaperRiskSizingPolicy? PlatformPolicy,
     DateTimeOffset? MarketSnapshotAtUtc,
     DateTimeOffset? AccountSnapshotAtUtc,
-    DateTimeOffset? EvaluatedAtUtc);
+    DateTimeOffset? EvaluatedAtUtc,
+    decimal EstimatedEntryFeeRate = 0m);
 
 public sealed record PaperRiskSizingLimits(
     decimal StrategyRiskFraction,
@@ -82,7 +83,8 @@ public sealed class PaperRiskPositionSizer
             || input.EntryPrice is not > 0m || input.ProtectiveStopPrice is not > 0m
             || input.Direction is null || input.CurrentPositionQuantity is not >= 0m
             || input.CurrentExposure is not >= 0m || input.ExchangeFilters is null
-            || input.WorkerBudget is null || input.PlatformPolicy is null)
+            || input.WorkerBudget is null || input.PlatformPolicy is null
+            || input.EstimatedEntryFeeRate is < 0m or > 1m)
             return PaperRiskSizingResult.Denied("Paper sizing input is missing or invalid.");
 
         var filters = input.ExchangeFilters;
@@ -121,11 +123,12 @@ public sealed class PaperRiskPositionSizer
             Math.Min(policy.PlatformMaxTotalExposure, budget.MaxTotalExposure),
             Math.Min(policy.PlatformMaxPositionQuantity, budget.MaxPositionQuantity));
 
-        var riskPerUnit = Math.Abs(entry - stop);
         try
         {
+            var riskPerUnit = checked(Math.Abs(entry - stop)
+                + (entry + stop) * input.EstimatedEntryFeeRate);
             var riskQuantity = (effectiveRiskFraction * equity) / riskPerUnit;
-            var cashQuantity = cash / entry;
+            var cashQuantity = cash / checked(entry * (1m + input.EstimatedEntryFeeRate));
             var notionalQuantity = limits.EffectiveMaxPerTradeNotional / entry;
             var remainingExposure = limits.EffectiveMaxTotalExposure - currentExposure;
             var remainingPosition = limits.EffectiveMaxPositionQuantity - currentPositionQuantity;
@@ -145,7 +148,8 @@ public sealed class PaperRiskPositionSizer
             var permittedRisk = checked(effectiveRiskFraction * equity);
             if (quantity < filters.MinimumQuantity || notional < filters.MinimumNotional)
                 return PaperRiskSizingResult.Denied("Conservative quantity cannot satisfy the exchange minimum quantity or notional.", limits);
-            if (notional > cash || notional > limits.EffectiveMaxPerTradeNotional
+            if (checked(notional * (1m + input.EstimatedEntryFeeRate)) > cash
+                || notional > limits.EffectiveMaxPerTradeNotional
                 || checked(currentExposure + notional) > limits.EffectiveMaxTotalExposure
                 || checked(currentPositionQuantity + quantity) > limits.EffectiveMaxPositionQuantity
                 || risk > permittedRisk)

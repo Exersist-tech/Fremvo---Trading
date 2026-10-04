@@ -240,6 +240,9 @@ public sealed class ExperimentWorker
 
     public void UpdateStrategyParameters(string parametersJson)
     {
+        if (PositionQuantity > 0m)
+            throw new InvalidOperationException(
+                "An open paper position must retain its original strategy settings. Configure a new worker instead.");
         if (string.IsNullOrWhiteSpace(parametersJson))
         {
             throw new ArgumentException("Strategy parameters are required.", nameof(parametersJson));
@@ -388,10 +391,13 @@ public sealed class ExperimentWorker
         Guid? ledgerEntryId,
         bool isPersistedReplay)
     {
-        if (Status != ExperimentWorkerStatus.Running)
+        if (Status != ExperimentWorkerStatus.Running
+            && !(direction.Equals("sell", StringComparison.OrdinalIgnoreCase)
+                && PositionQuantity > 0m
+                && Status is (ExperimentWorkerStatus.Paused or ExperimentWorkerStatus.Failed)))
         {
             throw new InvalidOperationException(
-                $"Only a running worker can trade. The worker is currently {Status}.");
+                $"Only a running worker can trade. Paused or failed workers may only close an open position. The worker is currently {Status}.");
         }
 
         if (executionPrice <= 0m)
@@ -420,6 +426,10 @@ public sealed class ExperimentWorker
         {
             throw new ArgumentException("Paper-trading occurrence time must be UTC.", nameof(tradeTime));
         }
+
+        if (ledgerEntryId == Guid.Empty || ledgerEntryId is Guid recordedId
+            && _ledger.Any(entry => entry.Id == recordedId))
+            throw new InvalidOperationException("A paper fill requires a new nonempty ledger entry identifier.");
 
         var directionLower = direction.Trim();
 

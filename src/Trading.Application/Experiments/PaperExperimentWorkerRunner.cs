@@ -37,6 +37,7 @@ public sealed record ExperimentConsensusEvidence(
 {
     public int BullishCount => Checks.Count(check => check.Direction == ExperimentSignalDirection.Bullish);
     public int BearishCount => Checks.Count(check => check.Direction == ExperimentSignalDirection.Bearish);
+    public IReadOnlyList<string> RequiredEntryChecks { get; init; } = [];
 }
 
 /// <summary>
@@ -49,41 +50,59 @@ public sealed class ExperimentAnalysisResult
         string reason,
         decimal? value,
         ExperimentConsensusEvidence? consensus = null,
-        ExperimentDecisionEvidence? evidence = null)
+        ExperimentDecisionEvidence? evidence = null,
+        PaperRegimeComponentSelection? selectedComponent = null)
     {
         Outcome = outcome;
         Reason = reason;
         Value = value;
         Consensus = consensus;
         Evidence = evidence;
+        SelectedComponent = selectedComponent;
     }
 
     public ExperimentAnalysisOutcome Outcome { get; }
     public string Reason { get; }
+    internal string FingerprintReason
+    {
+        get
+        {
+            if (Consensus is null) return Reason;
+            var suffix = $" Checks: [{FormatChecks(Consensus.Checks)}]";
+            return Reason.EndsWith(suffix, StringComparison.Ordinal)
+                ? Reason[..^suffix.Length]
+                : Reason;
+        }
+    }
     public decimal? Value { get; }
     public ExperimentConsensusEvidence? Consensus { get; }
     /// <summary>Present only when this result was returned by the approved runner.</summary>
     public ExperimentDecisionEvidence? Evidence { get; }
+    public PaperRegimeComponentSelection? SelectedComponent { get; }
 
     public static ExperimentAnalysisResult Analyzed(string reason, decimal value) => new(ExperimentAnalysisOutcome.Analyzed, reason, value);
     public static ExperimentAnalysisResult NoCondition(string reason) => new(ExperimentAnalysisOutcome.NoCondition, reason, null);
     public static ExperimentAnalysisResult Blocked(string reason) => new(ExperimentAnalysisOutcome.Blocked, reason, null);
 
     internal ExperimentAnalysisResult Attest(ExperimentDecisionEvidence evidence) =>
-        new(Outcome, Reason, Value, Consensus, evidence);
+        new(Outcome, Reason, Value, Consensus, evidence, SelectedComponent);
 
     internal ExperimentAnalysisResult WithOutcome(
         ExperimentAnalysisOutcome outcome,
         string reason,
         decimal? value) =>
-        new(outcome, reason, value, Consensus, Evidence);
+        new(outcome, reason, value, Consensus, Evidence, SelectedComponent);
+
+    internal ExperimentAnalysisResult WithSelectedComponent(PaperRegimeComponentSelection selection) =>
+        new(Outcome, Reason, Value, Consensus, Evidence, selection);
 
     internal static ExperimentAnalysisResult FromConsensus(
         string familyId,
         IReadOnlyList<ExperimentSignalCheck> checks,
         int requiredAgreement,
         bool mandatoryVeto = false,
-        string? vetoReason = null)
+        string? vetoReason = null,
+        IReadOnlyList<string>? requiredEntryChecks = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(familyId);
         ArgumentNullException.ThrowIfNull(checks);
@@ -91,35 +110,60 @@ public sealed class ExperimentAnalysisResult
             throw new ArgumentException("An approved consensus strategy must emit exactly five signal checks.", nameof(checks));
         if (requiredAgreement is < 4 or > 5)
             throw new ArgumentOutOfRangeException(nameof(requiredAgreement), "Consensus requires four or five agreeing checks.");
+        if (requiredEntryChecks is not null && (requiredEntryChecks.Count != requiredEntryChecks.Distinct(StringComparer.Ordinal).Count()
+            || requiredEntryChecks.Any(id => !checks.Any(check => check.Id == id))))
+            throw new ArgumentException("Required entry checks must identify distinct checks in the consensus.", nameof(requiredEntryChecks));
 
-        var evidence = new ExperimentConsensusEvidence(checks, requiredAgreement, mandatoryVeto, vetoReason);
+        var evidence = new ExperimentConsensusEvidence(checks, requiredAgreement, mandatoryVeto, vetoReason)
+        {
+            RequiredEntryChecks = requiredEntryChecks?.ToArray() ?? []
+        };
+        var checkSummary = FormatChecks(checks);
+        string WithChecks(string reason) =>
+            reason.Length + checkSummary.Length + 11 <= 512
+                ? $"{reason} Checks: [{checkSummary}]"
+                : reason;
         if (mandatoryVeto)
             return new ExperimentAnalysisResult(
                 ExperimentAnalysisOutcome.Blocked,
-                $"{familyId}: mandatory safety veto: {vetoReason ?? "unspecified unsafe evidence"}.",
+                WithChecks($"{familyId}: mandatory safety veto: {vetoReason ?? "unspecified unsafe evidence"}."),
                 null,
                 evidence);
 
-        if (evidence.BullishCount >= requiredAgreement)
+        var missingBullish = evidence.RequiredEntryChecks
+            .Where(id => checks.Single(check => check.Id == id).Direction != ExperimentSignalDirection.Bullish)
+            .ToArray();
+        var missingBearish = evidence.RequiredEntryChecks
+            .Where(id => checks.Single(check => check.Id == id).Direction != ExperimentSignalDirection.Bearish)
+            .ToArray();
+        if (evidence.BullishCount >= requiredAgreement && missingBullish.Length == 0)
             return new ExperimentAnalysisResult(
                 ExperimentAnalysisOutcome.Analyzed,
-                $"{familyId}: bullish consensus {evidence.BullishCount}/5 passed the {requiredAgreement}/5 threshold.",
+                WithChecks($"{familyId}: bullish consensus {evidence.BullishCount}/5 passed the {requiredAgreement}/5 threshold."),
                 evidence.BullishCount / 5m,
                 evidence);
 
-        if (evidence.BearishCount >= requiredAgreement)
+        if (evidence.BearishCount >= requiredAgreement && missingBearish.Length == 0)
             return new ExperimentAnalysisResult(
                 ExperimentAnalysisOutcome.Analyzed,
-                $"{familyId}: bearish consensus {evidence.BearishCount}/5 passed the {requiredAgreement}/5 threshold.",
+                WithChecks($"{familyId}: bearish consensus {evidence.BearishCount}/5 passed the {requiredAgreement}/5 threshold."),
                 -evidence.BearishCount / 5m,
                 evidence);
 
         return new ExperimentAnalysisResult(
             ExperimentAnalysisOutcome.NoCondition,
-            $"{familyId}: consensus did not pass (bullish {evidence.BullishCount}/5, bearish {evidence.BearishCount}/5; requires {requiredAgreement}/5).",
+            WithChecks($"{familyId}: consensus did not pass (bullish {evidence.BullishCount}/5, bearish {evidence.BearishCount}/5; requires {requiredAgreement}/5)."
+                + (evidence.BullishCount >= requiredAgreement
+                    ? $" Missing bullish entry checks: {string.Join(", ", missingBullish)}."
+                    : evidence.BearishCount >= requiredAgreement
+                        ? $" Missing bearish entry checks: {string.Join(", ", missingBearish)}."
+                        : "")),
             null,
             evidence);
     }
+
+    private static string FormatChecks(IEnumerable<ExperimentSignalCheck> checks) =>
+        string.Join(", ", checks.Select(check => $"{check.Id}={check.Direction}"));
 }
 
 /// <summary>Identifies one compiled, platform-owned research evaluator.</summary>
@@ -167,22 +211,60 @@ public sealed class ApprovedExperimentStrategyRegistry
     }
 
     public IReadOnlyCollection<ApprovedExperimentStrategyDefinition> Definitions =>
-        _evaluators.Values.Select(evaluator => evaluator.Definition).ToArray();
+        _evaluators.Values.Select(evaluator => evaluator.Definition)
+            .GroupBy(definition => definition.FamilyId, StringComparer.Ordinal)
+            .Select(group => group.MaxBy(definition => definition.Version)!)
+            .ToArray();
 
     public static ApprovedExperimentStrategyRegistry CreatePlatformDefault() =>
         new(new IApprovedExperimentStrategyEvaluator[]
         {
+            new EmaTrendContinuationExperimentAdapter(2),
+            new DonchianBreakoutEnsembleExperimentAdapter(2),
+            new BollingerMeanReversionExperimentAdapter(2),
+            new RsiPullbackExperimentAdapter(2),
+            new MacdVolumeAccelerationExperimentAdapter(2),
+            new VolatilityCompressionBreakoutExperimentAdapter(2),
+            new SurvivorshipAwareMomentumRotationExperimentAdapter(2),
+            new RelativeStrengthPullbackRotationExperimentAdapter(2),
+            new SessionConditionedBreakoutExperimentAdapter(2),
+            new RegimeSwitchingEnsembleExperimentAdapter(2),
+            new ThreeSwingChannelDivergenceExperimentAdapter(2),
             new EmaTrendContinuationExperimentAdapter(),
+            new EmaTrendContinuationExperimentAdapter(4),
+            new EmaTrendContinuationExperimentAdapter(5),
             new DonchianBreakoutEnsembleExperimentAdapter(),
+            new DonchianBreakoutEnsembleExperimentAdapter(4),
+            new DonchianBreakoutEnsembleExperimentAdapter(5),
             new BollingerMeanReversionExperimentAdapter(),
+            new BollingerMeanReversionExperimentAdapter(4),
+            new BollingerMeanReversionExperimentAdapter(5),
             new RsiPullbackExperimentAdapter(),
+            new RsiPullbackExperimentAdapter(4),
+            new RsiPullbackExperimentAdapter(5),
             new MacdVolumeAccelerationExperimentAdapter(),
+            new MacdVolumeAccelerationExperimentAdapter(4),
+            new MacdVolumeAccelerationExperimentAdapter(5),
             new VolatilityCompressionBreakoutExperimentAdapter(),
+            new VolatilityCompressionBreakoutExperimentAdapter(4),
+            new VolatilityCompressionBreakoutExperimentAdapter(5),
             new SurvivorshipAwareMomentumRotationExperimentAdapter(),
+            new SurvivorshipAwareMomentumRotationExperimentAdapter(4),
+            new RelativeStrengthPullbackRotationExperimentAdapter(3),
+            new RelativeStrengthPullbackRotationExperimentAdapter(4),
             new RelativeStrengthPullbackRotationExperimentAdapter(),
             new SessionConditionedBreakoutExperimentAdapter(),
-            new RegimeSwitchingEnsembleExperimentAdapter()
+            new RegimeSwitchingEnsembleExperimentAdapter(3),
+            new RegimeSwitchingEnsembleExperimentAdapter(),
+            new RegimeSwitchingEnsembleExperimentAdapter(5),
+            new ThreeSwingChannelDivergenceExperimentAdapter(),
+            new ThreeSwingChannelDivergenceExperimentAdapter(4)
         });
+
+    public ApprovedExperimentStrategyDefinition ResolveDefinition(string familyId, int version) =>
+        _evaluators.TryGetValue((familyId, version), out var evaluator)
+            ? evaluator.Definition
+            : throw new ArgumentException("The strategy family/version is not in the approved registry.", nameof(version));
 
     internal bool TryResolve(StrategyTemplateVersionIdentity identity, out IApprovedExperimentStrategyEvaluator? evaluator) =>
         _evaluators.TryGetValue((identity.TemplateId, identity.Version), out evaluator);
@@ -195,8 +277,9 @@ public sealed class ApprovedExperimentStrategyRegistry
         if (string.IsNullOrWhiteSpace(familyId))
             throw new ArgumentException("A strategy family is required.", nameof(familyId));
         ArgumentNullException.ThrowIfNull(series);
-        var evaluator = _evaluators.Values.SingleOrDefault(candidate =>
-            candidate.Definition.FamilyId.Equals(familyId.Trim(), StringComparison.OrdinalIgnoreCase));
+        var evaluator = _evaluators.Values
+            .Where(candidate => candidate.Definition.FamilyId.Equals(familyId.Trim(), StringComparison.OrdinalIgnoreCase))
+            .MaxBy(candidate => candidate.Definition.Version);
         if (evaluator is null)
             return ExperimentAnalysisResult.Blocked("The strategy is not in the approved experiment registry.");
         return evaluator.Evaluate(ExperimentStrategySeriesSet.Single(series), parametersJson);
@@ -207,13 +290,13 @@ public sealed class ApprovedExperimentStrategyRegistry
         ExperimentCandleSeries regime,
         ExperimentCandleSeries signal,
         ExperimentCandleSeries execution,
-        string parametersJson)
+        string parametersJson,
+        ExperimentCandleSeries? hourlyContext = null,
+        int strategyVersion = 3)
     {
-        var evaluator = _evaluators.Values.SingleOrDefault(candidate =>
-            candidate.Definition.FamilyId.Equals(familyId, StringComparison.OrdinalIgnoreCase));
-        return evaluator is null
+        return !_evaluators.TryGetValue((familyId, strategyVersion), out var evaluator)
             ? ExperimentAnalysisResult.Blocked("The strategy is not in the approved experiment registry.")
-            : evaluator.Evaluate(new ExperimentStrategySeriesSet(regime, signal, execution), parametersJson);
+            : evaluator.Evaluate(new ExperimentStrategySeriesSet(regime, signal, execution, hourlyContext), parametersJson);
     }
 
     private sealed class ExperimentStrategyKeyComparer : IEqualityComparer<(string FamilyId, int Version)>
@@ -243,11 +326,13 @@ internal interface IApprovedExperimentStrategyEvaluator
 /// </summary>
 internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEvaluator
 {
-    protected Phase5BExperimentAdapter(string familyId, string schemaId, string requiredEvidence)
+    protected Phase5BExperimentAdapter(string familyId, string schemaId, string requiredEvidence, int version)
     {
+        if (version is not (2 or 3 or 4 or 5))
+            throw new ArgumentOutOfRangeException(nameof(version));
         Definition = new ApprovedExperimentStrategyDefinition(
-            familyId, 2, schemaId, 2, Fingerprint($"{familyId}|exact-approved-parameters-v2"),
-            Fingerprint($"{familyId}|exact-consensus-rules-v2"));
+            familyId, version, schemaId, version, Fingerprint($"{familyId}|exact-approved-parameters-v{version}"),
+            Fingerprint($"{familyId}|exact-consensus-rules-v{version}"));
         RequiredEvidence = requiredEvidence;
     }
 
@@ -257,7 +342,7 @@ internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEv
     public virtual ExperimentAnalysisResult Evaluate(ExperimentStrategySeriesSet series, string parametersJson)
     {
         ArgumentNullException.ThrowIfNull(series);
-        return ApprovedConsensusStrategyRules.Evaluate(Definition.FamilyId, series, parametersJson);
+        return ApprovedConsensusStrategyRules.Evaluate(Definition.FamilyId, series, parametersJson, Definition.Version);
     }
 
     public virtual ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson) =>
@@ -288,7 +373,7 @@ internal abstract class Phase5BExperimentAdapter : IApprovedExperimentStrategyEv
 
 internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public EmaTrendContinuationExperimentAdapter() : base("platform.ema-trend-continuation", "ema-trend-parameters", "approved regime, signal, and execution timeframe series") { }
+    public EmaTrendContinuationExperimentAdapter(int version = 3) : base("platform.ema-trend-continuation", "ema-trend-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -329,7 +414,7 @@ internal sealed class EmaTrendContinuationExperimentAdapter : Phase5BExperimentA
 }
 internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperimentAdapter
 {
-    public DonchianBreakoutEnsembleExperimentAdapter() : base("platform.donchian-breakout-ensemble", "donchian-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+    public DonchianBreakoutEnsembleExperimentAdapter(int version = 3) : base("platform.donchian-breakout-ensemble", "donchian-breakout-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -353,7 +438,7 @@ internal sealed class DonchianBreakoutEnsembleExperimentAdapter : Phase5BExperim
 }
 internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimentAdapter
 {
-    public BollingerMeanReversionExperimentAdapter() : base("platform.bollinger-mean-reversion", "bollinger-mean-reversion-parameters", "approved regime, signal, and execution timeframe series") { }
+    public BollingerMeanReversionExperimentAdapter(int version = 3) : base("platform.bollinger-mean-reversion", "bollinger-mean-reversion-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -380,7 +465,7 @@ internal sealed class BollingerMeanReversionExperimentAdapter : Phase5BExperimen
 }
 internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
 {
-    public RsiPullbackExperimentAdapter() : base("platform.rsi-pullback", "rsi-pullback-parameters", "approved regime, signal, and execution timeframe series") { }
+    public RsiPullbackExperimentAdapter(int version = 3) : base("platform.rsi-pullback", "rsi-pullback-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -406,7 +491,7 @@ internal sealed class RsiPullbackExperimentAdapter : Phase5BExperimentAdapter
 }
 internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public MacdVolumeAccelerationExperimentAdapter() : base("platform.macd-volume", "macd-volume-parameters", "approved regime, signal, and execution timeframe series") { }
+    public MacdVolumeAccelerationExperimentAdapter(int version = 3) : base("platform.macd-volume", "macd-volume-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -431,7 +516,7 @@ internal sealed class MacdVolumeAccelerationExperimentAdapter : Phase5BExperimen
 }
 internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BExperimentAdapter
 {
-    public VolatilityCompressionBreakoutExperimentAdapter() : base("platform.volatility-compression-breakout", "volatility-compression-breakout-parameters", "approved regime, signal, and execution timeframe series") { }
+    public VolatilityCompressionBreakoutExperimentAdapter(int version = 3) : base("platform.volatility-compression-breakout", "volatility-compression-breakout-parameters", "approved regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -457,7 +542,7 @@ internal sealed class VolatilityCompressionBreakoutExperimentAdapter : Phase5BEx
 }
 internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public SurvivorshipAwareMomentumRotationExperimentAdapter() : base("platform.cross-sectional-momentum-rotation", "cross-sectional-momentum-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
+    public SurvivorshipAwareMomentumRotationExperimentAdapter(int version = 3) : base("platform.cross-sectional-momentum-rotation", "cross-sectional-momentum-parameters", "approved survivorship-aware cross-sectional universe evidence", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -479,7 +564,7 @@ internal sealed class SurvivorshipAwareMomentumRotationExperimentAdapter : Phase
 }
 internal sealed class RelativeStrengthPullbackRotationExperimentAdapter : Phase5BExperimentAdapter
 {
-    public RelativeStrengthPullbackRotationExperimentAdapter() : base("platform.relative-strength-pullback-rotation", "relative-strength-pullback-parameters", "approved survivorship-aware cross-sectional universe evidence") { }
+    public RelativeStrengthPullbackRotationExperimentAdapter(int version = 5) : base("platform.relative-strength-pullback-rotation", "relative-strength-pullback-parameters", "approved survivorship-aware cross-sectional universe evidence", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -504,7 +589,7 @@ internal sealed class RelativeStrengthPullbackRotationExperimentAdapter : Phase5
 }
 internal sealed class SessionConditionedBreakoutExperimentAdapter : Phase5BExperimentAdapter
 {
-    public SessionConditionedBreakoutExperimentAdapter() : base("platform.session-conditioned-breakout", "session-conditioned-breakout-parameters", "approved session profile and regime, signal, and execution timeframe series") { }
+    public SessionConditionedBreakoutExperimentAdapter(int version = 3) : base("platform.session-conditioned-breakout", "session-conditioned-breakout-parameters", "approved session profile and regime, signal, and execution timeframe series", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -532,7 +617,7 @@ internal sealed class SessionConditionedBreakoutExperimentAdapter : Phase5BExper
 }
 internal sealed class RegimeSwitchingEnsembleExperimentAdapter : Phase5BExperimentAdapter
 {
-    public RegimeSwitchingEnsembleExperimentAdapter() : base("platform.regime-switching-ensemble", "regime-switching-ensemble-parameters", "approved classifier output and component observations") { }
+    public RegimeSwitchingEnsembleExperimentAdapter(int version = 4) : base("platform.regime-switching-ensemble", "regime-switching-ensemble-parameters", "approved classifier output and component observations", version) { }
 
     public override ExperimentAnalysisResult Evaluate(ExperimentCandleSeries series, string parametersJson)
     {
@@ -554,6 +639,18 @@ internal sealed class RegimeSwitchingEnsembleExperimentAdapter : Phase5BExperime
             ("price-component", current.Close > prior[^1].Close, current.Close < prior[^1].Close, "Closed-price component direction."),
             ("participation-component", current.Volume > prior.TakeLast(20).Average(candle => candle.Volume), false, "Participation component confirms the regime.")
         ], 5);
+    }
+
+}
+
+internal sealed class ThreeSwingChannelDivergenceExperimentAdapter : Phase5BExperimentAdapter
+{
+    public ThreeSwingChannelDivergenceExperimentAdapter(int version = 3)
+        : base(
+            "platform.three-swing-channel-divergence",
+            "three-swing-channel-divergence-parameters",
+            "confirmed closed 5-minute swings with 1-hour and 4-hour channel context", version)
+    {
     }
 }
 
@@ -624,6 +721,55 @@ public sealed class PaperExperimentWorkerRunner
         {
             return ExperimentAnalysisResult.Blocked("Worker group provenance is revoked, unapproved, or rejected by its required gates.");
         }
+        if (!ApprovedStrategyParameters.TryNormalize(
+                definition.FamilyId, worker.StrategyParameters, out var normalizedParameters, out var parameterError))
+            return ExperimentAnalysisResult.Blocked(
+                $"{definition.FamilyId}: saved strategy settings require review: {parameterError}");
+        if (definition.FamilyId == "platform.donchian-breakout-ensemble" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("donchianPlanModel") != "priorBreakRange")
+            return ExperimentAnalysisResult.Blocked(
+                "Donchian structural paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.bollinger-mean-reversion" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("bollingerPlanModel") != "excursionMidBand")
+            return ExperimentAnalysisResult.Blocked(
+                "Bollinger excursion paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.rsi-pullback" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("rsiPlanModel") != "pullbackSwing")
+            return ExperimentAnalysisResult.Blocked(
+                "RSI pullback structural paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.macd-volume" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("macdPlanModel") != "crossSwing")
+            return ExperimentAnalysisResult.Blocked(
+                "MACD cross structural paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.ema-trend-continuation" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("emaPlanModel") != "pullbackSwing")
+            return ExperimentAnalysisResult.Blocked(
+                "EMA pullback structural paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.volatility-compression-breakout" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("compressionPlanModel") != "priorRange")
+            return ExperimentAnalysisResult.Blocked(
+                "Compression prior-range paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.cross-sectional-momentum-rotation" && definition.Version >= 4
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("momentumPlanModel") != "dailySwing")
+            return ExperimentAnalysisResult.Blocked(
+                "Momentum daily-swing paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.three-swing-channel-divergence" && definition.Version >= 4
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("threeSwingPlanModel") != "confirmedPivot")
+            return ExperimentAnalysisResult.Blocked(
+                "Three-swing confirmed-pivot paper protection needs owner review before new admissions.");
+        if (definition.FamilyId == "platform.regime-switching-ensemble" && definition.Version >= 5
+            && ApprovedStrategyParameters.Read(definition.FamilyId, normalizedParameters)
+                .String("regimePlanModel") != "fourHourSwing")
+            return ExperimentAnalysisResult.Blocked(
+                "Ensemble four-hour swing paper protection needs owner review before new admissions.");
 
         var requirements = approval.Requirements;
         var timeframes = requirements?.TimeframeConfiguration;
@@ -635,6 +781,8 @@ public sealed class PaperExperimentWorkerRunner
         var seriesSet = await LoadSeriesSetAsync(
             worker.MarketSymbol,
             timeframes,
+            definition.FamilyId,
+            definition.Version,
             asOfUtc,
             Math.Max(requirements!.MinimumClosedHistoryCandles, ApprovedConsensusStrategyProfiles.RequiredHistory),
             cancellationToken).ConfigureAwait(false);
@@ -650,13 +798,17 @@ public sealed class PaperExperimentWorkerRunner
             seriesSet.Series,
             assignment.Provenance,
             worker.StrategyParameters,
+            seriesSet.Series.Execution,
             cancellationToken).ConfigureAwait(false);
         if (result.Outcome == ExperimentAnalysisOutcome.Blocked
             && !result.Reason.Contains(definition.FamilyId, StringComparison.Ordinal))
         {
             result = ExperimentAnalysisResult.Blocked($"{definition.FamilyId}: {result.Reason}");
         }
-        var candle = seriesSet.Series.Signal.Candles[^1];
+        var candle = definition.FamilyId == "platform.relative-strength-pullback-rotation"
+            && definition.Version >= 5
+            ? seriesSet.Series.Execution.Candles[^1]
+            : seriesSet.Series.Signal.Candles[^1];
         return result.Attest(new ExperimentDecisionEvidence(
             worker.UserId,
             worker.Id,
@@ -696,16 +848,21 @@ public sealed class PaperExperimentWorkerRunner
         ExperimentStrategySeriesSet series,
         ExperimentResearchProvenance provenance,
         string strategyParameters,
+        ExperimentCandleSeries executionSeries,
         CancellationToken cancellationToken)
     {
         if (definition.FamilyId is "platform.cross-sectional-momentum-rotation"
-            or "platform.relative-strength-pullback-rotation")
+            or "platform.relative-strength-pullback-rotation"
+            || definition.FamilyId == "platform.regime-switching-ensemble" && definition.Version >= 4)
         {
             return await _supplemental.EvaluateAsync(
                 ownerId,
                 definition.FamilyId,
                 series.Signal,
                 provenance,
+                strategyParameters,
+                series.Regime,
+                executionSeries,
                 cancellationToken).ConfigureAwait(false)
                 ?? ExperimentAnalysisResult.Blocked(
                     $"{definition.FamilyId}: complete point-in-time universe evidence is unavailable.");
@@ -727,6 +884,8 @@ public sealed class PaperExperimentWorkerRunner
     private async Task<(ExperimentStrategySeriesSet? Series, string? BlockReason)> LoadSeriesSetAsync(
         string symbol,
         Trading.Strategies.StrategyTimeframeConfiguration timeframes,
+        string familyId,
+        int strategyVersion,
         DateTimeOffset asOfUtc,
         int requiredHistory,
         CancellationToken cancellationToken)
@@ -737,28 +896,52 @@ public sealed class PaperExperimentWorkerRunner
             (Role: "signal", Interval: timeframes.Signal),
             (Role: "execution", Interval: timeframes.Execution)
         };
-        var reads = roles
+        var roleIntervals = roles.Select(role => role.Interval).ToHashSet();
+        var contextIntervals = ApprovedConsensusStrategyProfiles.RequiredIntervals(familyId, timeframes.Signal)
+            .Where(interval => !roleIntervals.Contains(interval))
+            .Select((interval, index) => (Role: $"context-{index}", Interval: interval));
+        var primaryRole = familyId == "platform.relative-strength-pullback-rotation" && strategyVersion >= 5
+            ? roles[2]
+            : roles[1];
+        var primary = await _candles.GetClosedSeriesAsync(
+            new ExperimentCandleSeriesRequest(
+                symbol, primaryRole.Interval,
+                AlignDown(asOfUtc, TimeSpan.FromMinutes((int)primaryRole.Interval)),
+                requiredHistory),
+            cancellationToken).ConfigureAwait(false);
+        if (!primary.IsAvailable || primary.Series is null)
+            return (null, $"{primaryRole.Role} timeframe: {primary.BlockReason}");
+
+        var decisionCloseUtc = primary.Series.Candles[^1].CloseTimeUtc;
+        var reads = roles.Concat(contextIntervals)
+            .Where(role => role.Role != primaryRole.Role)
             .Select(async role => (
                 role.Role,
                 Result: await _candles.GetClosedSeriesAsync(
                     new ExperimentCandleSeriesRequest(
                         symbol,
                         role.Interval,
-                        AlignDown(asOfUtc, TimeSpan.FromMinutes((int)role.Interval)),
+                        AlignDown(decisionCloseUtc, TimeSpan.FromMinutes((int)role.Interval)),
                         requiredHistory),
                     cancellationToken).ConfigureAwait(false)))
             .ToArray();
-        var completed = await Task.WhenAll(reads).ConfigureAwait(false);
+        var completed = (await Task.WhenAll(reads).ConfigureAwait(false))
+            .Append((primaryRole.Role, Result: primary)).ToArray();
         var unavailable = completed.FirstOrDefault(item =>
             !item.Result.IsAvailable || item.Result.Series is null);
         if (unavailable.Result is not null
             && (!unavailable.Result.IsAvailable || unavailable.Result.Series is null))
             return (null, $"{unavailable.Role} timeframe: {unavailable.Result.BlockReason}");
+        var context = completed
+            .Where(item => item.Role.StartsWith("context-", StringComparison.Ordinal))
+            .Select(item => item.Result.Series)
+            .FirstOrDefault();
         return (
             new ExperimentStrategySeriesSet(
                 completed.Single(item => item.Role == "regime").Result.Series!,
                 completed.Single(item => item.Role == "signal").Result.Series!,
-                completed.Single(item => item.Role == "execution").Result.Series!),
+                completed.Single(item => item.Role == "execution").Result.Series!,
+                context),
             null);
     }
 
@@ -786,8 +969,11 @@ public sealed class PaperExperimentWorkerRunner
                 result.Consensus.Checks.Select(check =>
                     $"{check.Id}:{(int)check.Direction}:{check.Rationale}"))
                 + $"|threshold:{result.Consensus.RequiredAgreement}"
-                + $"|veto:{result.Consensus.MandatoryVeto}:{result.Consensus.VetoReason}";
+                + $"|veto:{result.Consensus.MandatoryVeto}:{result.Consensus.VetoReason}"
+                + (result.Consensus.RequiredEntryChecks.Count == 0
+                    ? string.Empty
+                    : $"|required:{string.Join(",", result.Consensus.RequiredEntryChecks)}");
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{FingerprintSeries(series.Regime)}|{FingerprintSeries(series.Signal)}|{FingerprintSeries(series.Execution)}|{consensus}")));
+            $"{FingerprintSeries(series.Regime)}|{FingerprintSeries(series.Signal)}|{FingerprintSeries(series.Execution)}|{(series.HourlyContext is null ? string.Empty : FingerprintSeries(series.HourlyContext))}|{consensus}|{result.SelectedComponent?.ComponentDecisionFingerprint}")));
     }
 }

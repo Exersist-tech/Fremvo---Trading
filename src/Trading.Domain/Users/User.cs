@@ -1,4 +1,5 @@
 using Trading.Domain.Identity;
+using Trading.Domain.Reporting;
 
 namespace Trading.Domain.Users;
 
@@ -64,11 +65,19 @@ public sealed class User
 
     public string DisplayName { get; }
 
-    public string Locale { get; }
+    public string Locale { get; private set; }
 
-    public string TimeZone { get; }
+    public string TimeZone { get; private set; }
 
-    public string ReportingCurrency { get; }
+    public string ReportingCurrency { get; private set; }
+
+    public void ChangeReportingProfile(ReportingProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        Locale = profile.Locale;
+        TimeZone = profile.TimeZone;
+        ReportingCurrency = profile.ReportingCurrency;
+    }
 
     public RoleType Role { get; }
 

@@ -44,6 +44,24 @@ public sealed class PaperRiskPositionSizerTests
     }
 
     [Fact]
+    public void CashLimitedPaperEntryReservesTheEstimatedFee()
+    {
+        var input = CreateInput(cash: 100m, stop: 99m) with
+        {
+            EstimatedEntryFeeRate = 0.008m
+        };
+        var sized = PaperRiskPositionSizer.Size(input);
+
+        Assert.True(sized.IsAccepted);
+        Assert.True(sized.Notional * (1m + input.EstimatedEntryFeeRate) <= input.AvailableCash);
+        Assert.True(sized.Quantity < 1m);
+        Assert.Equal(2.592m, sized.RiskPerUnit);
+        Assert.Equal(sized.Quantity * sized.RiskPerUnit, sized.Risk);
+        Assert.False(PaperRiskPositionSizer.Size(input with { EstimatedEntryFeeRate = -0.01m }).IsAccepted);
+        Assert.False(PaperRiskPositionSizer.Size(input with { EstimatedEntryFeeRate = 1.01m }).IsAccepted);
+    }
+
+    [Fact]
     public void AcceptsMarketReferenceAndProtectiveTriggerPricesBetweenVenueTicks()
     {
         var result = PaperRiskPositionSizer.Size(CreateInput(entry: 1.31522m, stop: 1.28m));

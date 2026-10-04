@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Trading.Domain.Market;
 using Trading.MarketData;
 
@@ -31,53 +32,147 @@ public sealed class KrakenStreamingCandleSource : IStreamingCandleSource
             }
         }
 
+        var groups = SplitByInterval(requested);
+        if (groups.Length == 1)
+        {
+            await foreach (var candle in StreamIntervalAsync(groups[0], cancellationToken).ConfigureAwait(false))
+                yield return candle;
+            yield break;
+        }
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var channel = Channel.CreateBounded<Candle>(new BoundedChannelOptions(256)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false
+        });
+        var remaining = groups.Length;
+        async Task ProduceAsync(CandleSubscription[] group)
+        {
+            try
+            {
+                await foreach (var candle in StreamIntervalAsync(group, linked.Token).ConfigureAwait(false))
+                    await channel.Writer.WriteAsync(candle, linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested)
+            {
+            }
+            catch (ChannelClosedException) when (linked.IsCancellationRequested)
+            {
+            }
+#pragma warning disable CA1031 // Publish the original stream failure and stop all other interval sockets.
+            catch (Exception exception)
+#pragma warning restore CA1031
+            {
+                channel.Writer.TryComplete(exception);
+                await linked.CancelAsync().ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                if (Interlocked.Decrement(ref remaining) == 0)
+                    channel.Writer.TryComplete();
+            }
+        }
+
+        var producers = groups.Select(ProduceAsync).ToArray();
+        try
+        {
+            await foreach (var candle in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                yield return candle;
+        }
+        finally
+        {
+            await linked.CancelAsync().ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(producers).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested)
+            {
+            }
+        }
+    }
+
+    internal static CandleSubscription[][] SplitByInterval(IReadOnlyCollection<CandleSubscription> requested) =>
+        requested.GroupBy(subscription => subscription.Interval)
+            .Select(group => group.ToArray())
+            .ToArray();
+
+    private static async IAsyncEnumerable<Candle> StreamIntervalAsync(
+        CandleSubscription[] requested,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var originalsByStream = requested
+            .GroupBy(subscription => new CandleSubscription(
+                KrakenV2SymbolNames.ForPublicStream(subscription.Symbol), subscription.Interval))
+            .ToDictionary(group => group.Key, group => group.ToArray());
         using var socket = CreatePublicSocket();
         await socket.ConnectAsync(Endpoint, cancellationToken).ConfigureAwait(false);
 
-        foreach (var group in requested.GroupBy(subscription => subscription.Interval))
-        {
-            var message = KrakenOhlcV2Protocol.BuildSubscribeMessage(
-                group.Select(subscription => subscription.Symbol),
-                KrakenIntervalMap.ToKrakenMinutes(group.Key));
-            var bytes = Encoding.UTF8.GetBytes(message);
-            await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
-        }
+        var message = KrakenOhlcV2Protocol.BuildSubscribeMessage(
+            originalsByStream.Keys.Select(subscription => subscription.Symbol),
+            KrakenIntervalMap.ToKrakenMinutes(requested[0].Interval));
+        var bytes = Encoding.UTF8.GetBytes(message);
+        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
 
         var active = new Dictionary<CandleSubscription, Candle>();
         while (socket.State == WebSocketState.Open)
         {
             var payload = await ReceiveTextAsync(socket, cancellationToken).ConfigureAwait(false);
-            foreach (var forming in KrakenOhlcV2Protocol.Map(payload))
+            var batch = KrakenOhlcV2Protocol.Parse(payload);
+            if (batch.IsSnapshot)
+            {
+                foreach (var forming in KrakenOhlcV2Protocol.LatestSnapshotCandles(batch.Candles))
+                {
+                    var key = new CandleSubscription(forming.Symbol, forming.Interval);
+                    if (originalsByStream.ContainsKey(key)
+                        && (!active.TryGetValue(key, out var previous)
+                            || forming.OpenTimeUtc >= previous.OpenTimeUtc))
+                        active[key] = forming;
+                }
+                continue;
+            }
+
+            foreach (var forming in batch.Candles.OrderBy(candle => candle.OpenTimeUtc))
             {
                 var key = new CandleSubscription(forming.Symbol, forming.Interval);
-                if (!requested.Contains(key))
+                if (!originalsByStream.TryGetValue(key, out var originals))
                 {
                     continue;
                 }
 
-                if (!active.TryGetValue(key, out var previous))
+                var closed = Advance(active, forming);
+                if (closed is not null)
                 {
-                    active[key] = forming;
-                    continue;
-                }
-
-                if (forming.OpenTimeUtc > previous.OpenTimeUtc)
-                {
-                    yield return AsClosed(previous);
-                    active[key] = forming;
-                }
-                else if (forming.OpenTimeUtc == previous.OpenTimeUtc)
-                {
-                    active[key] = forming;
-                }
-                else
-                {
-                    // A later interval is already observed, making this older
-                    // interval complete even though it arrived out of order.
-                    yield return AsClosed(forming);
+                    foreach (var original in originals)
+                        yield return AsRequested(closed, original.Symbol);
                 }
             }
         }
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new MarketDataSourceException("Kraken closed the public OHLC stream.");
+    }
+
+    internal static Candle? Advance(
+        Dictionary<CandleSubscription, Candle> active,
+        Candle forming)
+    {
+        var key = new CandleSubscription(forming.Symbol, forming.Interval);
+        if (!active.TryGetValue(key, out var previous))
+        {
+            active[key] = forming;
+            return null;
+        }
+        if (forming.OpenTimeUtc > previous.OpenTimeUtc)
+        {
+            active[key] = forming;
+            return AsClosed(previous);
+        }
+        if (forming.OpenTimeUtc == previous.OpenTimeUtc)
+            active[key] = forming;
+        return null;
     }
 
     internal static Candle AsClosed(Candle candle) => new(
@@ -85,6 +180,13 @@ public sealed class KrakenStreamingCandleSource : IStreamingCandleSource
         candle.Open, candle.High, candle.Low, candle.Close, candle.Volume,
         isClosed: true, candle.IsDerived,
         candle.QualityFlags.Where(issue => issue != DataQualityIssue.Incomplete).ToArray());
+
+    internal static Candle AsRequested(Candle candle, string requestedSymbol) =>
+        string.Equals(candle.Symbol, requestedSymbol, StringComparison.Ordinal)
+            ? candle
+            : new Candle(requestedSymbol, candle.Interval, candle.OpenTimeUtc, candle.CloseTimeUtc,
+                candle.Open, candle.High, candle.Low, candle.Close, candle.Volume,
+                candle.IsClosed, candle.IsDerived, candle.QualityFlags);
 
     internal static ClientWebSocket CreatePublicSocket() => new();
 
@@ -122,6 +224,8 @@ public sealed class KrakenStreamingCandleSource : IStreamingCandleSource
 
 internal static class KrakenOhlcV2Protocol
 {
+    internal sealed record Batch(bool IsSnapshot, IReadOnlyCollection<Candle> Candles);
+
     internal static string BuildSubscribeMessage(IEnumerable<string> symbols, int interval)
     {
         var requested = symbols.Where(symbol => !string.IsNullOrWhiteSpace(symbol))
@@ -138,21 +242,43 @@ internal static class KrakenOhlcV2Protocol
         });
     }
 
-    internal static IReadOnlyCollection<Candle> Map(string payload)
+    internal static IReadOnlyCollection<Candle> Map(string payload) => Parse(payload).Candles;
+
+    internal static IReadOnlyCollection<Candle> LatestSnapshotCandles(IEnumerable<Candle> candles) =>
+        candles.GroupBy(candle => new CandleSubscription(candle.Symbol, candle.Interval))
+            .Select(group => group.MaxBy(candle => candle.OpenTimeUtc)!)
+            .ToArray();
+
+    internal static Batch Parse(string payload)
     {
         try
         {
             using var document = JsonDocument.Parse(payload);
             var root = document.RootElement;
+            if (root.TryGetProperty("success", out var success)
+                && success.ValueKind == JsonValueKind.False)
+            {
+                var reason = root.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.String
+                    ? error.GetString()
+                    : null;
+                throw new MarketDataSourceException(
+                    string.IsNullOrWhiteSpace(reason)
+                        ? "Kraken rejected a public OHLC subscription."
+                        : $"Kraken rejected a public OHLC subscription: {reason}");
+            }
             if (!root.TryGetProperty("channel", out var channel)
                 || !string.Equals(channel.GetString(), "ohlc", StringComparison.Ordinal)
                 || !root.TryGetProperty("data", out var data)
                 || data.ValueKind != JsonValueKind.Array)
             {
-                return Array.Empty<Candle>();
+                return new(false, Array.Empty<Candle>());
             }
 
-            return data.EnumerateArray().Select(MapRow).ToArray();
+            var isSnapshot = root.TryGetProperty("type", out var type)
+                && type.ValueKind == JsonValueKind.String
+                && string.Equals(type.GetString(), "snapshot", StringComparison.Ordinal);
+            return new(isSnapshot, data.EnumerateArray().Select(MapRow).ToArray());
         }
         catch (JsonException exception)
         {

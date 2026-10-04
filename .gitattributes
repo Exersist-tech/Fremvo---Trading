@@ -1,0 +1,2 @@
+deploy/webjobs/market-data/run.sh text eol=lf
+deploy/webjobs/experiments/run.sh text eol=lf

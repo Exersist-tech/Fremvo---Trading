@@ -99,21 +99,19 @@ public sealed class PaperTrainingCandleBackfillService
                 if (await repository.UpsertAuthoritativeHistoryAsync(candle, cancellationToken).ConfigureAwait(false)
                     == CandleWriteResult.Conflict)
                 {
+                    var stored = (await repository.ListAsync(
+                        candle.Symbol, candle.Interval, candle.OpenTimeUtc, candle.OpenTimeUtc,
+                        cancellationToken).ConfigureAwait(false)).Single();
+                    s_logSkipped(_logger, subscription.Symbol, subscription.Interval,
+                        $"Authoritative history conflicts at {candle.OpenTimeUtc:O}; changed fields: " +
+                        CandleQualityEvaluator.ChangedMarketDataFields(stored, candle), null);
                     conflict = true;
                     break;
                 }
             }
 
             if (conflict)
-            {
-                s_logSkipped(
-                    _logger,
-                    subscription.Symbol,
-                    subscription.Interval,
-                    "Stored OHLCV data conflicts with Kraken's authoritative history.",
-                    null);
                 continue;
-            }
 
             _completedThrough[subscription] = completedBoundary;
             s_logCompleted(_logger, subscription.Symbol, subscription.Interval, candles.Count, null);
@@ -138,7 +136,8 @@ public sealed class PaperTrainingCandleBackfillService
             .OrderBy(candle => candle.OpenTimeUtc)
             .TakeLast(RequiredCandleCount)
             .ToArray();
-        if (candidates.Length != RequiredCandleCount)
+        if (candidates.Length != RequiredCandleCount
+            || candidates[^1].CloseTimeUtc != completedBoundary)
         {
             return [];
         }

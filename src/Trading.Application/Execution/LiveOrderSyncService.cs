@@ -36,6 +36,7 @@ public sealed class LiveOrderSyncService
     private readonly ISpotOrderGateway _gateway;
     private readonly ISpotExecutionAccountSource _credentials;
     private readonly IAuditEventWriter _auditWriter;
+    private readonly ILiveFillPersistenceTransaction _persistence;
     private readonly TimeProvider _timeProvider;
 
     public LiveOrderSyncService(
@@ -45,6 +46,7 @@ public sealed class LiveOrderSyncService
         ISpotOrderGateway gateway,
         ISpotExecutionAccountSource credentials,
         IAuditEventWriter auditWriter,
+        ILiveFillPersistenceTransaction persistence,
         TimeProvider timeProvider)
     {
         _orders = orders ?? throw new ArgumentNullException(nameof(orders));
@@ -53,6 +55,7 @@ public sealed class LiveOrderSyncService
         _gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
         _auditWriter = auditWriter ?? throw new ArgumentNullException(nameof(auditWriter));
+        _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
 
@@ -70,7 +73,8 @@ public sealed class LiveOrderSyncService
 
         var orders = await _orders.ListAsync(userId, cancellationToken).ConfigureAwait(false);
         var working = orders
-            .Where(order => order.Mode == TradingMode.Live && IsWorking(order.State))
+            .Where(order => order.Mode == TradingMode.Live
+                && (IsWorking(order.State) || order.RequiresReconciliation))
             .ToList();
 
         var changed = 0;
@@ -112,7 +116,15 @@ public sealed class LiveOrderSyncService
                 continue;
             }
 
-            if (await ApplyAsync(order, status, cancellationToken).ConfigureAwait(false))
+            decimal? executionPrice = null;
+            if (status.FilledQuantity > order.FilledQuantity)
+            {
+                var fills = await _gateway.ListFillsAsync(
+                    resolved.Credential, order.CreatedAtUtc, cancellationToken).ConfigureAwait(false);
+                executionPrice = ObservedNewFillPrice(order, status, fills, _timeProvider.GetUtcNow());
+            }
+
+            if (await ApplyAsync(order, status, executionPrice, cancellationToken).ConfigureAwait(false))
             {
                 changed++;
             }
@@ -127,6 +139,7 @@ public sealed class LiveOrderSyncService
     private async Task<bool> ApplyAsync(
         Order order,
         OrderStatusQueryResult status,
+        decimal? executionPrice,
         CancellationToken cancellationToken)
     {
         var now = _timeProvider.GetUtcNow();
@@ -135,69 +148,109 @@ public sealed class LiveOrderSyncService
         // The exchange's cumulative figure is authoritative, but it must never
         // move backwards. A smaller number than the platform already recorded
         // means the answer is inconsistent, not that a fill was undone.
-        if (newlyFilled < 0m)
-        {
-            return false;
-        }
+        if (newlyFilled < 0m || status.FilledQuantity > order.Quantity
+            || (status.State == ExchangeOrderState.Filled && status.FilledQuantity != order.Quantity)
+            || (status.State == ExchangeOrderState.Rejected && status.FilledQuantity != 0m))
+            throw new InvalidDataException("The exchange's live order state and cumulative fills are inconsistent.");
 
         var changed = false;
-
-        if (newlyFilled > 0m)
+        var expectedOrderVersion = order.Version;
+        await _persistence.RunAsync(async token =>
         {
-            order.MarkPartiallyFilled(status.FilledQuantity, now);
-            await ApplyFillToPositionAsync(order, newlyFilled, cancellationToken).ConfigureAwait(false);
-            changed = true;
-        }
+            if (newlyFilled > 0m)
+            {
+                if (executionPrice is null)
+                    throw new InvalidDataException("A live fill requires an observed execution price.");
+                await ApplyFillToPositionAsync(order, newlyFilled, executionPrice.Value, token).ConfigureAwait(false);
+                order.MarkPartiallyFilled(status.FilledQuantity, now);
+                changed = true;
+            }
 
-        switch (status.State)
+            switch (status.State)
+            {
+                case ExchangeOrderState.Filled when order.State != OrderState.Filled:
+                    order.MarkFilled();
+                    changed = true;
+                    break;
+
+                case ExchangeOrderState.Canceled when order.State != OrderState.Canceled:
+                case ExchangeOrderState.Expired when order.State != OrderState.Canceled:
+                    order.MarkCanceled();
+                    changed = true;
+                    break;
+
+                case ExchangeOrderState.Rejected when order.State != OrderState.Rejected:
+                    order.MarkRejected("The exchange reported this order as rejected.");
+                    changed = true;
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (!changed)
+                return;
+
+            await _orders.UpdateAsync(order, expectedOrderVersion, token).ConfigureAwait(false);
+
+            await _auditWriter.WriteAsync(
+                new AuditEvent(
+                    Guid.NewGuid(),
+                    order.UserId,
+                    "LiveOrderSynced",
+                    targetType: "LiveOrder",
+                    targetId: order.Id.ToString("D", CultureInfo.InvariantCulture),
+                    occurredAtUtc: now,
+                    before: null,
+                    after: string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"The exchange reported {status.State} with {status.FilledQuantity} filled."),
+                    correlationId: order.ClientOrderId),
+                token).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+
+        return changed;
+    }
+
+    private static decimal ObservedNewFillPrice(
+        Order order,
+        OrderStatusQueryResult status,
+        SpotFillQueryResult evidence,
+        DateTimeOffset nowUtc)
+    {
+        if (evidence.Outcome != SpotFillQueryOutcome.Answered
+            || string.IsNullOrWhiteSpace(status.ExchangeOrderId)
+            || status.FilledQuantity > order.Quantity)
+            throw new InvalidDataException("The exchange has not confirmed complete live fill evidence.");
+
+        var fills = evidence.Fills
+            .Where(fill => fill.ExchangeOrderId == status.ExchangeOrderId)
+            .OrderBy(fill => fill.ExecutedAtUtc)
+            .ThenBy(fill => fill.FillId, StringComparer.Ordinal)
+            .ToArray();
+
+        if (fills.Length == 0
+            || fills.Select(fill => fill.FillId).Distinct(StringComparer.Ordinal).Count() != fills.Length
+            || fills.Any(fill => fill.Price <= 0m
+                || fill.ExecutedAtUtc < order.CreatedAtUtc || fill.ExecutedAtUtc > nowUtc
+                || (order.Side == OrderSide.Buy ? SpotOrderSide.Buy : SpotOrderSide.Sell) != fill.Side))
+            throw new InvalidDataException("The exchange returned incomplete or inconsistent live fill evidence.");
+
+        decimal total = 0m;
+        decimal newQuantity = 0m;
+        decimal newCost = 0m;
+        foreach (var fill in fills)
         {
-            case ExchangeOrderState.Filled when order.State != OrderState.Filled:
-                order.MarkFilled();
-                changed = true;
-                break;
-
-            case ExchangeOrderState.Canceled when order.State != OrderState.Canceled:
-                order.MarkCanceled();
-                changed = true;
-                break;
-
-            case ExchangeOrderState.Expired when order.State != OrderState.Canceled:
-                order.MarkCanceled();
-                changed = true;
-                break;
-
-            case ExchangeOrderState.Rejected when order.State != OrderState.Rejected:
-                order.MarkRejected("The exchange reported this order as rejected.");
-                changed = true;
-                break;
-
-            default:
-                break;
+            var alreadyApplied = Math.Clamp(order.FilledQuantity - total, 0m, fill.Quantity);
+            var unapplied = fill.Quantity - alreadyApplied;
+            total += fill.Quantity;
+            newQuantity += unapplied;
+            newCost += unapplied * fill.Price;
         }
+        if (total != status.FilledQuantity || newQuantity != status.FilledQuantity - order.FilledQuantity)
+            throw new InvalidDataException("The exchange's fills do not reconcile with its order status.");
 
-        if (!changed)
-        {
-            return false;
-        }
-
-        await _orders.UpdateAsync(order, cancellationToken).ConfigureAwait(false);
-
-        await _auditWriter.WriteAsync(
-            new AuditEvent(
-                Guid.NewGuid(),
-                order.UserId,
-                "LiveOrderSynced",
-                targetType: "LiveOrder",
-                targetId: order.Id.ToString("D", CultureInfo.InvariantCulture),
-                occurredAtUtc: now,
-                before: null,
-                after: string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"The exchange reported {status.State} with {status.FilledQuantity} filled."),
-                correlationId: order.ClientOrderId),
-            cancellationToken).ConfigureAwait(false);
-
-        return true;
+        return newCost / newQuantity;
     }
 
     /// <summary>
@@ -213,28 +266,38 @@ public sealed class LiveOrderSyncService
     private async Task ApplyFillToPositionAsync(
         Order order,
         decimal filledQuantity,
+        decimal executionPrice,
         CancellationToken cancellationToken)
     {
         var now = _timeProvider.GetUtcNow();
         var open = await _positions.ListOpenAsync(order.UserId, cancellationToken).ConfigureAwait(false);
-        var existing = open.FirstOrDefault(position =>
+        var matchingSymbol = open.Where(position =>
             string.Equals(position.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase)
-            && position.Status == PositionStatus.Open
-            && position.Mode == TradingMode.Live);
+            && position.Mode == TradingMode.Live).ToArray();
+        if (order.ExchangeAccountId is null || matchingSymbol.Any(position => position.ExchangeAccountId is null))
+            throw new InvalidDataException("A live position has no verified exchange-account binding.");
+        var sameAccount = matchingSymbol.Where(position =>
+            position.ExchangeAccountId == order.ExchangeAccountId).ToArray();
+        if (sameAccount.Length > 1)
+            throw new InvalidDataException("Multiple positions for this exchange account need reconciliation.");
+        var existing = sameAccount.SingleOrDefault();
 
         if (existing is null)
         {
+            if (order.Side != OrderSide.Buy)
+                throw new InvalidDataException("An unowned spot sell cannot be recorded as a short position.");
             var position = new Position(
                 Guid.NewGuid(),
                 order.UserId,
                 order.StrategyId,
                 order.Symbol,
-                order.Side == OrderSide.Buy ? PositionDirection.DirectionLong : PositionDirection.DirectionShort,
+                PositionDirection.DirectionLong,
                 filledQuantity,
-                order.Price,
-                order.Price,
+                executionPrice,
+                executionPrice,
                 now,
-                mode: TradingMode.Live);
+                mode: TradingMode.Live,
+                exchangeAccountId: order.ExchangeAccountId);
 
             await _positions.AddAsync(position, cancellationToken).ConfigureAwait(false);
             return;
@@ -244,19 +307,21 @@ public sealed class LiveOrderSyncService
             (existing.Direction == PositionDirection.DirectionLong && order.Side == OrderSide.Sell)
             || (existing.Direction == PositionDirection.DirectionShort && order.Side == OrderSide.Buy);
 
-        if (!reduces || filledQuantity > existing.Quantity)
+        if (reduces && filledQuantity > existing.Quantity)
+            throw new InvalidDataException("A live fill exceeds the recorded position; manual reconciliation is required.");
+
+        if (!reduces)
         {
-            // Increasing a position would need an averaged cost basis the
-            // position model does not carry, and reducing past zero would flip
-            // its direction. Inventing either would misstate every profit and
-            // loss figure derived from the entry price.
-            existing.UpdateMarkPrice(order.Price);
-            await _positions.UpdateAsync(existing, cancellationToken).ConfigureAwait(false);
+            var expectedVersion = existing.Version;
+            existing.Increase(filledQuantity, executionPrice);
+            existing.UpdateMarkPrice(executionPrice);
+            await _positions.UpdateAsync(existing, expectedVersion, cancellationToken).ConfigureAwait(false);
             return;
         }
 
+        var reductionVersion = existing.Version;
         existing.Reduce(filledQuantity);
-        existing.UpdateMarkPrice(order.Price);
-        await _positions.UpdateAsync(existing, cancellationToken).ConfigureAwait(false);
+        existing.UpdateMarkPrice(executionPrice);
+        await _positions.UpdateAsync(existing, reductionVersion, cancellationToken).ConfigureAwait(false);
     }
 }

@@ -17,6 +17,40 @@ public sealed class KrakenStreamingCandleSourceTests
         "volume":"456.123456789012","trades":42}]}
         """;
 
+    [Theory]
+    [InlineData("XBT/USD", "BTC/USD")]
+    [InlineData("XDG/EUR", "DOGE/EUR")]
+    [InlineData("SOL/USD", "SOL/USD")]
+    public void KrakenRestDisplayNamesMapToPublicV2StreamNames(string restName, string streamName)
+    {
+        Assert.Equal(streamName, KrakenV2SymbolNames.ForPublicStream(restName));
+        var forming = Assert.Single(KrakenOhlcV2Protocol.Map(Update));
+        var requested = KrakenStreamingCandleSource.AsRequested(
+            KrakenStreamingCandleSource.AsClosed(forming), restName);
+        Assert.Equal(restName, requested.Symbol);
+        Assert.True(requested.CanBeUsedForClosedCandleSignal);
+        Assert.Equal(forming.Close, requested.Close);
+        Assert.Equal(forming.Volume, requested.Volume);
+    }
+
+    [Fact]
+    public void EachPublicSocketSubscribesToOnlyOneIntervalPerSymbol()
+    {
+        var subscriptions = new[]
+        {
+            new CandleSubscription("XBT/USD", CandleInterval.FiveMinutes),
+            new CandleSubscription("BTC/USD", CandleInterval.FiveMinutes),
+            new CandleSubscription("XBT/USD", CandleInterval.OneHour),
+            new CandleSubscription("DOGE/EUR", CandleInterval.OneHour)
+        };
+        var groups = KrakenStreamingCandleSource.SplitByInterval(subscriptions);
+
+        Assert.Equal(2, groups.Length);
+        Assert.All(groups, group => Assert.Single(group.Select(item => item.Interval).Distinct()));
+        Assert.Equal(2, groups.Single(group => group[0].Interval == CandleInterval.FiveMinutes).Length);
+        Assert.Equal(2, groups.Single(group => group[0].Interval == CandleInterval.OneHour).Length);
+    }
+
     [Fact]
     public void SubscribeMessageUsesOnlyThePublicV2OhlcProtocol()
     {
@@ -72,6 +106,32 @@ public sealed class KrakenStreamingCandleSourceTests
     }
 
     [Fact]
+    public void SnapshotTracksOnlyNewestFormingCandleAndIgnoresDelayedOlderUpdates()
+    {
+        var baseCandle = Assert.Single(KrakenOhlcV2Protocol.Map(Update));
+        var latest = FormingAt(baseCandle, baseCandle.OpenTimeUtc.AddMinutes(2));
+        var snapshot = KrakenOhlcV2Protocol.LatestSnapshotCandles(
+            [latest, baseCandle, FormingAt(baseCandle, baseCandle.OpenTimeUtc.AddMinutes(1))]);
+        Assert.Equal(latest.OpenTimeUtc, Assert.Single(snapshot).OpenTimeUtc);
+        var parsed = KrakenOhlcV2Protocol.Parse(
+            """{"channel":"ohlc","type":"snapshot","data":[]}""");
+        Assert.True(parsed.IsSnapshot);
+
+        var active = new Dictionary<CandleSubscription, Candle>();
+        Assert.Null(KrakenStreamingCandleSource.Advance(active, latest));
+        Assert.Null(KrakenStreamingCandleSource.Advance(active, baseCandle));
+        Assert.Equal(latest.OpenTimeUtc, Assert.Single(active).Value.OpenTimeUtc);
+        var closed = KrakenStreamingCandleSource.Advance(
+            active, FormingAt(baseCandle, latest.OpenTimeUtc.AddMinutes(1)));
+        Assert.Equal(latest.OpenTimeUtc, closed!.OpenTimeUtc);
+        Assert.True(closed.CanBeUsedForClosedCandleSignal);
+    }
+
+    private static Candle FormingAt(Candle candle, DateTimeOffset open) => new(
+        candle.Symbol, candle.Interval, open, open.AddMinutes((int)candle.Interval),
+        candle.Open, candle.High, candle.Low, candle.Close, candle.Volume, false, false);
+
+    [Fact]
     public void MapperRejectsMalformedOhlcMessages()
     {
         Assert.Throws<MarketDataSourceException>(() => KrakenOhlcV2Protocol.Map("{not json"));
@@ -83,5 +143,9 @@ public sealed class KrakenStreamingCandleSourceTests
     public void NonOhlcControlMessagesDoNotProduceCandles()
     {
         Assert.Empty(KrakenOhlcV2Protocol.Map("""{"method":"subscribe","success":true}"""));
+        var error = Assert.Throws<MarketDataSourceException>(() =>
+            KrakenOhlcV2Protocol.Map(
+                """{"method":"subscribe","success":false,"error":"Currency pair not supported XBT/USD"}"""));
+        Assert.Contains("XBT/USD", error.Message, StringComparison.Ordinal);
     }
 }

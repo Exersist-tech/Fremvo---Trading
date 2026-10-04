@@ -7,9 +7,9 @@
 (function () {
   'use strict';
 
-  // Where to go after a successful sign-in. The trading chart is the entry
-  // point to the application.
-  var DEFAULT_DESTINATION = '/chart';
+  // Where to go after a successful sign-in. Start in the current workspace;
+  // legacy chart pages remain available through their existing routes.
+  var DEFAULT_DESTINATION = '/workspace/trade';
 
   function $(id) { return document.getElementById(id); }
 
@@ -82,6 +82,8 @@
     var email = $('login-email').value.trim();
     var passwordField = $('login-password');
     var password = passwordField.value;
+    var codeField = $('login-code');
+    var oneTimeCode = codeField.value.trim();
 
     if (!email || !password) {
       setStatus('Enter your email and password.', true);
@@ -96,17 +98,13 @@
       var response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ email: email, password: password })
+        body: JSON.stringify({ email: email, password: password, oneTimeCode: oneTimeCode })
       });
-
-      // The password is cleared as soon as the request has been made, so it
-      // does not sit in the form afterwards.
-      passwordField.value = '';
 
       if (!response.ok) {
         // The server deliberately does not say whether the address exists, so
         // neither does this message.
-        setStatus('That email and password combination was not accepted.', true);
+        setStatus('Sign-in was not accepted. Check your credentials and verification code.', true);
         return;
       }
 
@@ -126,6 +124,8 @@
     } catch (error) {
       setStatus('Sign-in could not be completed. ' + error.message, true);
     } finally {
+      passwordField.value = '';
+      codeField.value = '';
       $('login-submit').disabled = false;
     }
   }

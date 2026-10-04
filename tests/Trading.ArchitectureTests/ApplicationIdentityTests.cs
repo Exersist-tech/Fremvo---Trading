@@ -13,10 +13,13 @@ namespace Trading.ArchitectureTests
             var invitation = service.CreateInvitation(
                 Guid.NewGuid(),
                 "WELCOME-10",
+                "new@example.test",
                 3,
                 DateTimeOffset.UtcNow.AddDays(7));
 
-            Assert.Equal("WELCOME-10", invitation.Code);
+            Assert.Equal(InvitationCodeDigest.Compute("WELCOME-10"), invitation.Code);
+            Assert.DoesNotContain("WELCOME-10", invitation.Code, StringComparison.Ordinal);
+            Assert.Equal("new@example.test", invitation.RecipientEmail);
             Assert.Equal(0, invitation.UsedCount);
             Assert.True(invitation.IsActive);
         }

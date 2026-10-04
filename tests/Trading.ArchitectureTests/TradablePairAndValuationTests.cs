@@ -16,8 +16,8 @@ public sealed class TradablePairAndValuationTests
 
     private const string PairPayload = """
     {"error":[],"result":{
-      "XXBTZUSD":{"altname":"XBTUSD","wsname":"XBT/USD","base":"XXBT","quote":"ZUSD","status":"online","lot_decimals":8,"ordermin":"0.00005","tick_size":"0.1"},
-      "XETHZUSD":{"altname":"ETHUSD","wsname":"ETH/USD","base":"XETH","quote":"ZUSD","status":"online","lot_decimals":8,"ordermin":"0.002","tick_size":"0.01"}
+      "XXBTZUSD":{"altname":"XBTUSD","wsname":"XBT/USD","base":"XXBT","quote":"ZUSD","status":"online","lot_decimals":8,"ordermin":"0.00005","costmin":"0.5","tick_size":"0.1"},
+      "XETHZUSD":{"altname":"ETHUSD","wsname":"ETH/USD","base":"XETH","quote":"ZUSD","status":"online","lot_decimals":8,"ordermin":"0.002","costmin":"1","tick_size":"0.01"}
     }}
     """;
 
@@ -32,6 +32,7 @@ public sealed class TradablePairAndValuationTests
         Assert.Equal(0.00005m, bitcoin.MinimumQuantity);
         Assert.Equal(0.1m, bitcoin.PriceTick);
         Assert.Equal(0.00000001m, bitcoin.QuantityStep);
+        Assert.Equal(0.5m, bitcoin.MinimumNotional);
         Assert.True(bitcoin.IsActive);
     }
 
@@ -50,6 +51,8 @@ public sealed class TradablePairAndValuationTests
         var pairs = KrakenAssetPairMapper.Map(payload);
 
         Assert.Equal("GOODUSD", Assert.Single(pairs).Symbol);
+        Assert.Null(Assert.Single(pairs).MinimumNotional);
+        Assert.False(Assert.Single(pairs).IsActive);
     }
 
     [Fact]

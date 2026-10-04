@@ -62,11 +62,12 @@
       [
         { label: 'Strategy' }, { label: 'Template version' }, { label: 'Symbol' },
         { label: 'From UTC' }, { label: 'To UTC' }, { label: 'As of UTC' },
-        { label: 'Completed UTC' }, { label: 'Dataset version identity' }, { label: 'Provenance' }
+        { label: 'Completed UTC' }, { label: 'Dataset version identity' },
+        { label: 'Fill timing' }, { label: 'Provenance' }
       ],
       [[
         result.strategyId, result.strategyTemplateVersion, result.symbol, result.fromUtc, result.toUtc,
-        result.asOfUtc, result.completedAtUtc, result.datasetVersionIdentity, result.provenance
+        result.asOfUtc, result.completedAtUtc, result.datasetVersionIdentity, result.fillTiming, result.provenance
       ]]);
   }
 

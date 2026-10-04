@@ -1,4 +1,6 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.SqlClient;
 using Trading.Application.Execution;
 using Trading.Domain.Execution;
 using Trading.Domain.Orders;
@@ -66,6 +68,32 @@ public sealed class EfOrderRepository : IOrderRepository
     {
         ArgumentNullException.ThrowIfNull(order);
 
+        if (order.Mode == TradingMode.Live && _context.Database.CurrentTransaction is null)
+        {
+            var transaction = await _context.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await using var lifetime = transaction.ConfigureAwait(false);
+            await InsertAsync(order, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        await InsertAsync(order, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task InsertAsync(Order order, CancellationToken cancellationToken)
+    {
+        if (order.Mode == TradingMode.Live && order.ExchangeAccountId is { } accountId)
+        {
+            await ReserveLiveAccountAsync(accountId, cancellationToken).ConfigureAwait(false);
+            if (await _context.Orders.AsNoTracking().AnyAsync(existing =>
+                existing.Mode == TradingMode.Live && existing.ExchangeAccountId == accountId
+                && (existing.RequiresReconciliation
+                    || (existing.State != OrderState.Filled && existing.State != OrderState.Canceled
+                        && existing.State != OrderState.Rejected && existing.State != OrderState.Expired)),
+                cancellationToken).ConfigureAwait(false))
+                throw new WorkingLiveOrderConflictException();
+        }
+
         // Checked before insert so the common case produces a clear domain
         // failure, and enforced again by the unique index so a race between
         // two instances cannot create a duplicate live order.
@@ -85,7 +113,7 @@ public sealed class EfOrderRepository : IOrderRepository
         {
             await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateException exception) when (IsUniqueViolation(exception))
+        catch (DbUpdateException exception) when (IsClientIdConflict(exception))
         {
             _context.Entry(order).State = EntityState.Detached;
             throw new DuplicateClientOrderIdException(order.ClientOrderId);
@@ -100,9 +128,34 @@ public sealed class EfOrderRepository : IOrderRepository
         await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static bool IsUniqueViolation(DbUpdateException exception) =>
-        exception.InnerException?.Message.Contains("unique", StringComparison.OrdinalIgnoreCase) == true ||
-        exception.Message.Contains("unique", StringComparison.OrdinalIgnoreCase);
+    public async Task UpdateAsync(Order order, int expectedVersion, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        _context.Orders.Update(order);
+        _context.Entry(order).Property(value => value.Version).OriginalValue = expectedVersion;
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ReserveLiveAccountAsync(Guid accountId, CancellationToken cancellationToken)
+    {
+        var result = new SqlParameter("@result", SqlDbType.Int) { Direction = ParameterDirection.Output };
+        var resource = new SqlParameter("@resource", SqlDbType.NVarChar, 255)
+        {
+            Value = $"Trading.LiveOrder:{accountId:D}"
+        };
+        await _context.Database.ExecuteSqlRawAsync(
+            "EXEC @result = sys.sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', "
+            + "@LockOwner = 'Transaction', @LockTimeout = 20000;",
+            [result, resource], cancellationToken).ConfigureAwait(false);
+        if ((int)result.Value == -1)
+            throw new WorkingLiveOrderConflictException();
+        if ((int)result.Value < 0)
+            throw new InvalidOperationException("A live exchange-account reservation could not be acquired.");
+    }
+
+    private static bool IsClientIdConflict(DbUpdateException exception) =>
+        exception.InnerException is SqlException { Number: 2601 or 2627 } sql
+        && sql.Message.Contains("IX_Orders_ClientOrderId", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class EfPositionRepository : IPositionRepository
@@ -136,11 +189,12 @@ public sealed class EfPositionRepository : IPositionRepository
         await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task UpdateAsync(Position position, CancellationToken cancellationToken)
+    public async Task UpdateAsync(Position position, int expectedVersion, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(position);
 
         _context.Positions.Update(position);
+        _context.Entry(position).Property(value => value.Version).OriginalValue = expectedVersion;
         await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 }

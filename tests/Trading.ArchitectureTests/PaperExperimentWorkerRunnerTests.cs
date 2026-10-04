@@ -28,7 +28,8 @@ public sealed class PaperExperimentWorkerRunnerTests
         "platform.cross-sectional-momentum-rotation",
         "platform.relative-strength-pullback-rotation",
         "platform.session-conditioned-breakout",
-        "platform.regime-switching-ensemble"
+        "platform.regime-switching-ensemble",
+        "platform.three-swing-channel-divergence"
     ];
 
     private sealed class FixedCandleSource : IExperimentCandleSeriesSource
@@ -92,6 +93,24 @@ public sealed class PaperExperimentWorkerRunnerTests
     }
 
     [Fact]
+    public async Task SavedInvalidWorkerSettingsBlockAnalysisWithoutThrowingOrChangingParameters()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.Definitions.Single(candidate =>
+            candidate.FamilyId == "platform.ema-trend-continuation");
+        const string settings = """{"minimumAgreement":3}""";
+        var worker = Worker(settings);
+        var configuration = Configuration(worker, definition);
+        var result = await new PaperExperimentWorkerRunner(
+            new FixedCandleSource(AvailableSeries()), registry)
+            .AnalyzeAsync(worker, configuration, configuration.Assignments.Single(), Now);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, result.Outcome);
+        Assert.Contains("require review", result.Reason, StringComparison.Ordinal);
+        Assert.Equal(settings, worker.StrategyParameters);
+    }
+
+    [Fact]
     public async Task RejectedGateAndForeignGroupAreExplicitlyBlocked()
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
@@ -115,7 +134,7 @@ public sealed class PaperExperimentWorkerRunnerTests
     {
         var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
 
-        Assert.Equal(10, registry.Definitions.Count);
+        Assert.Equal(11, registry.Definitions.Count);
         Assert.DoesNotContain(registry.Definitions, definition =>
             definition.FamilyId == "platform.rsi-macd-confluence");
         Assert.DoesNotContain(typeof(ApprovedExperimentStrategyRegistry).GetMethods(), method =>
@@ -320,7 +339,7 @@ public sealed class PaperExperimentWorkerRunnerTests
             definition,
             signalInterval: CandleInterval.FifteenMinutes,
             allowedIntervals: PaperTrainingAutoSelectionService.ApprovedIntervals);
-        var primaryClose = Now.AddMinutes(-5);
+        var primaryClose = Now;
         var source = new MultiIntervalCandleSource(primaryCloseUtc: primaryClose);
         var runner = new PaperExperimentWorkerRunner(source, registry);
 
@@ -328,11 +347,30 @@ public sealed class PaperExperimentWorkerRunnerTests
             worker,
             configuration,
             configuration.Assignments.Single(),
-            Now);
+            Now.AddMinutes(5));
+        var repeated = await runner.AnalyzeAcrossPaperTimeframesAsync(
+            worker,
+            configuration,
+            configuration.Assignments.Single(),
+            Now.AddMinutes(10));
 
         Assert.NotEqual(ExperimentAnalysisOutcome.Blocked, result.Outcome);
-        Assert.All(source.Requests, request => Assert.True(request.AsOfUtc <= Now));
+        Assert.All(source.Requests.Where(request => request.Interval != CandleInterval.FifteenMinutes),
+            request => Assert.True(request.AsOfUtc <= primaryClose));
         Assert.Equal(primaryClose, result.Evidence!.AsOfUtc);
+        Assert.Equal(result.Evidence.ContextFingerprint, repeated.Evidence!.ContextFingerprint);
+        var policy = new ExperimentDecisionPolicy(new InMemoryExperimentDecisionLedger(),
+            new FakeTimeProvider(Now.AddMinutes(10)));
+        var identity = new ExperimentClosedCandleIdentity(
+            result.Evidence.Symbol, result.Evidence.Interval,
+            result.Evidence.OpenTimeUtc, result.Evidence.CloseTimeUtc, primaryClose);
+        var firstDecision = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            result, new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, primaryClose), identity);
+        Assert.Equal(ExperimentProposalAction.Open, firstDecision.Proposal.Action);
+        worker.ApplyPaperTrade(1m, 100m, 0m, "buy", Now.AddMinutes(1));
+        var repeatedDecision = await policy.DecideAsync(worker, configuration, configuration.Assignments.Single(),
+            repeated, new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 1m, primaryClose), identity);
+        Assert.Equal(firstDecision, repeatedDecision);
     }
 
     [Fact]
@@ -371,8 +409,8 @@ public sealed class PaperExperimentWorkerRunnerTests
                 family, series["XBT/EUR"].Series!, configuration.Assignments.Single().Provenance);
 
             Assert.NotNull(result);
-            Assert.True(result!.Outcome is ExperimentAnalysisOutcome.Analyzed
-                or ExperimentAnalysisOutcome.NoCondition or ExperimentAnalysisOutcome.Blocked);
+            Assert.Equal(ExperimentAnalysisOutcome.Blocked, result!.Outcome);
+            Assert.Contains("pinned eligible-universe", result.Reason, StringComparison.Ordinal);
         }
 
         var missing = new PlatformSupplementalExperimentEvidenceProvider(
@@ -381,7 +419,7 @@ public sealed class PaperExperimentWorkerRunnerTests
                 ["XBT/EUR"] = series["XBT/EUR"],
                 ["ETH/EUR"] = series["ETH/EUR"]
             }));
-        var crossDefinition = registry.Definitions.Single(candidate => candidate.FamilyId == "platform.cross-sectional-momentum-rotation");
+        var crossDefinition = registry.ResolveDefinition("platform.cross-sectional-momentum-rotation", 3);
         var crossWorker = Worker("{}", crossDefinition.FamilyId);
         var crossConfiguration = Configuration(crossWorker, crossDefinition);
         var runner = new PaperExperimentWorkerRunner(source, registry, provider);
@@ -408,12 +446,195 @@ public sealed class PaperExperimentWorkerRunnerTests
             var definition = registry.Definitions.Single(candidate => candidate.FamilyId == family);
             var worker = Worker("{}", family);
             var configuration = Configuration(worker, definition);
-            Assert.Null(await provider.EvaluateAsync(
+            var result = await provider.EvaluateAsync(
                 Guid.Empty,
                 family,
                 series["XBT/EUR"].Series!,
-                configuration.Assignments.Single().Provenance));
+                configuration.Assignments.Single().Provenance);
+            if (family == "platform.regime-switching-ensemble")
+            {
+                Assert.Equal(ExperimentAnalysisOutcome.Blocked, result!.Outcome);
+                Assert.Contains("Pinned component", result.Reason, StringComparison.Ordinal);
+            }
+            else
+                Assert.Null(result);
         }
+    }
+
+    [Fact]
+    public async Task PinnedRegimeComponentReplaysFromTheSameClosedUniverseAndRejectsChangedEvidence()
+    {
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        const int history = ApprovedConsensusStrategyProfiles.RequiredHistory;
+        var dailyAsOf = new DateTimeOffset(Now.Year, Now.Month, Now.Day, 0, 0, 0, TimeSpan.Zero);
+        ExperimentCandleSeries Series(string symbol, CandleInterval interval, DateTimeOffset asOf, decimal slope,
+            bool pullback = false)
+        {
+            var duration = TimeSpan.FromMinutes((int)interval);
+            var candles = Enumerable.Range(0, history).Select(index =>
+            {
+                var openTime = asOf.AddTicks(duration.Ticks * (index - history));
+                var price = 100m + index * slope + (interval == CandleInterval.OneDay && index >= history - 5
+                    ? (index - history + 5) * .25m : 0m);
+                if (pullback && index == history - 2)
+                    price -= .4m;
+                return new Candle(symbol, interval, openTime, openTime.Add(duration),
+                    price, price + 1m, price - 1m, price, 20_000m, true, false);
+            }).ToArray();
+            return new ExperimentCandleSeries(symbol, interval, asOf, candles);
+        }
+        var regime = Series("ETH/EUR", CandleInterval.OneDay, dailyAsOf, .05m);
+        var benchmark = Series("XBT/EUR", CandleInterval.OneDay, dailyAsOf, .04m);
+        var signal = Series("ETH/EUR", CandleInterval.FourHours, Now, .05m, pullback: true);
+        var execution = Series("ETH/EUR", CandleInterval.OneHour, Now, .05m);
+        var component = registry.EvaluateProfile(
+            "platform.ema-trend-continuation", regime, signal, execution, "{}");
+        Assert.Equal(ExperimentAnalysisOutcome.Analyzed, component.Outcome);
+        var evidence = component.Consensus!;
+        var canonical = string.Join("|", evidence.Checks.Select(check =>
+            $"{check.Id}:{(int)check.Direction}:{check.Rationale}"))
+            + $"|{evidence.RequiredAgreement}|{string.Join(",", evidence.RequiredEntryChecks)}";
+        var selection = new PaperRegimeComponentSelection(
+            "platform.ema-trend-continuation", 3, "{}",
+            ["ETH/EUR", "XBT/EUR"], dailyAsOf, Now, CandleInterval.FourHours,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))));
+        var definition = registry.Definitions.Single(candidate =>
+            candidate.FamilyId == "platform.regime-switching-ensemble");
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(), "pinned-regime", definition.FamilyId,
+            "ETH/EUR", 1_000m, Now, 1);
+        worker.Start();
+        var original = Configuration(worker, definition, signalInterval: CandleInterval.FourHours)
+            .Assignments.Single().Provenance;
+        ExperimentResearchProvenance Pinned(PaperRegimeComponentSelection selectionValue) => new(
+            original.Approval, original.ParametersFingerprint, original.Dataset, original.Classifier,
+            original.EvidenceProvenance, original.GateEvaluation, selectionValue);
+        var candles = new Dictionary<(string, CandleInterval), ExperimentCandleSeries>
+        {
+            [("ETH/EUR", CandleInterval.OneDay)] = regime,
+            [("XBT/EUR", CandleInterval.OneDay)] = benchmark,
+            [("ETH/EUR", CandleInterval.FourHours)] = signal,
+            [("ETH/EUR", CandleInterval.OneHour)] = execution
+        };
+        var provider = new PlatformSupplementalExperimentEvidenceProvider(
+            new PinnedRegimeCandleSource(candles));
+
+        var accepted = await provider.EvaluateAsync(worker.UserId, definition.FamilyId, signal,
+            Pinned(selection), "{}", regime);
+        var changed = await provider.EvaluateAsync(worker.UserId, definition.FamilyId, signal,
+            Pinned(selection with { ComponentDecisionFingerprint = new string('0', 64) }), "{}", regime);
+        var stale = await provider.EvaluateAsync(worker.UserId, definition.FamilyId, signal,
+            Pinned(selection with { SignalAsOfUtc = Now.AddHours(-4) }), "{}", regime);
+
+        Assert.Equal(ExperimentAnalysisOutcome.Analyzed, accepted!.Outcome);
+        Assert.Equal(selection, accepted.SelectedComponent);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, changed!.Outcome);
+        Assert.Contains("no longer reproduces", changed.Reason, StringComparison.Ordinal);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, stale!.Outcome);
+    }
+
+    [Fact]
+    public async Task RevisedRelativeStrengthAttestsTheLaterHourNotTheFourHourSetup()
+    {
+        const string family = "platform.relative-strength-pullback-rotation";
+        const int history = ApprovedConsensusStrategyProfiles.RequiredHistory;
+        var confirmationClose = Now.AddHours(1);
+        var dailyClose = new DateTimeOffset(Now.Year, Now.Month, Now.Day, 0, 0, 0, TimeSpan.Zero);
+        ExperimentCandleSeries Series(string symbol, CandleInterval interval, DateTimeOffset close)
+        {
+            var duration = TimeSpan.FromMinutes((int)interval);
+            var candles = Enumerable.Range(0, history).Select(index =>
+            {
+                var open = close.AddTicks(duration.Ticks * (index - history));
+                var price = interval switch
+                {
+                    CandleInterval.OneDay when symbol == "XBT/EUR" => 100m + index * .04m,
+                    CandleInterval.OneDay => 100m + index * .05m
+                        + (index >= history - 5 ? (index - history + 5) * .25m : 0m),
+                    CandleInterval.FourHours when index <= 305 => 100m + index * .3m,
+                    CandleInterval.FourHours when index < 319 => 191.5m - (index - 305) * .2m,
+                    CandleInterval.FourHours => 189.1m,
+                    CandleInterval.OneHour when index == 319 => 189.4m,
+                    CandleInterval.OneHour => 189.1m - (318 - index) * .001m,
+                    _ => throw new InvalidOperationException("Unexpected relative-strength interval.")
+                };
+                var range = interval == CandleInterval.OneHour ? .1m : 1m;
+                return new Candle(symbol, interval, open, open.Add(duration),
+                    price, price + range, price - range, price, 20_000m, true, false);
+            }).ToArray();
+            return new ExperimentCandleSeries(symbol, interval, close, candles);
+        }
+
+        var setup = Series("ETH/EUR", CandleInterval.FourHours, Now);
+        var confirmed = Series("ETH/EUR", CandleInterval.OneHour, confirmationClose);
+        var daily = Series("ETH/EUR", CandleInterval.OneDay, dailyClose);
+        var benchmark = Series("XBT/EUR", CandleInterval.OneDay, dailyClose);
+        var source = new PinnedRegimeCandleSource(
+            new Dictionary<(string, CandleInterval), ExperimentCandleSeries>
+            {
+                [("ETH/EUR", CandleInterval.OneDay)] = daily,
+                [("XBT/EUR", CandleInterval.OneDay)] = benchmark,
+                [("ETH/EUR", CandleInterval.FourHours)] = setup,
+                [("ETH/EUR", CandleInterval.OneHour)] = confirmed
+            });
+        var registry = ApprovedExperimentStrategyRegistry.CreatePlatformDefault();
+        var definition = registry.ResolveDefinition(family, 5);
+        var worker = new ExperimentWorker(Guid.NewGuid(), Guid.NewGuid(),
+            "relative worker", family, "ETH/EUR", 1_000m, Now, 1);
+        worker.Start();
+        var original = Configuration(worker, definition, signalInterval: CandleInterval.FourHours)
+            .Assignments.Single().Provenance;
+        ExperimentResearchProvenance Pin(DateTimeOffset admissionClose) => new(original.Approval,
+            original.ParametersFingerprint, original.Dataset, original.Classifier,
+            original.EvidenceProvenance, original.GateEvaluation,
+            rankingUniverseSymbols: ["ETH/EUR", "XBT/EUR"],
+            admissionCloseUtc: admissionClose);
+        var pinned = Pin(confirmationClose);
+        var group = ExperimentResearchGroupConfiguration.Create(worker.UserId, 1, [worker], pinned);
+        var runner = new PaperExperimentWorkerRunner(
+            source, registry, new PlatformSupplementalExperimentEvidenceProvider(source));
+
+        var analysis = await runner.AnalyzeAsync(worker, group, group.Assignments.Single(), confirmationClose);
+        var premature = await new PlatformSupplementalExperimentEvidenceProvider(source)
+            .EvaluateAsync(worker.UserId, family, setup, Pin(Now), executionSeries:
+                Series("ETH/EUR", CandleInterval.OneHour, Now));
+        var stale = await new PlatformSupplementalExperimentEvidenceProvider(source)
+            .EvaluateAsync(worker.UserId, family, setup, Pin(Now.AddHours(4)), executionSeries:
+                Series("ETH/EUR", CandleInterval.OneHour, Now.AddHours(4)));
+        var substituted = await new PlatformSupplementalExperimentEvidenceProvider(source)
+            .EvaluateAsync(worker.UserId, family, setup, pinned, executionSeries:
+                Series("ETH/EUR", CandleInterval.OneHour, Now.AddHours(2)));
+
+        Assert.True(analysis.Outcome == ExperimentAnalysisOutcome.Analyzed, analysis.Reason);
+        Assert.True(analysis.Value > 0m, analysis.Reason);
+        Assert.Equal(CandleInterval.OneHour, analysis.Evidence!.Interval);
+        Assert.Equal(confirmationClose, analysis.Evidence.AsOfUtc);
+        Assert.Equal(confirmationClose, analysis.Evidence.CloseTimeUtc);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, premature!.Outcome);
+        Assert.Contains("strictly after", premature.Reason, StringComparison.Ordinal);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, stale!.Outcome);
+        Assert.Equal(ExperimentAnalysisOutcome.Blocked, substituted!.Outcome);
+        Assert.Contains("pinned admission", substituted.Reason, StringComparison.Ordinal);
+
+        var evidence = analysis.Evidence;
+        var decision = await new ExperimentDecisionPolicy(
+            new InMemoryExperimentDecisionLedger(), new FakeTimeProvider(confirmationClose.AddSeconds(30)))
+            .DecideAsync(worker, group, group.Assignments.Single(), analysis,
+                new ExperimentWorkerPortfolioSnapshot(worker.UserId, worker.Id, 0m, evidence.AsOfUtc),
+                new ExperimentClosedCandleIdentity(evidence.Symbol, evidence.Interval,
+                    evidence.OpenTimeUtc, evidence.CloseTimeUtc, evidence.AsOfUtc));
+        Assert.Equal(ExperimentProposalAction.Open, decision.Proposal.Action);
+    }
+
+    private sealed class PinnedRegimeCandleSource(
+        IReadOnlyDictionary<(string, CandleInterval), ExperimentCandleSeries> series)
+        : IExperimentCandleSeriesSource
+    {
+        public Task<ExperimentCandleSeriesResult> GetClosedSeriesAsync(
+            ExperimentCandleSeriesRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(series.TryGetValue((request.Symbol, request.Interval), out var result)
+                ? ExperimentCandleSeriesResult.Available(result)
+                : ExperimentCandleSeriesResult.Blocked(ExperimentCandleSeriesBlockReason.NoData));
     }
 
     private sealed class FixedUniverseCandleSource : IExperimentCandleSeriesSource

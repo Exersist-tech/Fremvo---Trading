@@ -360,15 +360,18 @@
   function buildExitRow(position) {
     var tr = document.createElement('tr');
     var td = document.createElement('td');
-    td.colSpan = 12;
+    td.colSpan = tradingMode === 'Live' ? 13 : 12;
 
     var wrap = document.createElement('div');
     wrap.className = 'toolbar';
 
     var label = document.createElement('span');
-    label.textContent = 'Protective exits for ' + position.symbol + ':';
+    label.textContent = tradingMode === 'Live'
+      ? 'Live position on ' + position.symbol + ':'
+      : 'Protective exits for ' + position.symbol + ':';
     wrap.appendChild(label);
 
+    if (tradingMode !== 'Live') {
     var stop = document.createElement('input');
     stop.type = 'number';
     stop.step = 'any';
@@ -426,17 +429,23 @@
       }
     });
     wrap.appendChild(save);
+    }
 
     var close = document.createElement('button');
     close.type = 'button';
     close.textContent = 'Close position';
     close.className = 'danger';
+    close.disabled = tradingMode === 'Live' && !position.exchangeAccountId;
     close.addEventListener('click', function () { closePosition(position, close); });
     wrap.appendChild(close);
 
     var note = document.createElement('span');
     note.className = 'empty';
-    note.textContent = 'Checked on closed candles only. A candle that reaches both levels is settled as the stop.';
+    note.textContent = tradingMode === 'Live'
+      ? (position.exchangeAccountId
+        ? 'A close submits a real limit order to this position\'s exchange account; it is not guaranteed to fill. Automated live stops are unavailable.'
+        : 'Legacy position has no account binding. Reconcile it at Kraken before placing any close.')
+      : 'Checked on closed candles only. A candle that reaches both levels is settled as the stop.';
     wrap.appendChild(note);
 
     td.appendChild(wrap);
@@ -464,7 +473,7 @@
     if (live) {
       button.disabled = true;
       try {
-        await submitLiveTrade(position.symbol, side, position.quantity);
+        await submitLiveTrade(position.symbol, side, position.quantity, position.exchangeAccountId);
       } finally {
         button.disabled = false;
       }
@@ -547,7 +556,9 @@
 
     var table = document.createElement('table');
     var head = document.createElement('tr');
-    ['Pair', 'Direction', 'Quantity', 'Entry', 'Last closed price', 'Unrealised', 'Return', 'Break even', 'Stop', 'Target', 'Priced at', 'Opened']
+    var headers = ['Pair', 'Direction', 'Quantity', 'Entry', 'Last closed price', 'Unrealised', 'Return', 'Break even', 'Stop', 'Target', 'Priced at', 'Opened'];
+    if (tradingMode === 'Live') { headers.splice(1, 0, 'Exchange account'); }
+    headers
       .forEach(function (title) {
         var th = document.createElement('th');
         th.textContent = title;
@@ -583,19 +594,27 @@
         position.pricedAtUtc ? formatTime(position.pricedAtUtc) : 'not priced',
         formatTime(position.openedAtUtc)
       ];
+      if (tradingMode === 'Live') {
+        var boundAccount = modeCapability && modeCapability.accounts &&
+          modeCapability.accounts.find(function (account) { return account.id === position.exchangeAccountId; });
+        cells.splice(1, 0, boundAccount ? boundAccount.displayName
+          : (position.exchangeAccountId || 'Unbound - reconciliation required'));
+      }
 
       cells.forEach(function (value, index) {
         var td = document.createElement('td');
         td.textContent = value === null || value === undefined ? '-' : String(value);
 
         // Colour only the two result columns, and only when a result is known.
-        if ((index === 5 || index === 6) && unrealised !== null && unrealised !== undefined) {
+        var liveColumnOffset = tradingMode === 'Live' ? 1 : 0;
+        if ((index === 5 + liveColumnOffset || index === 6 + liveColumnOffset) &&
+            unrealised !== null && unrealised !== undefined) {
           td.style.color = Number(unrealised) >= 0 ? '#3fbf6f' : '#ff6b6b';
         }
 
         // An unprotected position says so in grey rather than showing a blank
         // cell, which would read as though a level existed and was not shown.
-        if ((index === 8 || index === 9) && value === 'none') {
+        if ((index === 8 + liveColumnOffset || index === 9 + liveColumnOffset) && value === 'none') {
           td.style.color = '#9aa0a6';
         }
 
@@ -1201,6 +1220,7 @@
       // would show a trade as open that a closed candle already ended.
       var exits = tradingMode === 'Paper' ? await evaluateExits() : null;
 
+      var liveWarning = null;
       if (tradingMode === 'Paper') {
         var valued = await fetch('/api/paper/positions', { headers: { 'Accept': 'application/json' } });
         state.positions = valued.ok ? ((await valued.json()).positions || []) : [];
@@ -1209,7 +1229,9 @@
         // first. It is filtered to live positions server-side, so a paper
         // position can never appear here as though it were real.
         var liveValued = await fetch('/api/live/positions', { headers: { 'Accept': 'application/json' } });
-        state.positions = liveValued.ok ? ((await liveValued.json()).positions || []) : [];
+        var liveBook = liveValued.ok ? await liveValued.json() : null;
+        state.positions = liveBook ? (liveBook.positions || []) : [];
+        liveWarning = liveBook ? liveBook.staleWarning : 'Live positions could not be refreshed.';
       }
 
       var ordersUrl = tradingMode === 'Live'
@@ -1231,7 +1253,8 @@
         }
       }
 
-      setStatus(message, false);
+      if (liveWarning) { message += ' WARNING: ' + liveWarning; }
+      setStatus(message, !!liveWarning);
 
       draw();
       renderOverlayLegend();
@@ -1452,11 +1475,17 @@
   // venue, because a live click must not feel like a paper click. And a 202
   // answer is treated as neither success nor failure: it means the platform
   // does not know, and the one thing the user must not do is click again.
-  async function submitLiveTrade(symbol, side, quantity) {
-    var account = liveAccount();
+  async function submitLiveTrade(symbol, side, quantity, positionAccountId) {
+    var account = positionAccountId
+      ? (modeCapability && modeCapability.accounts || []).find(function (candidate) {
+        return candidate.id === positionAccountId && candidate.canReachExchange && candidate.stage !== 'Paper';
+      })
+      : liveAccount();
 
     if (!account) {
-      setTradeStatus('No promoted account can reach the exchange.', true);
+      setTradeStatus(positionAccountId
+        ? 'This position\'s exchange account is unavailable. Reconcile it at Kraken; no other account was selected.'
+        : 'No promoted account can reach the exchange.', true);
       return;
     }
 

@@ -5,14 +5,31 @@ using Trading.Domain.Experiments;
 using Trading.Domain.Execution;
 using Trading.Infrastructure.Data;
 using Trading.Infrastructure.Data.Experiments;
+using Trading.Infrastructure.Data.Audit;
 using Trading.Infrastructure.Data.MarketData;
 using Trading.MarketData.Experiments;
 using Trading.MarketData;
 using Microsoft.EntityFrameworkCore;
 using Trading.Workers.Experiments;
 using Trading.Risk;
+using Trading.Application.Entitlements;
+using Trading.Infrastructure.Data.Entitlements;
 
 var builder = Host.CreateApplicationBuilder(args);
+var telemetryConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+if (!string.IsNullOrWhiteSpace(telemetryConnection))
+{
+    builder.Services.AddApplicationInsightsTelemetryWorkerService(options =>
+    {
+        options.ConnectionString = telemetryConnection;
+        options.EnableAdaptiveSampling = false;
+    });
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(PaperHostHeartbeatWorker).FullName!, LogLevel.Information);
+    builder.Logging.AddFilter<Microsoft.Extensions.Logging.ApplicationInsights.ApplicationInsightsLoggerProvider>(
+        typeof(Worker).FullName!, LogLevel.Information);
+}
+builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
 builder.Services.Configure<ExperimentHostOptions>(
     builder.Configuration.GetSection(ExperimentHostOptions.SectionName));
@@ -32,6 +49,7 @@ builder.Services.AddSingleton<IExperimentWorkerRunner, UnconfiguredExperimentWor
 // Activation is fail-closed by default. A deployment must explicitly replace this source with a
 // durable, audited activation repository; host configuration alone can never start training.
 builder.Services.AddSingleton<IPaperTrainingActivationSource, DisabledPaperTrainingActivationSource>();
+builder.Services.AddSingleton<IPaperTrainingProtectionOwnerSource, DisabledPaperTrainingActivationSource>();
 var paperTrainingEnabled = builder.Configuration.GetValue<bool>("Experiments:PaperTraining:Enabled");
 if (paperTrainingEnabled)
 {
@@ -49,12 +67,22 @@ if (paperTrainingEnabled)
     }
 
     builder.Services.AddDbContext<TradingDbContext>(options => options.UseSqlServer(connectionString));
+    builder.Services.AddScoped<IEntitlementRepository, EfEntitlementRepository>();
+    builder.Services.AddSingleton<IPaperWorkerAdmissionLimit>(provider =>
+        new ScopedPaperWorkerAdmissionLimit(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            builder.Configuration.GetValue<bool>("Entitlements:PaperWorkerLimitsEnabled")));
+    builder.Services.AddHostedService<PaperHostSchemaReadiness>();
     builder.Services.AddScoped<EfPaperTrainingActivationRepository>();
     builder.Services.AddScoped<IPaperTrainingActivationRepository>(provider =>
         provider.GetRequiredService<EfPaperTrainingActivationRepository>());
     builder.Services.AddScoped<IPaperTrainingActivationSource>(provider =>
         provider.GetRequiredService<EfPaperTrainingActivationRepository>());
-    builder.Services.AddSingleton<IPaperTrainingActivationSource, ScopedPaperTrainingActivationSource>();
+    builder.Services.AddSingleton<ScopedPaperTrainingActivationSource>();
+    builder.Services.AddSingleton<IPaperTrainingActivationSource>(provider =>
+        provider.GetRequiredService<ScopedPaperTrainingActivationSource>());
+    builder.Services.AddSingleton<IPaperTrainingProtectionOwnerSource>(provider =>
+        provider.GetRequiredService<ScopedPaperTrainingActivationSource>());
     builder.Services.AddSingleton<IPaperTrainingActivationReader, ScopedPaperTrainingActivationReader>();
     builder.Services.AddScoped<ICandleRepository, EfCandleRepository>();
     builder.Services.AddScoped<EfExperimentWorkerRepository>();
@@ -64,6 +92,7 @@ if (paperTrainingEnabled)
     builder.Services.AddScoped<EfExperimentDecisionLedger>();
     builder.Services.AddScoped<EfExperimentPaperExecutionLedger>();
     builder.Services.AddScoped<EfExperimentPaperPlanEvidenceRepository>();
+    builder.Services.AddScoped<EfAuditEventWriter>();
     builder.Services.AddSingleton<IExperimentCandleSeriesSource, ScopedDurableCandleSource>();
     builder.Services.AddSingleton<ApprovedExperimentStrategyRegistry>(_ => ApprovedExperimentStrategyRegistry.CreatePlatformDefault());
     // Supplemental multi-input evidence is deliberately registered only on the explicit durable
@@ -77,14 +106,15 @@ if (paperTrainingEnabled)
     builder.Services.AddSingleton<IExperimentPaperExecutionLedger, ScopedPaperExecutionLedger>();
     builder.Services.AddSingleton<IExperimentPaperPlanEvidenceRepository, ScopedPaperPlanEvidenceRepository>();
     builder.Services.AddSingleton<PaperExecutionAdapter>();
-    builder.Services.AddSingleton<IMarketEventRepository, InMemoryMarketEventRepository>();
-    builder.Services.AddSingleton<IStrategyDecisionRepository, InMemoryStrategyDecisionRepository>();
-    builder.Services.AddSingleton<ITradeIntentRepository, InMemoryTradeIntentRepository>();
-    builder.Services.AddSingleton<IRiskEvaluationRepository, InMemoryRiskEvaluationRepository>();
-    builder.Services.AddSingleton<IExecutionCommandRepository, InMemoryExecutionCommandRepository>();
-    builder.Services.AddSingleton<IPortfolioUpdateRepository, InMemoryPortfolioUpdateRepository>();
-    builder.Services.AddSingleton<IAuditEventWriter, InMemoryAuditEventWriter>();
-    builder.Services.AddSingleton<ITradingHaltState, InMemoryTradingHaltState>();
+    builder.Services.AddSingleton<IMarketEventRepository, ScopedPaperMarketEvents>();
+    builder.Services.AddSingleton<IStrategyDecisionRepository, ScopedPaperStrategyDecisions>();
+    builder.Services.AddSingleton<ITradeIntentRepository, ScopedPaperTradeIntents>();
+    builder.Services.AddSingleton<IRiskEvaluationRepository, ScopedPaperRiskEvaluations>();
+    builder.Services.AddSingleton<IExecutionCommandRepository, ScopedPaperExecutionCommands>();
+    builder.Services.AddSingleton<IPaperExecutionResultRepository, ScopedPaperExecutionResults>();
+    builder.Services.AddSingleton<IPortfolioUpdateRepository, ScopedPaperPortfolioUpdates>();
+    builder.Services.AddSingleton<IAuditEventWriter, ScopedPaperTrainingAuditWriter>();
+    builder.Services.AddSingleton<ITradingHaltState, ScopedPaperTradingHaltState>();
     builder.Services.AddSingleton<OrderIdempotencyGuard>();
     builder.Services.AddSingleton<RiskEngine>();
     builder.Services.AddSingleton<TradePipeline>();
@@ -101,6 +131,7 @@ if (paperTrainingEnabled)
     builder.Services.AddSingleton<IExperimentProtectiveExitPositionSource, DurablePaperTrainingProtectiveExitPositionSource>();
     builder.Services.AddSingleton<IExperimentProtectiveExitLedger, DurablePaperTrainingProtectiveExitLedger>();
     builder.Services.AddSingleton<IExperimentProtectiveExitOwnerEvaluator, ExperimentProtectiveExitOrchestrator>();
+    builder.Services.AddHostedService<PaperHostHeartbeatWorker>();
 }
 
 // Protective exits have an independent, explicitly disabled schedule. This inert evaluator is

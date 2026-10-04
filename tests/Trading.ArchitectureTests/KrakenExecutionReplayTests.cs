@@ -456,7 +456,8 @@ public sealed class KrakenExecutionReplayTests
                 new InMemoryOrderReconciliationRepository(),
                 new SpotOrderStatusQuery(Gateway, accounts, accountId),
                 new SilentAudit(),
-                time);
+                time,
+                new PassThroughLiveFillTransaction());
         }
 
         public KrakenReplayHandler Handler { get; }

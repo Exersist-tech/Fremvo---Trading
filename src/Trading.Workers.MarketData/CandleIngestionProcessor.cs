@@ -4,11 +4,11 @@ namespace Trading.Workers.MarketData;
 
 public sealed class CandleIngestionProcessor
 {
-    private static readonly Action<ILogger, string, Trading.Domain.Market.CandleInterval, DateTimeOffset, CandleWriteResult, string, Exception?> s_logEvidence =
-        LoggerMessage.Define<string, Trading.Domain.Market.CandleInterval, DateTimeOffset, CandleWriteResult, string>(
+    private static readonly Action<ILogger, string, Trading.Domain.Market.CandleInterval, DateTimeOffset, CandleWriteResult, string, string, Exception?> s_logEvidence =
+        LoggerMessage.Define<string, Trading.Domain.Market.CandleInterval, DateTimeOffset, CandleWriteResult, string, string>(
             LogLevel.Warning,
             new EventId(1, nameof(CandleIngestionProcessor)),
-            "Candle ingestion evidence: Symbol={Symbol} Interval={Interval} OpenTime={OpenTime} WriteResult={WriteResult} QualityFlags={QualityFlags}");
+            "Candle ingestion evidence: Symbol={Symbol} Interval={Interval} OpenTime={OpenTime} WriteResult={WriteResult} QualityFlags={QualityFlags} ChangedFields={ChangedFields}");
     private readonly ICandleRepository _repository;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<CandleIngestionProcessor> _logger;
@@ -34,6 +34,19 @@ public sealed class CandleIngestionProcessor
         var sameOpenTime = await _repository.ListAsync(
                 incoming.Symbol, incoming.Interval, incoming.OpenTimeUtc, incoming.OpenTimeUtc, cancellationToken)
             .ConfigureAwait(false);
+        if (sameOpenTime.Any(existing =>
+                existing.CloseTimeUtc == incoming.CloseTimeUtc
+                && existing.Open == incoming.Open
+                && existing.High == incoming.High
+                && existing.Low == incoming.Low
+                && existing.Close == incoming.Close
+                && existing.Volume == incoming.Volume
+                && existing.IsClosed == incoming.IsClosed
+                && existing.IsDerived == incoming.IsDerived))
+        {
+            return CandleWriteResult.Duplicate;
+        }
+
         var flags = incoming.QualityFlags
             .Concat(CandleQualityEvaluator.Evaluate(
                 incoming, previous, _timeProvider.GetUtcNow(),
@@ -54,9 +67,12 @@ public sealed class CandleIngestionProcessor
         var result = await _repository.UpsertAsync(normalized, cancellationToken).ConfigureAwait(false);
         if (flags.Length != 0 || result != CandleWriteResult.Inserted)
         {
+            var storedAtOpen = sameOpenTime.SingleOrDefault();
             s_logEvidence(
                 _logger, normalized.Symbol, normalized.Interval, normalized.OpenTimeUtc, result,
-                string.Join(',', flags), null);
+                string.Join(',', flags),
+                storedAtOpen is null ? string.Empty : CandleQualityEvaluator.ChangedMarketDataFields(storedAtOpen, incoming),
+                null);
         }
 
         if (_deriveTenMinuteCandles &&

@@ -163,12 +163,23 @@ public sealed class PaperTradingService : IPaperTradingService
         _riskLimits = riskLimits ?? throw new ArgumentNullException(nameof(riskLimits));
     }
 
+    public Task<PaperTradeResult> SubmitAsync(
+        Guid userId,
+        string symbol,
+        OrderSide side,
+        decimal quantity,
+        string? clientOrderId,
+        CancellationToken cancellationToken = default) =>
+        SubmitAsync(userId, symbol, side, quantity, clientOrderId, null, null, cancellationToken);
+
     public async Task<PaperTradeResult> SubmitAsync(
         Guid userId,
         string symbol,
         OrderSide side,
         decimal quantity,
         string? clientOrderId,
+        decimal? stopLossPrice,
+        decimal? takeProfitPrice,
         CancellationToken cancellationToken = default)
     {
         if (userId == Guid.Empty)
@@ -202,6 +213,13 @@ public sealed class PaperTradingService : IPaperTradingService
 
         var existing = await FindOpenPositionAsync(userId, trimmedSymbol, cancellationToken).ConfigureAwait(false);
         var isReducing = existing is not null && IsOpposite(existing.Direction, side);
+
+        if (existing is null && side == OrderSide.Sell)
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                "Spot paper trading cannot open a short position. Sell is allowed only to reduce an existing position.");
+        }
 
         if (flags.IsAnyHalt)
         {
@@ -311,6 +329,20 @@ public sealed class PaperTradingService : IPaperTradingService
                 "Reducing by more than the open quantity would open a position in the opposite direction. Close the position first.");
         }
 
+        if (existing is not null && (stopLossPrice.HasValue || takeProfitPrice.HasValue))
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                "Set protective exits on an existing position through the position-exits endpoint.");
+        }
+
+        if (!AreValidLongProtectiveExits(stopLossPrice, takeProfitPrice, fillPrice))
+        {
+            return PaperTradeResult.Failure(
+                PaperTradeOutcome.Rejected,
+                "Protective stop and target prices must be positive, with the stop below and target above the simulated entry price.");
+        }
+
         var order = new Order(
             Guid.NewGuid(),
             userId,
@@ -348,13 +380,16 @@ public sealed class PaperTradingService : IPaperTradingService
                 fillPrice,
                 now);
 
+            if (stopLossPrice.HasValue || takeProfitPrice.HasValue)
+                position.SetProtectiveExits(stopLossPrice, takeProfitPrice, now);
             await _positions.AddAsync(position, cancellationToken).ConfigureAwait(false);
         }
         else
         {
+            var expectedVersion = existing.Version;
             existing.Reduce(quantity);
             existing.UpdateMarkPrice(fillPrice);
-            await _positions.UpdateAsync(existing, cancellationToken).ConfigureAwait(false);
+            await _positions.UpdateAsync(existing, expectedVersion, cancellationToken).ConfigureAwait(false);
             position = existing;
         }
 
@@ -367,7 +402,9 @@ public sealed class PaperTradingService : IPaperTradingService
                 targetId: order.Id.ToString("D", CultureInfo.InvariantCulture),
                 occurredAtUtc: now,
                 before: null,
-                after: $"Simulated {side} of {quantity.ToString(CultureInfo.InvariantCulture)} {trimmedSymbol} at {fillPrice.ToString(CultureInfo.InvariantCulture)}. No exchange was contacted and no real funds moved.",
+                after: string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Simulated {side} of {quantity} {trimmedSymbol} at {fillPrice}. Protective stop {position.StopLossPrice?.ToString(CultureInfo.InvariantCulture) ?? "not set"}, target {position.TakeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "not set"}. No exchange was contacted and no real funds moved."),
                 correlationId: context.CorrelationId),
             cancellationToken).ConfigureAwait(false);
 
@@ -386,6 +423,13 @@ public sealed class PaperTradingService : IPaperTradingService
     private static bool IsOpposite(PositionDirection direction, OrderSide side) =>
         (direction == PositionDirection.DirectionLong && side == OrderSide.Sell)
         || (direction == PositionDirection.DirectionShort && side == OrderSide.Buy);
+
+    private static bool AreValidLongProtectiveExits(
+        decimal? stopLossPrice,
+        decimal? takeProfitPrice,
+        decimal entryPrice) =>
+        (!stopLossPrice.HasValue || stopLossPrice.Value > 0m && stopLossPrice.Value < entryPrice)
+        && (!takeProfitPrice.HasValue || takeProfitPrice.Value > entryPrice);
 
     private async Task<Position?> FindOpenPositionAsync(
         Guid userId,

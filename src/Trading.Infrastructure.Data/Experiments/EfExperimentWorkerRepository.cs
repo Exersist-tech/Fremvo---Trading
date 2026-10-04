@@ -47,7 +47,8 @@ public sealed class EfExperimentWorkerRepository : IExperimentWorkerRepository, 
         if (page < 0 || page > 10_000 || pageSize is < 1 or > 100)
             throw new ArgumentOutOfRangeException(nameof(page));
         return (await Query(userId)
-                .Where(worker => worker.Status == (int)ExperimentWorkerStatus.Completed
+                .Where(worker => (worker.Status == (int)ExperimentWorkerStatus.Completed
+                        || worker.Status == (int)ExperimentWorkerStatus.Failed)
                     && worker.LedgerEntries.Any(entry => entry.Direction == "buy")
                     && worker.LedgerEntries.Any(entry => entry.Direction == "sell"))
                 .OrderByDescending(worker => worker.LedgerEntries.Max(entry => entry.OccurredAtUtc))

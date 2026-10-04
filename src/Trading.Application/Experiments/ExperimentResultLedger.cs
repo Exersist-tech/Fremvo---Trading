@@ -95,7 +95,8 @@ public sealed record ExperimentClosedTradeResult(
     int Additions,
     decimal StartingCash,
     decimal EndingCash,
-    string? ExitReason);
+    string? ExitReason,
+    decimal AverageBuyFillPrice);
 
 public static class ExperimentClosedTradeResultFactory
 {
@@ -112,12 +113,12 @@ public static class ExperimentClosedTradeResultFactory
         var sells = ordered
             .Where(entry => entry.Direction.Equals("sell", StringComparison.OrdinalIgnoreCase))
             .ToArray();
-        if (worker.Status != ExperimentWorkerStatus.Completed
+        if (worker.Status is not (ExperimentWorkerStatus.Completed or ExperimentWorkerStatus.Failed)
             || worker.PositionQuantity != 0m
             || buys.Length == 0
             || sells.Length == 0)
         {
-            throw new InvalidOperationException("A closed-trade result requires a completed, flat worker with BUY and SELL fills.");
+            throw new InvalidOperationException("A closed-trade result requires a completed or failed flat worker with BUY and SELL fills.");
         }
 
         var boughtQuantity = buys.Sum(entry => entry.Quantity);
@@ -159,7 +160,8 @@ public static class ExperimentClosedTradeResultFactory
             Math.Max(0, buys.Length - 1),
             worker.StartingCash,
             worker.CashBalance,
-            string.IsNullOrWhiteSpace(exitReason) ? null : exitReason.Trim());
+            string.IsNullOrWhiteSpace(exitReason) ? null : exitReason.Trim(),
+            buyNotional / boughtQuantity);
     }
 }
 

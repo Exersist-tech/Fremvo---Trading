@@ -1,0 +1,59 @@
+@page "/workspace"
+@page "/workspace/{Section}"
+@attribute [Authorize]
+@implements IAsyncDisposable
+@inject IJSRuntime JavaScript
+@inject IWebHostEnvironment WebHostEnvironment
+
+<main class="workspace-page @(string.Equals(Section, "trade", StringComparison.OrdinalIgnoreCase) ? "workspace-trade-page" : "")">
+    <div class="workspace-content" @ref="_content">
+        <p class="loading-state">Loading private trading workspace…</p>
+    </div>
+</main>
+
+@code {
+    [Parameter]
+    public string? Section { get; set; }
+
+    private ElementReference _content;
+    private IJSObjectReference? _module;
+    private string? _mountedSection;
+    private DateTimeOffset _moduleLastModified;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var script = WebHostEnvironment.WebRootFileProvider.GetFileInfo("workspace.js");
+        if (!script.Exists)
+            throw new FileNotFoundException("The workspace script is unavailable.");
+        var changed = _module is null || _moduleLastModified != script.LastModified;
+        if (changed)
+        {
+            if (_module is not null)
+                await _module.DisposeAsync();
+            _module = await JavaScript.InvokeAsync<IJSObjectReference>(
+                "import", $"/workspace.js?v={script.LastModified.UtcTicks}");
+            _moduleLastModified = script.LastModified;
+        }
+        var section = string.IsNullOrWhiteSpace(Section) ? "overview" : Section;
+        if (changed || firstRender || !string.Equals(_mountedSection, section, StringComparison.OrdinalIgnoreCase))
+        {
+            _mountedSection = section;
+            var module = _module ?? throw new InvalidOperationException("The workspace script could not be loaded.");
+            await module.InvokeVoidAsync("mount", _content, section);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_module is null)
+            return;
+
+        try
+        {
+            await _module.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+}

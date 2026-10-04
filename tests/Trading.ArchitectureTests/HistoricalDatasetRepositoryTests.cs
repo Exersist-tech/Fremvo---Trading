@@ -86,6 +86,36 @@ public sealed class HistoricalDatasetRepositoryTests
     }
 
     [Fact]
+    public async Task ReadsRejectAStoredManifestWhoseContentAddressDoesNotMatchAsync()
+    {
+        await using var context = CreateContext();
+        var original = CreateDataset();
+        var corrupted = new PersistedHistoricalDataset
+        {
+            VersionIdentity = original.VersionIdentity,
+            Id = original.Id,
+            Source = original.Source,
+            Symbol = "ETH/USD",
+            Interval = original.Interval,
+            FromUtc = original.FromUtc,
+            ToUtc = original.ToUtc,
+            CandleCount = original.CandleCount,
+            ContentFingerprint = original.ContentFingerprint,
+            SourceVersion = original.SourceVersion,
+            CreatedAtUtc = original.CreatedAtUtc,
+            ContainsOnlyClosedCandles = original.ContainsOnlyClosedCandles
+        };
+        context.HistoricalDatasets.Add(corrupted);
+        await context.SaveChangesAsync();
+        var repository = new EfHistoricalDatasetRepository(context);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.GetAsync(original.VersionIdentity));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repository.ListAsync("ETH/USD", "1h", At(0), At(0), 10));
+    }
+
+    [Fact]
     public void MappingUsesContentAddressedKeyAndNoOwnershipOrSecretColumns()
     {
         using var context = new TradingDbContext(
